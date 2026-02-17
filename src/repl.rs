@@ -133,7 +133,7 @@ impl Command {
 
 #[cfg(test)]
 mod test {
-    use crate::repl::{Command, REPL, RunArgs};
+    use crate::repl::{Command, RunArgs, REPL};
 
     #[test]
     fn it_works() {
@@ -148,7 +148,7 @@ mod test {
 
         assert_eq!(
             res,
-            "Cargo.lock\nCargo.toml\nREADME.md\nsrc\ntarget\n".to_string()
+            "AGENTICA_IDEAS.md\nCargo.lock\nCargo.toml\nREADME.md\nsrc\ntarget\n".to_string()
         );
     }
 }
