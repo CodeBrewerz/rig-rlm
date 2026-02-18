@@ -57,8 +57,8 @@ impl Generation {
             };
         }
 
-        // Extract code blocks
-        let code = Self::extract_code_block(trimmed);
+        // Extract ALL code blocks and concatenate them
+        let code = Self::extract_all_code_blocks(trimmed);
 
         Self {
             raw: raw.to_string(),
@@ -69,23 +69,73 @@ impl Generation {
         }
     }
 
-    /// Extract code from ```repl or ```python fenced blocks.
-    fn extract_code_block(text: &str) -> Option<String> {
-        // Try ```repl first, then ```python, then generic ```
-        for lang in &["```repl", "```python", "```py", "```"] {
-            if let Some(start) = text.find(lang) {
-                let code_start = start + lang.len();
-                // Skip to next line after the opening fence
-                let code_start = text[code_start..]
-                    .find('\n')
-                    .map(|i| code_start + i + 1)
-                    .unwrap_or(code_start);
+    /// Extract ALL code blocks from ```repl, ```python, or ``` fences
+    /// and concatenate them into a single script.
+    ///
+    /// This allows the LLM to write multiple code blocks in one response
+    /// (e.g., call API → parse response → call next API) and have them
+    /// all execute together in a single Python context.
+    fn extract_all_code_blocks(text: &str) -> Option<String> {
+        let mut blocks = Vec::new();
+        let mut search_from = 0;
 
-                if let Some(end) = text[code_start..].find("\n```") {
-                    let code = text[code_start..code_start + end].trim().to_string();
-                    if !code.is_empty() {
-                        return Some(code);
+        while search_from < text.len() {
+            let remaining = &text[search_from..];
+
+            // Find the next code fence opening
+            let mut best_match: Option<(usize, usize)> = None; // (abs_start, fence_len)
+            for lang in &["```repl", "```python", "```py"] {
+                if let Some(rel_pos) = remaining.find(lang) {
+                    let abs_pos = search_from + rel_pos;
+                    if best_match.is_none() || abs_pos < best_match.unwrap().0 {
+                        best_match = Some((abs_pos, lang.len()));
                     }
+                }
+            }
+
+            let (fence_start, fence_len) = match best_match {
+                Some(m) => m,
+                None => break,
+            };
+
+            // Skip to next line after the opening fence
+            let code_start = match text[fence_start + fence_len..].find('\n') {
+                Some(i) => fence_start + fence_len + i + 1,
+                None => break,
+            };
+
+            // Find closing fence
+            let code_end = match text[code_start..].find("\n```") {
+                Some(i) => code_start + i,
+                None => break,
+            };
+
+            let code = text[code_start..code_end].trim();
+            if !code.is_empty() {
+                blocks.push(code.to_string());
+            }
+
+            // Move past the closing fence
+            search_from = code_end + 4; // skip past "\n```"
+        }
+
+        if blocks.is_empty() {
+            // Fallback: try generic ``` blocks (but only first, to avoid
+            // matching output blocks)
+            Self::extract_single_generic_block(text)
+        } else {
+            Some(blocks.join("\n\n"))
+        }
+    }
+
+    /// Fallback: extract a single generic ``` block (no language tag).
+    fn extract_single_generic_block(text: &str) -> Option<String> {
+        if let Some(start) = text.find("```\n") {
+            let code_start = start + 4;
+            if let Some(end) = text[code_start..].find("\n```") {
+                let code = text[code_start..code_start + end].trim().to_string();
+                if !code.is_empty() {
+                    return Some(code);
                 }
             }
         }
@@ -125,16 +175,13 @@ impl ErrorGuidance {
          1. Python code in ```repl blocks to work on the task\n\
          2. FINAL <answer> if you have completed the task";
 
-    pub const MISSING_CODE: &'static str =
-        "No code block found in your response. To execute code, \
+    pub const MISSING_CODE: &'static str = "No code block found in your response. To execute code, \
          wrap it in ```repl ... ``` blocks. To give a final answer, \
          use FINAL <your answer>.";
 
-    pub const EXECUTION_ERROR: &'static str =
-        "Your code raised an error. Please review the traceback above, \
+    pub const EXECUTION_ERROR: &'static str = "Your code raised an error. Please review the traceback above, \
          fix the issue, and try again with corrected code in ```repl blocks.";
 
-    pub const MULTIPLE_CODE_BLOCKS: &'static str =
-        "Multiple code blocks detected. Only the first code block will \
+    pub const MULTIPLE_CODE_BLOCKS: &'static str = "Multiple code blocks detected. Only the first code block will \
          be executed. Please combine your code into a single ```repl block.";
 }

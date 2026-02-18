@@ -10,17 +10,17 @@
 
 use std::collections::HashMap;
 
-use tracing::{debug, info, warn, error as tracing_error};
+use tracing::{debug, error as tracing_error, info, warn};
 
 use super::action::{Action, ActionOutput, LogLevel, Role};
 use super::capabilities::Capabilities;
 use super::error::{AgentError, Result};
+use super::history::{ConversationHistory, HistoryMessage};
 use super::interaction::agent_task;
 use super::monad::AgentMonad;
-use super::history::{ConversationHistory, HistoryMessage};
 use super::provider::{LlmProvider, ProviderConfig};
-use crate::safety::{ExecutionLimits, validate_code, sanitize_output};
-use crate::sandbox::{CodeExecutor, Pyo3CodeExecutor, ExecutorKind, create_executor};
+use crate::safety::{ExecutionLimits, sanitize_output, validate_code};
+use crate::sandbox::{CodeExecutor, ExecutorKind, Pyo3CodeExecutor, create_executor};
 use crate::session::SessionConfig;
 
 /// Configuration for the agent context.
@@ -86,7 +86,8 @@ impl AgentConfig {
     /// Enable sub-LLM bridging (llm_query() callable from sandbox).
     /// Automatically uses the agent's own provider config for the bridge.
     pub fn with_sub_llm(mut self) -> Self {
-        self.session = self.session
+        self.session = self
+            .session
             .with_sub_llm()
             .with_provider(self.provider.clone());
         self
@@ -146,6 +147,8 @@ pub struct AgentContext {
     pub parent_id: Option<String>,
     /// Execution counter (for safety limit enforcement).
     execution_count: usize,
+    /// Optional shared sandbox pool for multi-agent execution.
+    pub sandbox_pool: Option<std::sync::Arc<crate::sandbox::SandboxPool>>,
 }
 
 impl AgentContext {
@@ -166,6 +169,7 @@ impl AgentContext {
             agent_id: uuid::Uuid::new_v4().to_string(),
             parent_id: None,
             execution_count: 0,
+            sandbox_pool: None,
         }
     }
 
@@ -185,7 +189,34 @@ impl AgentContext {
             agent_id: uuid::Uuid::new_v4().to_string(),
             parent_id: None,
             execution_count: 0,
+            sandbox_pool: None,
         })
+    }
+
+    /// Create a context with a pre-built executor.
+    ///
+    /// Used for pool-backed multi-agent execution: the caller checks out
+    /// an executor from the `SandboxPool`, passes it here, runs the agent,
+    /// then returns the executor to the pool.
+    pub fn new_with_executor(
+        config: AgentConfig,
+        executor: Box<dyn CodeExecutor>,
+        pool: Option<std::sync::Arc<crate::sandbox::SandboxPool>>,
+    ) -> Self {
+        let provider = LlmProvider::new(config.provider.clone());
+        Self {
+            history: ConversationHistory::new(),
+            variables: HashMap::new(),
+            provider,
+            executor,
+            config,
+            turn: 0,
+            session_ready: false,
+            agent_id: uuid::Uuid::new_v4().to_string(),
+            parent_id: None,
+            execution_count: 0,
+            sandbox_pool: pool,
+        }
     }
 
     /// Create a context with default config (local LLM).
@@ -198,6 +229,14 @@ impl AgentContext {
         Self::new(AgentConfig::openai(model, api_key))
     }
 
+    /// Shutdown the executor and release all resources.
+    ///
+    /// MUST be called after agent execution completes to clean up
+    /// microsandbox VMs. No-op for PyO3 executor.
+    pub async fn shutdown(&mut self) -> anyhow::Result<()> {
+        self.executor.shutdown().await
+    }
+
     /// Get the current turn count.
     pub fn turn_count(&self) -> usize {
         self.turn
@@ -206,7 +245,9 @@ impl AgentContext {
     /// Ensure the session is set up (SUBMIT injected, prelude run, etc.).
     async fn ensure_session(&mut self) -> Result<()> {
         if !self.session_ready {
-            self.executor.setup(&self.config.session).await
+            self.executor
+                .setup(&self.config.session)
+                .await
                 .map_err(|e| AgentError::Execution(format!("session setup: {e}")))?;
             self.session_ready = true;
         }
@@ -258,16 +299,15 @@ impl AgentContext {
             Action::Log { .. } => "Log",
             Action::SpawnSubAgent { .. } => "SpawnSubAgent",
         };
-        self.config.capabilities.check_action(action_name)
+        self.config
+            .capabilities
+            .check_action(action_name)
             .map_err(|reason| AgentError::PermissionDenied(reason))?;
 
         match action {
             Action::Insert { role, content } => {
                 debug!(role = %role, len = content.len(), "inserting message");
-                self.history.push(HistoryMessage {
-                    role,
-                    content,
-                });
+                self.history.push(HistoryMessage { role, content });
                 Ok(ActionOutput::Unit)
             }
 
@@ -295,13 +335,19 @@ impl AgentContext {
                 if self.execution_count > self.config.safety.max_total_executions {
                     return Err(AgentError::SafetyViolation(format!(
                         "execution limit reached: {}/{}",
-                        self.execution_count,
-                        self.config.safety.max_total_executions
+                        self.execution_count, self.config.safety.max_total_executions
                     )));
                 }
 
-                debug!(len = source.len(), exec_count = self.execution_count, "executing code in persistent REPL");
-                let result = self.executor.execute(&source).await
+                debug!(
+                    len = source.len(),
+                    exec_count = self.execution_count,
+                    "executing code in persistent REPL"
+                );
+                let result = self
+                    .executor
+                    .execute(&source)
+                    .await
                     .map_err(|e| AgentError::Execution(e.to_string()))?;
 
                 // Phase 12: sanitize output
@@ -327,12 +373,10 @@ impl AgentContext {
                 Ok(ActionOutput::Unit)
             }
 
-            Action::Retrieve { name } => {
-                match self.variables.get(&name) {
-                    Some(value) => Ok(ActionOutput::Value(value.clone())),
-                    None => Err(AgentError::VariableNotFound(name)),
-                }
-            }
+            Action::Retrieve { name } => match self.variables.get(&name) {
+                Some(value) => Ok(ActionOutput::Value(value.clone())),
+                None => Err(AgentError::VariableNotFound(name)),
+            },
 
             Action::Log { level, message } => {
                 match level {
@@ -361,15 +405,58 @@ impl AgentContext {
                     safety: ExecutionLimits::standard(),
                 };
 
-                let mut child_ctx = AgentContext::new(child_config);
-                child_ctx.parent_id = Some(self.agent_id.clone());
+                // Use pool if available, otherwise create executor matching parent's kind
+                let mut child_ctx = match &self.sandbox_pool {
+                    Some(pool) => {
+                        // Checkout a sandbox from the shared pool
+                        match pool.checkout().await {
+                            Ok(executor) => {
+                                let mut ctx = AgentContext::new_with_executor(
+                                    child_config,
+                                    Box::new(executor),
+                                    Some(pool.clone()),
+                                );
+                                ctx.parent_id = Some(self.agent_id.clone());
+                                ctx
+                            }
+                            Err(e) => {
+                                warn!("Pool checkout failed, falling back to create_executor: {e}");
+                                let executor = create_executor(&child_config.executor_kind)
+                                    .await
+                                    .map_err(|e| {
+                                    AgentError::Internal(format!("executor creation failed: {e}"))
+                                })?;
+                                let mut ctx =
+                                    AgentContext::new_with_executor(child_config, executor, None);
+                                ctx.parent_id = Some(self.agent_id.clone());
+                                ctx
+                            }
+                        }
+                    }
+                    None => {
+                        // No pool — create executor based on config
+                        let executor =
+                            create_executor(&child_config.executor_kind)
+                                .await
+                                .map_err(|e| {
+                                    AgentError::Internal(format!("executor creation failed: {e}"))
+                                })?;
+                        let mut ctx = AgentContext::new_with_executor(child_config, executor, None);
+                        ctx.parent_id = Some(self.agent_id.clone());
+                        ctx
+                    }
+                };
 
                 let computation = agent_task(&task);
                 // Box::pin breaks the recursive async type cycle
-                let result = Box::pin(child_ctx.run(computation)).await
-                    .map_err(|e| AgentError::Internal(
-                        format!("sub-agent failed: {e}")
-                    ))?;
+                let result = Box::pin(child_ctx.run(computation))
+                    .await
+                    .map_err(|e| AgentError::Internal(format!("sub-agent failed: {e}")))?;
+
+                // Shutdown the child executor (stops VM if microsandbox)
+                if let Err(e) = child_ctx.shutdown().await {
+                    warn!("Failed to shutdown sub-agent executor: {e}");
+                }
 
                 Ok(ActionOutput::Value(result))
             }

@@ -1,2 +1,5 @@
 /target
 .envrc
+.env
+agent.db
+agent.db-wal

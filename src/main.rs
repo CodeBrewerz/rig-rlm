@@ -7,10 +7,10 @@
 //!   cargo run -- optimize --trainset examples.json
 //!   cargo run -- e2e-test
 
+use chrono::Utc;
 use clap::{Parser, Subcommand};
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{EnvFilter, fmt::Layer, layer::SubscriberExt, util::SubscriberInitExt};
-use chrono::Utc;
 use uuid::Uuid;
 
 // Existing modules
@@ -22,25 +22,25 @@ pub mod repl;
 pub mod monad;
 
 // DSRs integration (Phases 13-16)
-pub mod signature;
-pub mod agent_module;
 pub mod agent_metric;
+pub mod agent_module;
+pub mod signature;
 
 // Infrastructure (Phases 22-26)
-pub mod persistence;
-pub mod sandbox;
-pub mod session;
 pub mod chunking;
+pub mod persistence;
 pub mod pipeline;
 pub mod safety;
+pub mod sandbox;
+pub mod session;
 
 // ARC-AGI Benchmark (Phases 18-21)
 pub mod arc;
 
-use crate::monad::{AgentConfig, AgentContext, AgentMonad, Role};
 use crate::monad::interaction::agent_task;
-use crate::sandbox::{CodeExecutor, ExecutorKind, create_executor};
+use crate::monad::{AgentConfig, AgentContext, AgentMonad, Role};
 use crate::persistence::{AgentStore, Session, Turn};
+use crate::sandbox::{ExecutorKind, create_executor};
 
 #[derive(Parser)]
 #[command(name = "rig-rlm", about = "Monadic AI agent with DSRs optimization")]
@@ -64,7 +64,7 @@ enum Commands {
         #[arg(long, default_value = "agent.db")]
         db: String,
 
-        /// LLM model to use.
+        /// LLM model to use (or set RIG_RLM_MODEL in .env).
         #[arg(long, default_value = "gpt-4o")]
         model: String,
 
@@ -135,10 +135,16 @@ enum Commands {
         #[arg(long, default_value_t = 10)]
         iterations: usize,
     },
+
+    /// Stop all lingering microsandbox VMs.
+    Cleanup,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Load .env file (silently ignored if missing)
+    dotenvy::dotenv().ok();
+
     // Initialize tracing
     tracing_subscriber::registry()
         .with(
@@ -152,20 +158,48 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { task, executor, db, model, max_turns } => {
+        Commands::Run {
+            task,
+            executor,
+            db,
+            model,
+            max_turns,
+        } => {
             run_agent(&task, &executor, &db, &model, max_turns).await?;
         }
         Commands::E2eTest { executor, db } => {
             run_e2e_test(&executor, &db).await?;
         }
-        Commands::Optimize { trainset, iterations, db } => {
+        Commands::Optimize {
+            trainset,
+            iterations,
+            db,
+        } => {
             run_optimization(&trainset, iterations, &db).await?;
         }
         Commands::Summary { db, session } => {
             show_summary(&db, &session).await?;
         }
-        Commands::ArcBench { dataset, model, optimize, train_split, max_tasks, iterations } => {
-            run_arc_benchmark(&dataset, &model, optimize, train_split, max_tasks, iterations).await?;
+        Commands::ArcBench {
+            dataset,
+            model,
+            optimize,
+            train_split,
+            max_tasks,
+            iterations,
+        } => {
+            run_arc_benchmark(
+                &dataset,
+                &model,
+                optimize,
+                train_split,
+                max_tasks,
+                iterations,
+            )
+            .await?;
+        }
+        Commands::Cleanup => {
+            run_cleanup().await?;
         }
     }
 
@@ -206,11 +240,45 @@ async fn run_agent(
     };
     store.create_session(&session).await?;
 
-    // 3. Build and run the monadic agent
-    let mut ctx = AgentContext::new(AgentConfig {
+    // 3. Build provider config from env + CLI args
+    let model = std::env::var("RIG_RLM_MODEL").unwrap_or_else(|_| model.to_string());
+    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+    let base_url = std::env::var("OPENAI_BASE_URL")
+        .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+
+    let provider = if api_key.is_empty() {
+        println!("🏠 No OPENAI_API_KEY set — using local LLM at localhost:1234");
+        crate::monad::provider::ProviderConfig::local(model)
+    } else {
+        println!("🔑 Using API key with base URL: {base_url}");
+        crate::monad::provider::ProviderConfig::openai_compatible(
+            "openai", model, &base_url, &api_key,
+        )
+    };
+
+    let executor_kind = match executor_name {
+        "microsandbox" => crate::sandbox::ExecutorKind::Microsandbox,
+        _ => crate::sandbox::ExecutorKind::Pyo3,
+    };
+
+    // 4. Build and run the monadic agent
+    // For microsandbox: create a pool so sub-agents can share VMs
+    let agent_config = AgentConfig {
         max_turns,
+        provider,
+        executor_kind: executor_kind.clone(),
         ..AgentConfig::default()
-    });
+    };
+
+    let mut ctx = match &executor_kind {
+        crate::sandbox::ExecutorKind::Microsandbox => {
+            let pool = std::sync::Arc::new(crate::sandbox::SandboxPool::new(4, 1, None).await?);
+            let executor = pool.checkout().await?;
+            let ctx = AgentContext::new_with_executor(agent_config, Box::new(executor), Some(pool));
+            ctx
+        }
+        _ => AgentContext::new_async(agent_config).await?,
+    };
 
     let program = agent_task(task);
     let result = ctx.run(program).await;
@@ -222,27 +290,122 @@ async fn run_agent(
             println!("  {answer}");
             println!("═══════════════════════════════════════════");
 
-            // Persist turns
+            // Print full conversation replay
+            println!("\n📜 Conversation Replay ({} turns):", ctx.history.len());
+            println!("{}", "─".repeat(60));
             for (i, msg) in ctx.history.messages().iter().enumerate() {
-                store.record_turn(&Turn {
-                    session_id: session_id.clone(),
-                    turn_num: i as i32,
-                    role: format!("{:?}", msg.role),
-                    content: msg.content.clone(),
-                    code: None,
-                    exec_stdout: None,
-                    exec_stderr: None,
-                    exec_return: None,
-                    timestamp_ms: Utc::now().timestamp_millis(),
-                }).await?;
+                let role_icon = match format!("{:?}", msg.role).as_str() {
+                    "System" => "🔧",
+                    "User" => "👤",
+                    "Assistant" => "🤖",
+                    "Execution" => "⚡",
+                    _ => "  ",
+                };
+                println!("{role_icon} Turn {} [{:?}]:", i, msg.role);
+                // Truncate system prompt for readability
+                if msg.role == Role::System && msg.content.len() > 100 {
+                    println!("   {}...", &msg.content[..100]);
+                } else {
+                    for line in msg.content.lines() {
+                        println!("   {line}");
+                    }
+                }
+                println!("{}", "─".repeat(60));
             }
 
-            store.finish_session(&session_id, Some(&answer), None).await?;
+            // Persist turns
+            for (i, msg) in ctx.history.messages().iter().enumerate() {
+                store
+                    .record_turn(&Turn {
+                        session_id: session_id.clone(),
+                        turn_num: i as i32,
+                        role: format!("{:?}", msg.role),
+                        content: msg.content.clone(),
+                        code: None,
+                        exec_stdout: None,
+                        exec_stderr: None,
+                        exec_return: None,
+                        timestamp_ms: Utc::now().timestamp_millis(),
+                    })
+                    .await?;
+            }
+
+            store
+                .finish_session(&session_id, Some(&answer), None)
+                .await?;
             println!("\n📦 Session {session_id} saved to {db_path}");
         }
         Err(e) => {
             eprintln!("\n❌ Agent error: {e}");
             store.finish_session(&session_id, None, None).await?;
+        }
+    }
+
+    // Always shutdown the executor to clean up microsandbox VMs
+    if let Err(e) = ctx.shutdown().await {
+        tracing::warn!("Failed to shutdown executor: {e}");
+    }
+
+    Ok(())
+}
+
+/// Stop all lingering microsandbox VMs with names starting with "rlm-".
+///
+/// Uses the `msb` CLI to discover and stop orphaned sandboxes.
+async fn run_cleanup() -> anyhow::Result<()> {
+    println!("🧹 Cleaning up lingering microsandbox VMs...\n");
+
+    // Use msb CLI to list running sandboxes
+    let output = std::process::Command::new("msb")
+        .args(["list", "--format", "json"])
+        .output();
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            // Try to parse JSON output; fall back to line-based parsing
+            let mut stopped = 0;
+            let mut skipped = 0;
+
+            // Attempt line-based discovery: look for sandbox names starting with "rlm-"
+            // msb list output format varies, so we search for our naming pattern
+            for line in stdout.lines() {
+                let trimmed = line.trim();
+                // Look for sandbox names matching our pattern
+                if let Some(name) = trimmed.split_whitespace().next() {
+                    if name.starts_with("rlm-") {
+                        print!("  Stopping {name}... ");
+                        let stop_result = std::process::Command::new("msb")
+                            .args(["stop", name])
+                            .output();
+                        match stop_result {
+                            Ok(r) if r.status.success() => {
+                                println!("✅");
+                                stopped += 1;
+                            }
+                            Ok(r) => {
+                                println!("⚠️  {}", String::from_utf8_lossy(&r.stderr).trim());
+                                skipped += 1;
+                            }
+                            Err(e) => {
+                                println!("❌ {e}");
+                                skipped += 1;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if stopped == 0 && skipped == 0 {
+                println!("  No lingering rlm-* sandboxes found. All clean! ✨");
+            } else {
+                println!("\n  Stopped: {stopped}, Skipped: {skipped}");
+            }
+        }
+        Err(e) => {
+            println!("⚠️  Could not run `msb list`: {e}");
+            println!("  Make sure microsandbox CLI is installed and in PATH.");
+            println!("  Install: curl -sSL https://get.microsandbox.dev | sh");
         }
     }
 
@@ -272,18 +435,22 @@ async fn run_e2e_test(executor_name: &str, db_path: &str) -> anyhow::Result<()> 
         score: None,
     };
     store.create_session(&session).await?;
-    store.record_turn(&Turn {
-        session_id: session_id.clone(),
-        turn_num: 0,
-        role: "system".to_string(),
-        content: "You are a test agent.".to_string(),
-        code: None,
-        exec_stdout: None,
-        exec_stderr: None,
-        exec_return: None,
-        timestamp_ms: Utc::now().timestamp_millis(),
-    }).await?;
-    store.finish_session(&session_id, Some("test passed"), Some(1.0)).await?;
+    store
+        .record_turn(&Turn {
+            session_id: session_id.clone(),
+            turn_num: 0,
+            role: "system".to_string(),
+            content: "You are a test agent.".to_string(),
+            code: None,
+            exec_stdout: None,
+            exec_stderr: None,
+            exec_return: None,
+            timestamp_ms: Utc::now().timestamp_millis(),
+        })
+        .await?;
+    store
+        .finish_session(&session_id, Some("test passed"), Some(1.0))
+        .await?;
     println!("  ✅ Turso: session created, turn recorded, session finished");
 
     // 2. Test code executor
@@ -345,9 +512,9 @@ async fn run_optimization(
     iterations: usize,
     _db_path: &str,
 ) -> anyhow::Result<()> {
-    use dspy_rs::*;
     use crate::agent_module::AgentModule;
     use crate::monad::provider::ProviderConfig;
+    use dspy_rs::*;
 
     println!("═══════════════════════════════════════════");
     println!("  GEPA Optimization");
@@ -405,7 +572,10 @@ async fn run_optimization(
 
     // 3. Build the agent module
     let seed_instruction = crate::signature::CodeGenAgent::new().instruction();
-    println!("📝 Seed instruction: {}", &seed_instruction[..seed_instruction.len().min(80)]);
+    println!(
+        "📝 Seed instruction: {}",
+        &seed_instruction[..seed_instruction.len().min(80)]
+    );
 
     let mut module = AgentModule::new(&seed_instruction, provider_config);
 
@@ -426,8 +596,14 @@ async fn run_optimization(
     println!("\n═══════════════════════════════════════════");
     println!("  Optimization Results");
     println!("═══════════════════════════════════════════\n");
-    println!("🏆 Best score: {:.3}", report.best_candidate.average_score());
-    println!("📝 Optimized instruction:\n{}", report.best_candidate.instruction);
+    println!(
+        "🏆 Best score: {:.3}",
+        report.best_candidate.average_score()
+    );
+    println!(
+        "📝 Optimized instruction:\n{}",
+        report.best_candidate.instruction
+    );
     println!("\n📊 Total LM calls: {}", report.total_lm_calls);
     println!("🧬 Rollouts: {}", report.total_rollouts);
 
@@ -441,10 +617,17 @@ async fn run_optimization(
     if !report.all_candidates.is_empty() {
         println!("\n📋 Top candidates:");
         let mut sorted = report.all_candidates.clone();
-        sorted.sort_by(|a, b| b.average_score().partial_cmp(&a.average_score()).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| {
+            b.average_score()
+                .partial_cmp(&a.average_score())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         for candidate in sorted.iter().take(3) {
-            println!("  {:.3} — {}", candidate.average_score(),
-                &candidate.instruction[..candidate.instruction.len().min(60)]);
+            println!(
+                "  {:.3} — {}",
+                candidate.average_score(),
+                &candidate.instruction[..candidate.instruction.len().min(60)]
+            );
         }
     }
 
@@ -454,7 +637,6 @@ async fn run_optimization(
 
     Ok(())
 }
-
 
 /// Show session summary from Turso DB.
 async fn show_summary(db_path: &str, _session_id: &str) -> anyhow::Result<()> {
@@ -481,7 +663,14 @@ async fn run_arc_benchmark(
     println!("  rig-rlm — ARC-AGI Benchmark");
     println!("  Model:   {model}");
     println!("  Dataset: {dataset_dir}");
-    println!("  Mode:    {}", if optimize { "Optimized (GEPA)" } else { "Baseline" });
+    println!(
+        "  Mode:    {}",
+        if optimize {
+            "Optimized (GEPA)"
+        } else {
+            "Baseline"
+        }
+    );
     println!("═══════════════════════════════════════════\n");
 
     let config = BenchmarkConfig {
