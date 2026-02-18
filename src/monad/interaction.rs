@@ -24,10 +24,24 @@ use super::prompts::PromptSystem;
 ///
 /// Returns an `AgentMonad` ready to be run by `AgentContext::run()`.
 pub fn agent_task(task: &str) -> AgentMonad {
+    agent_task_with_instruction(task, None)
+}
+
+/// Build the agent computation with an optional instruction override.
+///
+/// When `instruction` is `Some(text)`, the text is injected into the
+/// system prompt under "## Additional Instructions". This is how
+/// GEPA-optimized instructions flow into the agent at runtime.
+pub fn agent_task_with_instruction(task: &str, instruction: Option<&str>) -> AgentMonad {
     let prompts = PromptSystem::default();
-    let system_prompt = prompts
-        .render_system(&Default::default())
-        .unwrap_or_else(|_| "You are a helpful AI agent.".to_string());
+    let system_prompt = match instruction {
+        Some(instr) => prompts
+            .render_system_with_instruction(instr, &Default::default())
+            .unwrap_or_else(|_| "You are a helpful AI agent.".to_string()),
+        None => prompts
+            .render_system(&Default::default())
+            .unwrap_or_else(|_| "You are a helpful AI agent.".to_string()),
+    };
     let user_prompt = prompts
         .render_user(task)
         .unwrap_or_else(|_| task.to_string());

@@ -247,8 +247,12 @@ use std::sync::{Arc, Mutex};
 /// that has enable_sub_llm=true and a provider_config.
 struct LlmBridge {
     config: ProviderConfig,
-    /// Handle to the async runtime for block_on calls from pyfunction.
-    runtime: tokio::runtime::Handle,
+    /// Dedicated runtime for sub-LLM calls.
+    ///
+    /// MUST be a separate runtime from the main tokio runtime.
+    /// `llm_query_bridge` is called from `spawn_blocking` on the main runtime,
+    /// and calling `Handle::block_on()` from within that context would deadlock.
+    runtime: tokio::runtime::Runtime,
 }
 
 /// Global bridge — set once, used by all #[pyfunction] llm_query calls.
@@ -256,10 +260,11 @@ static LLM_BRIDGE: std::sync::OnceLock<Arc<LlmBridge>> = std::sync::OnceLock::ne
 
 /// Initialize the global LLM bridge. Called from Pyo3CodeExecutor::setup().
 fn init_llm_bridge(config: ProviderConfig) {
-    let bridge = Arc::new(LlmBridge {
-        config,
-        runtime: tokio::runtime::Handle::current(),
-    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to create sub-LLM runtime");
+    let bridge = Arc::new(LlmBridge { config, runtime });
     // Ignore error if already set (idempotent)
     let _ = LLM_BRIDGE.set(bridge);
 }

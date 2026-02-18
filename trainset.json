@@ -1,0 +1,12 @@
+[
+  {"task": "What is 7 * 8?", "answer": "56"},
+  {"task": "Compute the sum of all integers from 1 to 100.", "answer": "5050"},
+  {"task": "What is the square root of 144?", "answer": "12"},
+  {"task": "How many prime numbers are there between 1 and 20?", "answer": "8"},
+  {"task": "What is 2^10?", "answer": "1024"},
+  {"task": "Compute the factorial of 6.", "answer": "720"},
+  {"task": "What is the 10th Fibonacci number?", "answer": "55"},
+  {"task": "Compute the greatest common divisor of 48 and 18.", "answer": "6"},
+  {"task": "What is the length of the string 'Hello, World!'?", "answer": "13"},
+  {"task": "How many vowels are in the word 'optimization'?", "answer": "5"}
+]

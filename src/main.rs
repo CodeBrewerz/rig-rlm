@@ -37,7 +37,7 @@ pub mod session;
 // ARC-AGI Benchmark (Phases 18-21)
 pub mod arc;
 
-use crate::monad::interaction::agent_task;
+use crate::monad::interaction::{agent_task, agent_task_with_instruction};
 use crate::monad::{AgentConfig, AgentContext, AgentMonad, Role};
 use crate::persistence::{AgentStore, Session, Turn};
 use crate::sandbox::{ExecutorKind, create_executor};
@@ -71,6 +71,15 @@ enum Commands {
         /// Maximum turns before stopping.
         #[arg(long, default_value_t = 25)]
         max_turns: usize,
+
+        /// Enable sub-LLM bridge (llm_query() available in sandbox).
+        #[arg(long, default_value_t = false)]
+        sub_llm: bool,
+
+        /// Instruction override (file path or inline string).
+        /// Use with GEPA-optimized instructions.
+        #[arg(long)]
+        instruction: Option<String>,
     },
 
     /// Run end-to-end test: agent → sandbox → Turso → verify.
@@ -164,8 +173,19 @@ async fn main() -> anyhow::Result<()> {
             db,
             model,
             max_turns,
+            sub_llm,
+            instruction,
         } => {
-            run_agent(&task, &executor, &db, &model, max_turns).await?;
+            run_agent(
+                &task,
+                &executor,
+                &db,
+                &model,
+                max_turns,
+                sub_llm,
+                instruction,
+            )
+            .await?;
         }
         Commands::E2eTest { executor, db } => {
             run_e2e_test(&executor, &db).await?;
@@ -213,6 +233,8 @@ async fn run_agent(
     db_path: &str,
     model: &str,
     max_turns: usize,
+    sub_llm: bool,
+    instruction: Option<String>,
 ) -> anyhow::Result<()> {
     println!("═══════════════════════════════════════════");
     println!("  rig-rlm — Monadic Agent");
@@ -263,12 +285,15 @@ async fn run_agent(
 
     // 4. Build and run the monadic agent
     // For microsandbox: create a pool so sub-agents can share VMs
-    let agent_config = AgentConfig {
+    let mut agent_config = AgentConfig {
         max_turns,
         provider,
         executor_kind: executor_kind.clone(),
         ..AgentConfig::default()
     };
+    if sub_llm {
+        agent_config = agent_config.with_sub_llm();
+    }
 
     let mut ctx = match &executor_kind {
         crate::sandbox::ExecutorKind::Microsandbox => {
@@ -280,7 +305,21 @@ async fn run_agent(
         _ => AgentContext::new_async(agent_config).await?,
     };
 
-    let program = agent_task(task);
+    // 5. Resolve instruction override (file path or inline string)
+    let resolved_instruction = instruction.map(|s| {
+        // If it looks like a file path and exists, read it
+        if std::path::Path::new(&s).exists() {
+            println!("📝 Loading instruction from: {s}");
+            std::fs::read_to_string(&s).unwrap_or(s)
+        } else {
+            s
+        }
+    });
+
+    let program = match &resolved_instruction {
+        Some(instr) => agent_task_with_instruction(task, Some(instr)),
+        None => agent_task(task),
+    };
     let result = ctx.run(program).await;
 
     match result {
@@ -560,14 +599,18 @@ async fn run_optimization(
 
     println!("📚 Loaded {} training examples", trainset.len());
 
-    // 2. Determine provider config
+    // 2. Determine provider config (same env vars as run_agent)
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
-    let provider_config = if !api_key.is_empty() {
-        println!("🔑 Using OpenAI API");
-        ProviderConfig::openai("gpt-4o-mini", &api_key)
+    let base_url = std::env::var("OPENAI_BASE_URL")
+        .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+    let model = std::env::var("RIG_RLM_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
+
+    let provider_config = if api_key.is_empty() {
+        println!("🏠 Using local LLM (set OPENAI_API_KEY for OpenAI/OpenRouter)");
+        ProviderConfig::local(&model)
     } else {
-        println!("🏠 Using local LLM (set OPENAI_API_KEY for OpenAI)");
-        ProviderConfig::local("qwen/qwen3-8b")
+        println!("🔑 Using API key with base URL: {base_url}");
+        ProviderConfig::openai_compatible("openai", &model, &base_url, &api_key)
     };
 
     // 3. Build the agent module
@@ -578,6 +621,19 @@ async fn run_optimization(
     );
 
     let mut module = AgentModule::new(&seed_instruction, provider_config);
+
+    // 3b. Initialize dspy-rs GLOBAL_SETTINGS for GEPA's internal Predict calls.
+    //     GEPA uses Predict::forward() for reflection/mutation which requires
+    //     a globally configured LM.
+    let lm = LM::builder()
+        .base_url(base_url)
+        .api_key(api_key)
+        .model(model)
+        .temperature(0.7)
+        .max_tokens(2048_u32)
+        .build()
+        .await?;
+    configure(lm, ChatAdapter);
 
     // 4. Build GEPA optimizer
     let gepa = GEPA::builder()
@@ -631,9 +687,11 @@ async fn run_optimization(
         }
     }
 
-    // TODO: Persist optimized instruction to Turso
-    // let store = AgentStore::open(db_path).await?;
-    // store.save_optimized_instruction(&report.best_candidate.instruction).await?;
+    // Save optimized instruction to file for reuse via --instruction flag
+    let instruction_path = "optimized_instruction.txt";
+    std::fs::write(instruction_path, &report.best_candidate.instruction)?;
+    println!("\n💾 Saved optimized instruction to: {instruction_path}");
+    println!("   Reuse with: cargo run -- run \"task\" --instruction {instruction_path}");
 
     Ok(())
 }

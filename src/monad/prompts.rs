@@ -37,6 +37,26 @@ impl PromptSystem {
         for (k, v) in session_info {
             ctx.insert(k, v);
         }
+        ctx.insert("instruction", "");
+        self.tera
+            .render("system.txt", &ctx)
+            .map_err(|e| AgentError::Template(e.to_string()))
+    }
+
+    /// Render the system prompt with a custom instruction override.
+    ///
+    /// When GEPA optimizes the instruction, the result is injected here
+    /// so it appears in the system prompt alongside the base template.
+    pub fn render_system_with_instruction(
+        &self,
+        instruction: &str,
+        session_info: &HashMap<String, String>,
+    ) -> Result<String> {
+        let mut ctx = Context::new();
+        for (k, v) in session_info {
+            ctx.insert(k, v);
+        }
+        ctx.insert("instruction", instruction);
         self.tera
             .render("system.txt", &ctx)
             .map_err(|e| AgentError::Template(e.to_string()))
@@ -127,6 +147,14 @@ value = json_extract(resp, "results", "unit", "name")
 - If your code errors, fix the bug and retry
 - You can use `print()` to inspect intermediate values
 - Use `SUBMIT(answer="your result")` for structured final output
+- **Once you see the expected output, immediately use FINAL to report the result. Do NOT re-run code that already succeeded.**
+- Do NOT repeat the same code block — if execution was successful, move on to the next step or give FINAL
+{% if instruction %}
+
+## Additional Instructions
+
+{{ instruction }}
+{% endif %}
 "#;
 
 const USER_TEMPLATE: &str = r#"Please solve the following task:

@@ -12,11 +12,12 @@ use anyhow::Result;
 use dspy_rs::*;
 use indexmap::IndexMap;
 
-use crate::signature::CodeGenAgent;
-use crate::monad::{AgentConfig, AgentContext, Role};
-use crate::monad::interaction::agent_task;
+use crate::monad::interaction::agent_task_with_instruction;
 use crate::monad::provider::ProviderConfig;
+use crate::monad::{AgentConfig, AgentContext, Role};
+use crate::safety::ExecutionLimits;
 use crate::sandbox::ExecutorKind;
+use crate::signature::CodeGenAgent;
 
 /// Wraps the monadic agent loop as a DSRs Module.
 ///
@@ -65,38 +66,51 @@ impl AgentModule {
 
 impl Module for AgentModule {
     async fn forward(&self, inputs: Example) -> Result<Prediction> {
-        // 1. Get instruction from the signature
+        // 1. Get instruction from the signature (GEPA-optimized)
         let instruction = self.predictor.signature.instruction();
 
         // 2. Extract task and context from the Example
-        let task = inputs.get("task", None)
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-        let context = inputs.get("context", None)
-            .as_str()
-            .map(|s| s.to_string());
+        let task = inputs.get("task", None).as_str().unwrap_or("").to_string();
+        let context = inputs.get("context", None).as_str().map(|s| s.to_string());
 
-        // 3. Build the task description combining instruction + input
+        // 3. Build the task description (context + task, NOT instruction)
+        //    The instruction flows through agent_task_with_instruction()
+        //    into the system prompt's {{ instruction }} variable.
         let task_prompt = if let Some(ctx) = &context {
-            format!("{instruction}\n\nContext:\n{ctx}\n\nTask: {task}")
+            format!("Context:\n{ctx}\n\nTask: {task}")
         } else {
-            format!("{instruction}\n\nTask: {task}")
+            task
         };
 
         // 4. Build agent config with the right provider
+        let mut safety = ExecutionLimits::permissive();
+        safety.max_code_length = 500_000; // 500KB — allow verbose LLM output during optimization
         let agent_config = AgentConfig {
             provider: self.provider_config.clone(),
             executor_kind: self.executor_kind.clone(),
+            max_turns: 12, // Keep evaluations fast during optimization
+            safety,
             ..AgentConfig::default()
         };
 
-        // 5. Run the monadic agent
+        // 5. Run the monadic agent with the optimized instruction
         let mut ctx = AgentContext::new(agent_config);
-        let program = agent_task(&task_prompt);
+        let program = agent_task_with_instruction(&task_prompt, Some(&instruction));
 
-        let result = ctx.run(program).await
-            .map_err(|e| anyhow::anyhow!("Agent execution failed: {e}"))?;
+        // Gracefully handle agent failures — during GEPA optimization,
+        // individual evaluations may fail (max turns, execution errors).
+        // Return an empty prediction so GEPA scores this as 0 and continues.
+        let result = match ctx.run(program).await {
+            Ok(answer) => answer,
+            Err(e) => {
+                tracing::warn!("Agent evaluation failed (will score 0): {e}");
+                let prediction = dspy_rs::prediction! {
+                    "code" => String::new(),
+                    "answer" => String::new()
+                };
+                return Ok(prediction);
+            }
+        };
 
         // 6. Extract code and answer from the result
         let (code, answer) = extract_code_and_answer(&result, &ctx);
@@ -118,7 +132,10 @@ impl Optimizable for AgentModule {
 
     fn parameters(&mut self) -> IndexMap<String, &mut dyn Optimizable> {
         let mut map = IndexMap::new();
-        map.insert("predictor".to_string(), &mut self.predictor as &mut dyn Optimizable);
+        map.insert(
+            "predictor".to_string(),
+            &mut self.predictor as &mut dyn Optimizable,
+        );
         map
     }
 
@@ -135,7 +152,11 @@ fn extract_code_and_answer(result: &str, ctx: &AgentContext) -> (String, String)
     let answer = result.to_string();
 
     // The code is the last executed code block from history
-    let code = ctx.history.messages().iter().rev()
+    let code = ctx
+        .history
+        .messages()
+        .iter()
+        .rev()
         .find(|m| m.role == Role::Assistant)
         .map(|m| {
             if let Some(start) = m.content.find("```") {

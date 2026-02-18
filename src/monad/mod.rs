@@ -30,7 +30,7 @@ pub use error::{AgentError, Result};
 pub use execution::{ExecutionError, ExecutionResult};
 pub use generation::Generation;
 pub use history::{ConversationHistory, HistoryMessage};
-pub use interaction::agent_task;
+pub use interaction::{agent_task, agent_task_with_instruction};
 pub use monad::AgentMonad;
 pub use prompts::PromptSystem;
 pub use provider::{LlmProvider, ProviderConfig};
