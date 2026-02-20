@@ -88,6 +88,37 @@ pub enum Action {
     PlanRecipe { recipe_yaml: String },
 }
 
+impl Action {
+    /// Short human-readable label for Restate journal entry names.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Insert { .. } => "insert",
+            Self::ModelInference => "llm",
+            Self::ExecuteCode { .. } => "exec",
+            Self::Capture { .. } => "capture",
+            Self::Retrieve { .. } => "retrieve",
+            Self::Log { .. } => "log",
+            Self::SpawnSubAgent { .. } => "spawn",
+            Self::LoadContext { .. } => "load_ctx",
+            Self::SearchContext { .. } => "search_ctx",
+            Self::PeekContext { .. } => "peek_ctx",
+            Self::ListContexts => "list_ctx",
+            Self::Think { .. } => "think",
+            Self::EvaluateProgress { .. } => "eval",
+            Self::PlanRecipe { .. } => "recipe",
+        }
+    }
+
+    /// Returns true if this action performs external I/O (LLM call, code exec,
+    /// sub-agent spawn) and should be wrapped in a Restate `ctx.run()`.
+    pub fn is_io(&self) -> bool {
+        matches!(
+            self,
+            Self::ModelInference | Self::ExecuteCode { .. } | Self::SpawnSubAgent { .. }
+        )
+    }
+}
+
 /// Conversation roles.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Role {
@@ -136,11 +167,14 @@ pub enum ActionOutput {
 
 impl ActionOutput {
     /// Extract the string value, or return an empty string for Unit.
+    ///
+    /// For `Submitted`, prepends `[submitted] ` so that `interaction_loop`
+    /// can detect the marker via `starts_with("[submitted]")`.
     pub fn into_string(self) -> String {
         match self {
             Self::Unit => String::new(),
             Self::Value(s) => s,
-            Self::Submitted(s) => s,
+            Self::Submitted(s) => format!("[submitted] {s}"),
         }
     }
 

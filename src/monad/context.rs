@@ -303,6 +303,11 @@ impl AgentContext {
         Ok(())
     }
 
+    /// Public wrapper for ensure_session, used by the Restate handler.
+    pub(crate) async fn ensure_session_public(&mut self) -> Result<()> {
+        self.ensure_session().await
+    }
+
     /// Run a monadic computation to completion.
     ///
     /// Iterative interpreter loop — walks the monad tree:
@@ -340,7 +345,9 @@ impl AgentContext {
     ///
     /// Returns a boxed future because PlanRecipe can call run_recipe→run→interpret_action
     /// (recursive async requires boxing).
-    fn interpret_action(
+    ///
+    /// `pub(crate)` so the Restate handler can call it per-action.
+    pub(crate) fn interpret_action(
         &mut self,
         action: Action,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ActionOutput>> + '_>> {
