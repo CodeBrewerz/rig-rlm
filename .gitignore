@@ -3,3 +3,4 @@
 .env
 agent.db
 agent.db-wal
+restate-data/*

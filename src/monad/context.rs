@@ -402,6 +402,7 @@ impl AgentContext {
                 Action::CompactContext => "CompactContext",
                 Action::ParallelBatch { .. } => "ParallelBatch",
                 Action::Orchestrate { .. } => "Orchestrate",
+                Action::ApplyPatch { .. } => "ApplyPatch",
             };
             self.config
                 .capabilities
@@ -1179,6 +1180,61 @@ impl AgentContext {
 
                     // Record evidence
                     self.evidence.push(Evidence::from_sub_agent(&output));
+
+                    Ok(ActionOutput::Value(output))
+                }
+
+                // ── Apply patch: parse and apply unified diff ──
+                Action::ApplyPatch { patch } => {
+                    eprintln!("🪝 [apply_patch] parsing patch ({} bytes)", patch.len());
+
+                    // First run the patch through exec policy
+                    let policy = crate::exec_policy::ExecPolicy::standard();
+                    let eval = policy.evaluate(&patch);
+                    if eval.is_denied() {
+                        return Err(AgentError::Internal(format!(
+                            "patch blocked by exec policy: {}",
+                            eval.reason()
+                        )));
+                    }
+
+                    // Parse the patch
+                    let action = crate::apply_patch::parse_patch(&patch)
+                        .map_err(|e| AgentError::Internal(format!("patch parse error: {e}")))?;
+
+                    if action.is_empty() {
+                        return Ok(ActionOutput::Value("patch is empty (no changes)".into()));
+                    }
+
+                    eprintln!(
+                        "🪝 [apply_patch] {} file(s): {}",
+                        action.file_count(),
+                        action.summary()
+                    );
+
+                    // Apply the patch (use current directory as base)
+                    let base_dir =
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+                    let results = crate::apply_patch::apply_patch(&action, &base_dir)
+                        .map_err(|e| AgentError::Internal(format!("patch apply error: {e}")))?;
+
+                    let summary: Vec<String> = results
+                        .iter()
+                        .map(|(path, desc)| format!("{}: {desc}", path.display()))
+                        .collect();
+
+                    let output = format!(
+                        "patch applied: {} file(s) changed\n{}",
+                        results.len(),
+                        summary.join("\n")
+                    );
+
+                    eprintln!("🪝 [apply_patch] done: {} file(s) changed", results.len());
+
+                    // Record evidence
+                    self.evidence
+                        .push(Evidence::from_code_exec(&output, Some(0)));
 
                     Ok(ActionOutput::Value(output))
                 }

@@ -233,6 +233,14 @@ impl AgentMonad {
             Self::Pure(output.into_string())
         })
     }
+
+    /// Parse and apply a unified diff patch to files.
+    /// Returns a summary of files changed.
+    pub fn apply_patch(patch: String) -> Self {
+        Self::perform(Action::ApplyPatch { patch }, |output| {
+            Self::Pure(output.into_string())
+        })
+    }
 }
 
 // Debug impl that doesn't try to print the continuation closure.

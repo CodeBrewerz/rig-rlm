@@ -46,7 +46,8 @@ impl Action {
             | Self::LoadContext { .. }
             | Self::PlanRecipe { .. }
             | Self::CompactContext
-            | Self::Orchestrate { .. } => ActionSafety::Mutating,
+            | Self::Orchestrate { .. }
+            | Self::ApplyPatch { .. } => ActionSafety::Mutating,
 
             // ParallelBatch: inherently parallel (contains only read-only actions)
             Self::ParallelBatch { .. } => ActionSafety::ReadOnly,

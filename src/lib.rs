@@ -8,6 +8,9 @@
 pub mod monad;
 
 // Infrastructure
+pub mod apply_patch;
+pub mod cancellation;
+pub mod exec_policy;
 pub mod persistence;
 pub mod safety;
 pub mod sandbox;

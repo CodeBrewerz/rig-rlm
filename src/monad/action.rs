@@ -105,6 +105,12 @@ pub enum Action {
     /// Uses the Orchestrator's strategy (Sequential/Parallel/FanOutFanIn).
     /// Returns a formatted summary of all sub-agent results.
     Orchestrate { orchestrator: Orchestrator },
+
+    // ─── Apply patch (Codex pattern) ──────────────────────────────
+    /// Parse and apply a unified diff patch to files.
+    /// The patch string follows standard unified diff format.
+    /// Returns a summary of files changed.
+    ApplyPatch { patch: String },
 }
 
 impl Action {
@@ -128,6 +134,7 @@ impl Action {
             Self::CompactContext => "compact",
             Self::ParallelBatch { .. } => "parallel",
             Self::Orchestrate { .. } => "orchestrate",
+            Self::ApplyPatch { .. } => "apply_patch",
         }
     }
 
@@ -142,6 +149,7 @@ impl Action {
                 | Self::CompactContext
                 | Self::ParallelBatch { .. }
                 | Self::Orchestrate { .. }
+                | Self::ApplyPatch { .. }
         )
     }
 }
