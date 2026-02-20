@@ -48,6 +48,8 @@ microsandbox = "0.1.2"
 
 # Durable Execution
 restate-sdk = "0.7"
+similar = "2.7.0"
+dirs = "6.0.0"
 
 [[bin]]
 name = "rig-rlm"

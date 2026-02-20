@@ -44,6 +44,10 @@ pub struct AgentTaskRequest {
     pub max_turns: Option<usize>,
     pub max_cost_usd: Option<f64>,
     pub preamble: Option<String>,
+    /// If true, this workflow delegates the task to a child sub-agent workflow.
+    /// The parent acts as a supervisor and the child does the actual work.
+    #[serde(default)]
+    pub delegate: bool,
 }
 
 /// Status snapshot returned by the `status` handler.
@@ -71,7 +75,6 @@ const STATUS_KEY: &str = "agent_status";
 // ── Messages between handler and background thread ─────────────────────────
 
 /// Messages from bg thread → handler.
-#[derive(Debug)]
 enum BgToHandler {
     /// LLM call needed. Handler should make the call inside ctx.run().
     NeedLlm {
@@ -81,6 +84,14 @@ enum BgToHandler {
     },
     /// Code execution completed on bg thread. Handler should record in journal.
     ExecDone { output: String, step: usize },
+    /// Sub-agent needed. Handler should invoke child workflow via ctx.workflow_client().
+    NeedSubAgent {
+        task: String,
+        step: usize,
+        /// If Some, send the result here (bridge thread for llm_query during code exec).
+        /// If None, send via HandlerToBg::SubAgentResult (bg thread for explicit SpawnSubAgent).
+        reply_tx: Option<std::sync::mpsc::SyncSender<String>>,
+    },
     /// Pure action completed (no ctx.run() needed).
     PureDone,
     /// Monad finished with a result.
@@ -94,6 +105,8 @@ enum HandlerToBg {
     LlmResult(String), // JSON: LlmCallResult
     /// Ack that exec output was recorded.
     ExecAck,
+    /// Sub-agent result (from child workflow — durable on replay).
+    SubAgentResult(String),
 }
 
 /// Serializable LLM call request (sent from bg thread to handler).
@@ -101,6 +114,7 @@ enum HandlerToBg {
 struct LlmCallRequest {
     provider_config: super::ProviderConfig,
     history: Vec<HistoryMsg>,
+    trace_ctx: super::otel::TraceContext,
 }
 
 /// Serializable history message for cross-thread transfer.
@@ -164,7 +178,13 @@ impl AgentWorkflow for AgentWorkflowImpl {
             handle.block_on(async {
                 let local = tokio::task::LocalSet::new();
                 local
-                    .run_until(run_agent_loop(config, &task_text, bg_tx, handler_rx))
+                    .run_until(run_agent_loop(
+                        config,
+                        &task_text,
+                        req.delegate,
+                        bg_tx,
+                        handler_rx,
+                    ))
                     .await
             })
         });
@@ -220,7 +240,7 @@ impl AgentWorkflow for AgentWorkflowImpl {
                                 });
                             }
 
-                            let trace_ctx = super::otel::TraceContext::default();
+                            let trace_ctx = req.trace_ctx;
                             let (response, usage) =
                                 provider.chat(&history, &trace_ctx).await.map_err(|e| {
                                     HandlerError::from(restate_sdk::errors::TerminalError::new(
@@ -273,6 +293,58 @@ impl AgentWorkflow for AgentWorkflowImpl {
 
                     // Ack to bg thread
                     let _ = handler_tx.send(HandlerToBg::ExecAck);
+                }
+
+                Ok(BgToHandler::NeedSubAgent {
+                    task,
+                    step,
+                    reply_tx,
+                }) => {
+                    turn = step;
+
+                    // ── Sub-agent as linked child workflow ────────────
+                    // ctx.workflow_client() creates a LINKED child invocation
+                    // in the parent's journal — visible in Restate UI as parent→child.
+                    // On replay, Restate returns cached child result automatically.
+                    let sub_id = format!("sub-{step}-{}", uuid::Uuid::new_v4());
+
+                    // Inherit parent's provider config for the child
+                    let sub_req = AgentTaskRequest {
+                        task: task.clone(),
+                        model: req.model.clone(), // None → child uses env vars
+                        base_url: req.base_url.clone(), // None → child uses env vars
+                        api_key: req.api_key.clone(), // None → child uses env vars
+                        provider_name: req.provider_name.clone(),
+                        max_turns: Some(15), // sub-agents get fewer turns
+                        max_cost_usd: req.max_cost_usd,
+                        preamble: req.preamble.clone(),
+                        delegate: false, // child does actual work, no further delegation
+                    };
+
+                    // Invoke child workflow via Restate service communication
+                    // This is durable — journaled as a Call entry in the parent
+                    let child_result: Json<AgentTaskResult> = match ctx
+                        .workflow_client::<AgentWorkflowClient>(&sub_id)
+                        .run(Json::from(sub_req))
+                        .call()
+                        .await
+                    {
+                        Ok(result) => result,
+                        Err(e) => break Err(format!("sub-agent workflow failed: {e}")),
+                    };
+
+                    let result = child_result.into_inner().output;
+
+                    set_status(&ctx, turn, "running", cost_usd, total_tokens, None, None);
+
+                    // Route result to appropriate recipient:
+                    // - reply_tx (Some): bridge thread for llm_query during code execution
+                    // - reply_tx (None): bg thread for explicit SpawnSubAgent action
+                    if let Some(reply) = reply_tx {
+                        let _ = reply.send(result);
+                    } else {
+                        let _ = handler_tx.send(HandlerToBg::SubAgentResult(result));
+                    }
                 }
 
                 Ok(BgToHandler::Finished(result)) => match result {
@@ -382,8 +454,9 @@ fn set_status(
 /// For ExecuteCode: executes on this thread (maintains REPL state), sends
 /// output to handler for journal recording.
 async fn run_agent_loop(
-    config: super::AgentConfig,
+    mut config: super::AgentConfig,
     task: &str,
+    delegate: bool,
     tx: tokio::sync::mpsc::UnboundedSender<BgToHandler>,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<HandlerToBg>,
 ) {
@@ -395,14 +468,113 @@ async fn run_agent_loop(
 
     let model_name = config.provider.model.clone();
     let provider_config = config.provider.clone();
+
+    // Enable llm_query() in the Python REPL so generated code can use it.
+    // The RESTATE_LLM_BRIDGE intercepts at runtime to route through child workflows,
+    // but llm_query must be registered as a Python builtin during sandbox setup.
+    config.session.enable_sub_llm = true;
+    config.session.provider_config = Some(provider_config.clone());
+
     let task_owned = task.to_string();
-    let program = agent_task_full(task, None, Some(&config.memory));
+    let program = if delegate {
+        // Delegate mode: wrap task in a SpawnSubAgent action
+        // This triggers the child workflow path
+        use super::capabilities::Capabilities;
+        AgentMonad::perform(
+            Action::SpawnSubAgent {
+                task: task_owned.clone(),
+                capabilities: Capabilities::default(),
+            },
+            |output| AgentMonad::Pure(output.into_string()),
+        )
+    } else {
+        agent_task_full(task, None, Some(&config.memory))
+    };
     let mut agent_ctx = AgentContext::new(config);
+
+    // ── Register lifecycle hooks (Codex pattern) ─────
+    // Default logging hook — fires at every lifecycle point
+    {
+        use super::hooks::{HookEvent, HookResult};
+
+        agent_ctx.hooks.on("restate_lifecycle_logger", |event| {
+            match event {
+                HookEvent::SessionStart { task } => {
+                    eprintln!("🪝 [hook] session_start | task={}", &task[..task.len().min(80)]);
+                }
+                HookEvent::SessionEnd { turns, final_answer_len } => {
+                    eprintln!("🪝 [hook] session_end | turns={turns} answer_len={final_answer_len}");
+                }
+                HookEvent::BeforeLlmCall { turn, message_count } => {
+                    eprintln!("🪝 [hook] before_llm | turn={turn} messages={message_count}");
+                }
+                HookEvent::AfterLlmCall { turn, response_len, duration } => {
+                    eprintln!("🪝 [hook] after_llm | turn={turn} response_len={response_len} duration={:.1}s", duration.as_secs_f64());
+                }
+                HookEvent::BeforeCodeExec { turn, code_preview } => {
+                    eprintln!("🪝 [hook] before_exec | turn={turn} code={}", &code_preview[..code_preview.len().min(60)]);
+                }
+                HookEvent::AfterCodeExec { turn, success, duration, output_preview } => {
+                    eprintln!("🪝 [hook] after_exec | turn={turn} success={success} duration={:.1}s output={}", duration.as_secs_f64(), &output_preview[..output_preview.len().min(60)]);
+                }
+                HookEvent::BeforeSubAgent { task } => {
+                    eprintln!("🪝 [hook] before_subagent | task={}", &task[..task.len().min(80)]);
+                }
+                HookEvent::AfterSubAgent { task, result_len, success } => {
+                    eprintln!("🪝 [hook] after_subagent | task={} result_len={result_len} success={success}", &task[..task.len().min(60)]);
+                }
+                HookEvent::AfterCompaction { messages_before, messages_after } => {
+                    eprintln!("🪝 [hook] after_compaction | {messages_before}→{messages_after} messages");
+                }
+            }
+            HookResult::Continue
+        });
+    }
 
     let _ = agent_ctx.ensure_session_public().await;
 
+    // ── Initialize context memory store for this session ─────
+    crate::sandbox::init_context_memory_store();
+
+    // ── Set up Restate LLM bridge (lock-free, parallel-capable) ─────
+    // No bridge thread — each llm_query() creates its own reply channel
+    // and dispatches directly to the handler via a captured closure.
+    {
+        use crate::sandbox::{RestateLlmBridge, set_restate_llm_bridge};
+
+        // Shared step counter: AtomicUsize avoids collision with bg thread's step.
+        // Starts at 10_000 to leave headroom for the main loop's steps.
+        let step_counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(10_000));
+
+        let dispatch_tx = tx.clone(); // clone the BgToHandler sender
+        let dispatch_step = step_counter.clone();
+
+        let bridge = Box::new(RestateLlmBridge {
+            dispatch: Box::new(move |prompt, reply_tx| {
+                let step = dispatch_step.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                // Send directly to handler — no intermediary thread
+                let _ = dispatch_tx.send(BgToHandler::NeedSubAgent {
+                    task: prompt,
+                    step,
+                    reply_tx: Some(reply_tx),
+                });
+            }),
+        });
+        set_restate_llm_bridge(bridge);
+    }
+
     let mut computation = program;
     let mut step: usize = 0;
+
+    // 🪝 Session start hook
+    {
+        use super::hooks::HookEvent;
+        let task_preview = task_owned.chars().take(100).collect::<String>();
+        let _ = agent_ctx
+            .hooks
+            .fire(&HookEvent::SessionStart { task: task_preview });
+    }
 
     let final_result: Result<String, String> = loop {
         match computation {
@@ -423,6 +595,19 @@ async fn run_agent_loop(
                 match action {
                     // ── ModelInference: delegate to handler's ctx.run() ──
                     Action::ModelInference => {
+                        // 🪝 Hook: BeforeLlmCall
+                        {
+                            use super::hooks::HookEvent;
+                            let msg_count = agent_ctx.history.messages().len();
+                            if let Err(reason) = agent_ctx.hooks.fire(&HookEvent::BeforeLlmCall {
+                                turn: agent_ctx.turn,
+                                message_count: msg_count,
+                            }) {
+                                break Err(format!("Hook abort: {reason}"));
+                            }
+                        }
+                        let llm_start = std::time::Instant::now();
+
                         // Budget check
                         if let Err((spent, limit)) = agent_ctx
                             .cost_tracker
@@ -445,6 +630,12 @@ async fn run_agent_loop(
                         let call_req = LlmCallRequest {
                             provider_config: provider_config.clone(),
                             history: history_msgs,
+                            trace_ctx: super::otel::TraceContext::new()
+                                .with_session(task_owned.as_str())
+                                .with_name(format!("restate:llm_{step}"))
+                                .with_tags(vec!["restate".to_string()])
+                                .with_metadata("model", model_name.as_str())
+                                .with_metadata("step", step.to_string()),
                         };
                         let call_json = serde_json::to_string(&call_req).unwrap_or_default();
 
@@ -489,6 +680,18 @@ async fn run_agent_loop(
                         });
 
                         let output = ActionOutput::Value(llm_result.response);
+
+                        // 🪝 Hook: AfterLlmCall
+                        {
+                            use super::hooks::HookEvent;
+                            let llm_dur = llm_start.elapsed();
+                            let _ = agent_ctx.hooks.fire(&HookEvent::AfterLlmCall {
+                                turn: agent_ctx.turn,
+                                response_len: output.clone().into_string().len(),
+                                duration: llm_dur,
+                            });
+                        }
+
                         computation = next(output);
                     }
 
@@ -513,27 +716,58 @@ async fn run_agent_loop(
                         computation = next(output);
                     }
 
+                    Action::SpawnSubAgent { task, .. } => {
+                        // 🪝 Hook: BeforeSubAgent
+                        {
+                            use super::hooks::HookEvent;
+                            let _ = agent_ctx
+                                .hooks
+                                .fire(&HookEvent::BeforeSubAgent { task: task.clone() });
+                        }
+
+                        let _ = tx.send(BgToHandler::NeedSubAgent {
+                            task: task.clone(),
+                            step,
+                            reply_tx: None, // bg thread reads result from rx
+                        });
+
+                        // Wait for handler to invoke child workflow
+                        let result = match rx.recv().await {
+                            Some(HandlerToBg::SubAgentResult(output)) => output,
+                            _ => {
+                                break Err("handler closed during sub-agent".to_string());
+                            }
+                        };
+
+                        // Record sub-agent result in history
+                        agent_ctx.history.push(super::history::HistoryMessage {
+                            role: super::action::Role::Execution,
+                            content: format!("Sub-agent result: {result}"),
+                        });
+
+                        let output = super::action::ActionOutput::Value(result.clone());
+
+                        // 🪝 Hook: AfterSubAgent
+                        {
+                            use super::hooks::HookEvent;
+                            let _ = agent_ctx.hooks.fire(&HookEvent::AfterSubAgent {
+                                task: task.clone(),
+                                result_len: result.len(),
+                                success: true,
+                            });
+                        }
+
+                        computation = next(output);
+                    }
+
                     // ── All other actions: execute inline on bg thread ──
                     other => {
-                        let is_io = other.is_io();
                         let output = match agent_ctx.interpret_action(other).await {
                             Ok(out) => out,
                             Err(e) => break Err(format!("action error: {e}")),
                         };
 
-                        if is_io {
-                            // SpawnSubAgent etc — record in journal
-                            let _ = tx.send(BgToHandler::ExecDone {
-                                output: output.clone().into_string(),
-                                step,
-                            });
-                            match rx.recv().await {
-                                Some(HandlerToBg::ExecAck) => {}
-                                _ => break Err("handler closed".to_string()),
-                            }
-                        } else {
-                            let _ = tx.send(BgToHandler::PureDone);
-                        }
+                        let _ = tx.send(BgToHandler::PureDone);
 
                         computation = next(output);
                     }
@@ -541,6 +775,19 @@ async fn run_agent_loop(
             }
         }
     };
+
+    // 🪝 Session end hook
+    {
+        use super::hooks::HookEvent;
+        let result_len = match &final_result {
+            Ok(s) => s.len(),
+            Err(s) => s.len(),
+        };
+        let _ = agent_ctx.hooks.fire(&HookEvent::SessionEnd {
+            turns: agent_ctx.turn,
+            final_answer_len: result_len,
+        });
+    }
 
     // ── Turso persistence ────────────────────────────────────────────────
     let db_path = std::env::var("RIG_RLM_DB").unwrap_or_else(|_| "agent.db".to_string());

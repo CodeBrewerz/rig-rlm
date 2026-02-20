@@ -255,33 +255,225 @@ struct LlmBridge {
     runtime: tokio::runtime::Runtime,
 }
 
-/// Global bridge — set once, used by all #[pyfunction] llm_query calls.
-static LLM_BRIDGE: std::sync::OnceLock<Arc<LlmBridge>> = std::sync::OnceLock::new();
+/// Global LLM bridge — updated per-session via atomic swap.
+/// Uses AtomicPtr (not OnceLock) so provider config can change between sessions.
+static LLM_BRIDGE: std::sync::atomic::AtomicPtr<LlmBridge> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
 /// Initialize the global LLM bridge. Called from Pyo3CodeExecutor::setup().
+///
+/// When the Restate bridge is active, we skip creating a dedicated runtime
+/// because all llm_query() calls are intercepted by RESTATE_LLM_BRIDGE.
+/// Creating a runtime in an async context panics on drop.
 fn init_llm_bridge(config: ProviderConfig) {
+    // Skip if Restate bridge is active — llm_query() will route through child workflows
+    if !RESTATE_LLM_BRIDGE
+        .load(std::sync::atomic::Ordering::Acquire)
+        .is_null()
+    {
+        return;
+    }
+
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("Failed to create sub-LLM runtime");
-    let bridge = Arc::new(LlmBridge { config, runtime });
-    // Ignore error if already set (idempotent)
-    let _ = LLM_BRIDGE.set(bridge);
+    let bridge = Box::new(LlmBridge { config, runtime });
+    let new_ptr = Box::into_raw(bridge);
+    let old_ptr = LLM_BRIDGE.swap(new_ptr, std::sync::atomic::Ordering::AcqRel);
+    if !old_ptr.is_null() {
+        // SAFETY: old_ptr was created by Box::into_raw. Sequential session setup
+        // guarantees no concurrent readers of the old bridge.
+        unsafe {
+            drop(Box::from_raw(old_ptr));
+        }
+    }
 }
+
+/// Get a reference to the current LLM bridge (lock-free).
+fn get_llm_bridge() -> Option<&'static LlmBridge> {
+    let ptr = LLM_BRIDGE.load(std::sync::atomic::Ordering::Acquire);
+    if ptr.is_null() {
+        None
+    } else {
+        // SAFETY: ptr was created by Box::into_raw and is valid until next swap.
+        // Session setup is sequential — no concurrent swap during use.
+        Some(unsafe { &*ptr })
+    }
+}
+
+// ─── Restate Sub-Agent Bridge ────────────────────────────────
+//
+// When running under Restate, llm_query() spawns a linked child
+// workflow. Each call gets its own reply channel for parallel support.
+// No bridge thread — pyfunction dispatches directly to the handler.
+//
+// Architecture (per-call):
+//   Python REPL (sync)                    Handler (async)
+//       │                                     │
+//       │ llm_query("prompt")                 │
+//       │ create reply channel (tx, rx)       │
+//       │ dispatch(prompt, reply_tx) ────────→│
+//       │                                     │ ctx.workflow_client()
+//       │ reply_rx.recv_timeout(120s) ←───────│ reply_tx.send(result)
+//       │ return text                         │
+
+/// Bridge for routing llm_query() through Restate child workflows.
+///
+/// Holds a type-erased dispatch function that sends (prompt, reply_tx)
+/// to the handler. Each call creates its own reply channel — supports
+/// parallel llm_query() calls naturally.
+pub struct RestateLlmBridge {
+    /// Dispatch function: captures handler_tx + step counter internally.
+    /// Called with (prompt, reply_tx) — sends to handler, which invokes
+    /// child workflow and sends result on reply_tx.
+    pub dispatch: Box<dyn Fn(String, std::sync::mpsc::SyncSender<String>) + Send + Sync>,
+}
+
+/// Lock-free global Restate bridge — updated per-workflow-invocation via atomic swap.
+/// Uses AtomicPtr for zero-cost reads (no locking, no contention).
+static RESTATE_LLM_BRIDGE: std::sync::atomic::AtomicPtr<RestateLlmBridge> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+/// Set the Restate LLM bridge for the current invocation (atomic swap).
+/// Called from restate::run_agent_loop().
+///
+/// Drops the previous bridge safely — invocations are sequential,
+/// so no concurrent llm_query() reads the old bridge during swap.
+pub fn set_restate_llm_bridge(bridge: Box<RestateLlmBridge>) {
+    let new_ptr = Box::into_raw(bridge);
+    let old_ptr = RESTATE_LLM_BRIDGE.swap(new_ptr, std::sync::atomic::Ordering::AcqRel);
+    if !old_ptr.is_null() {
+        // SAFETY: old_ptr was created by Box::into_raw. Sequential invocations
+        // guarantee no concurrent readers of the old bridge.
+        unsafe {
+            drop(Box::from_raw(old_ptr));
+        }
+    }
+}
+
+/// Get a reference to the current Restate bridge (lock-free).
+fn get_restate_llm_bridge() -> Option<&'static RestateLlmBridge> {
+    let ptr = RESTATE_LLM_BRIDGE.load(std::sync::atomic::Ordering::Acquire);
+    if ptr.is_null() {
+        None
+    } else {
+        // SAFETY: ptr was created by Box::into_raw and is never freed.
+        // It's valid for 'static because we intentionally leak it.
+        Some(unsafe { &*ptr })
+    }
+}
+
+// ─── Context Memory Bridge ──────────────────────────────────────
+//
+// Agent-driven context memory: offload/recall/manifest/search.
+// Uses a simple Arc<Mutex<ContextMemoryStore>> global.
+// The Python functions lock the mutex directly — safe because the bg
+// thread is blocked during code execution (no contention).
+
+use crate::monad::context_memory::{ContextMemoryStore, SharedMemoryStore};
+
+/// Global shared memory store — set per session.
+static CONTEXT_MEMORY_STORE: std::sync::OnceLock<SharedMemoryStore> = std::sync::OnceLock::new();
+
+/// Initialize or get the global context memory store.
+pub fn init_context_memory_store() -> SharedMemoryStore {
+    CONTEXT_MEMORY_STORE
+        .get_or_init(ContextMemoryStore::new_shared)
+        .clone()
+}
+
+/// Reset the store (for new sessions).
+pub fn reset_context_memory_store() {
+    if let Some(store) = CONTEXT_MEMORY_STORE.get() {
+        let mut s = store.lock().unwrap();
+        *s = ContextMemoryStore::new();
+    }
+}
+
+#[pyfunction]
+fn memory_offload_bridge(_py: Python, label: String, content: String) -> PyResult<String> {
+    let store = CONTEXT_MEMORY_STORE.get().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("Context memory not initialized")
+    })?;
+    let mut s = store.lock().map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("memory lock failed: {e}"))
+    })?;
+    Ok(s.offload(&label, content))
+}
+
+#[pyfunction]
+fn memory_recall_bridge(_py: Python, segment_id: String) -> PyResult<String> {
+    let store = CONTEXT_MEMORY_STORE.get().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("Context memory not initialized")
+    })?;
+    let s = store.lock().map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("memory lock failed: {e}"))
+    })?;
+    Ok(s.recall(&segment_id))
+}
+
+#[pyfunction]
+fn memory_manifest_bridge(_py: Python) -> PyResult<String> {
+    let store = CONTEXT_MEMORY_STORE.get().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("Context memory not initialized")
+    })?;
+    let s = store.lock().map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("memory lock failed: {e}"))
+    })?;
+    Ok(s.manifest())
+}
+
+#[pyfunction]
+fn memory_search_bridge(_py: Python, query: String) -> PyResult<String> {
+    let store = CONTEXT_MEMORY_STORE.get().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("Context memory not initialized")
+    })?;
+    let s = store.lock().map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("memory lock failed: {e}"))
+    })?;
+    Ok(s.search(&query))
+}
+
+/// Timeout for child workflow completion (2 minutes).
+const SUB_AGENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Python-callable: llm_query(prompt) -> str
 ///
 /// Releases the GIL via py.allow_threads(), blocks on the async LLM
 /// call, returns the response text. This is the "recursive" in RLM —
 /// generated code can call the LLM for semantic reasoning.
+///
+/// **Dual-mode**: When running under Restate, routes through per-call
+/// reply channels to spawn linked child workflows. Supports parallel
+/// calls. Otherwise, calls the LLM directly via LLM_BRIDGE.
 #[pyfunction]
 fn llm_query_bridge(py: Python, prompt: String) -> PyResult<String> {
-    let bridge = LLM_BRIDGE.get().ok_or_else(|| {
+    // Check Restate bridge first — lock-free atomic load
+    if let Some(bridge) = get_restate_llm_bridge() {
+        return py.detach(move || {
+            // Per-call reply channel — supports parallel llm_query() calls
+            let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel::<String>(1);
+
+            // Dispatch to handler (captured handler_tx + step counter)
+            (bridge.dispatch)(prompt, reply_tx);
+
+            // Block with timeout until child workflow returns result
+            reply_rx.recv_timeout(SUB_AGENT_TIMEOUT).map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Restate sub-agent timed out or failed after {}s: {e}",
+                    SUB_AGENT_TIMEOUT.as_secs()
+                ))
+            })
+        });
+    }
+
+    // Fallback: direct LLM call (non-Restate mode)
+    let bridge = get_llm_bridge().ok_or_else(|| {
         pyo3::exceptions::PyRuntimeError::new_err(
             "LLM bridge not initialized. Ensure session has enable_sub_llm=true.",
         )
     })?;
-    let bridge = bridge.clone();
 
     py.detach(move || {
         let provider = LlmProvider::new(bridge.config.clone());
@@ -298,10 +490,8 @@ fn llm_query_bridge(py: Python, prompt: String) -> PyResult<String> {
 /// Runs multiple LLM calls concurrently for efficiency.
 #[pyfunction]
 fn llm_query_batched_bridge(py: Python, prompts: Vec<String>) -> PyResult<Vec<String>> {
-    let bridge = LLM_BRIDGE
-        .get()
+    let bridge = get_llm_bridge()
         .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("LLM bridge not initialized."))?;
-    let bridge = bridge.clone();
 
     py.detach(move || {
         bridge.runtime.block_on(async {
@@ -508,6 +698,25 @@ impl CodeExecutor for Pyo3CodeExecutor {
                 );
             }
         }
+
+        // 5. Inject context memory bridge functions (always available)
+        Python::attach(|py| -> PyResult<()> {
+            let globals = self.globals.as_ref().unwrap().bind(py);
+            let offload_fn = wrap_pyfunction!(memory_offload_bridge, py)?;
+            globals.set_item("memory_offload", offload_fn)?;
+            let recall_fn = wrap_pyfunction!(memory_recall_bridge, py)?;
+            globals.set_item("memory_recall", recall_fn)?;
+            let manifest_fn = wrap_pyfunction!(memory_manifest_bridge, py)?;
+            globals.set_item("memory_manifest", manifest_fn)?;
+            let search_fn = wrap_pyfunction!(memory_search_bridge, py)?;
+            globals.set_item("memory_search", search_fn)?;
+            Ok(())
+        })
+        .map_err(|e| anyhow::anyhow!("Failed to inject memory bridge: {e}"))?;
+
+        tracing::info!(
+            "Context memory bridge injected: memory_offload/recall/manifest/search available"
+        );
 
         self.session_ready = true;
         Ok(())

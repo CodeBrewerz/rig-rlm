@@ -67,6 +67,12 @@ impl ConversationHistory {
         self.messages.clear();
     }
 
+    /// Insert a message at a specific position.
+    pub fn insert_at(&mut self, index: usize, message: HistoryMessage) {
+        let pos = index.min(self.messages.len());
+        self.messages.insert(pos, message);
+    }
+
     /// Convert to rig's prompt format.
     ///
     /// Returns `(latest_user_prompt, chat_history)` because rig's

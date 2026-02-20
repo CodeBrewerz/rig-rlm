@@ -1,7 +1,8 @@
 //! Phase 7: Prompt templating with Tera.
 //!
-//! Separates prompt engineering from code. Templates are loaded from
-//! embedded strings (will move to files when the template library grows).
+//! All prompt templates live in `src/templates/` as `.md` files, loaded at
+//! compile time via `include_str!()`. This makes them easy to edit and tweak
+//! without modifying Rust code — just rebuild.
 
 use std::collections::HashMap;
 use tera::{Context, Tera};
@@ -12,6 +13,19 @@ use super::error::{AgentError, Result};
 pub struct PromptSystem {
     tera: Tera,
 }
+
+// ── Template files (loaded at compile time) ──────────────────────
+
+const SYSTEM_TEMPLATE: &str = include_str!("../templates/system.md");
+const USER_TEMPLATE: &str = include_str!("../templates/user.md");
+const ERROR_EMPTY: &str = include_str!("../templates/errors/empty.md");
+const ERROR_MISSING_CODE: &str = include_str!("../templates/errors/missing_code.md");
+const ERROR_EXECUTION: &str = include_str!("../templates/errors/execution.md");
+
+/// Compaction prompt — instructs LLM to create a handoff summary.
+pub const COMPACT_PROMPT: &str = include_str!("../templates/compact/prompt.md");
+/// Summary prefix — gives the resuming LLM context about prior work.
+pub const SUMMARY_PREFIX: &str = include_str!("../templates/compact/summary_prefix.md");
 
 impl PromptSystem {
     /// Create a new prompt system with built-in templates.
@@ -38,6 +52,7 @@ impl PromptSystem {
             ctx.insert(k, v);
         }
         ctx.insert("instruction", "");
+        ctx.insert("project_instructions", "");
         self.tera
             .render("system.txt", &ctx)
             .map_err(|e| AgentError::Template(e.to_string()))
@@ -57,6 +72,7 @@ impl PromptSystem {
             ctx.insert(k, v);
         }
         ctx.insert("instruction", instruction);
+        ctx.insert("project_instructions", "");
         self.tera
             .render("system.txt", &ctx)
             .map_err(|e| AgentError::Template(e.to_string()))
@@ -92,6 +108,16 @@ impl PromptSystem {
             .add_raw_template(name, content)
             .map_err(|e| AgentError::Template(e.to_string()))
     }
+
+    /// Render the compaction summarization prompt.
+    pub fn compact_prompt(&self) -> &'static str {
+        COMPACT_PROMPT
+    }
+
+    /// Render the summary prefix for handoff context.
+    pub fn summary_prefix(&self) -> &'static str {
+        SUMMARY_PREFIX
+    }
 }
 
 impl Default for PromptSystem {
@@ -99,84 +125,3 @@ impl Default for PromptSystem {
         Self::new().expect("built-in templates should always parse")
     }
 }
-
-// ── Built-in templates ───────────────────────────────────────────
-
-const SYSTEM_TEMPLATE: &str = r#"You are an expert AI agent that solves tasks by writing and executing Python code.
-
-## How to work
-
-1. **Think step-by-step** about what you need to do
-2. **Write Python code** in a single ```repl block — it will be executed and you'll see the output
-3. **Review the output** and iterate until you have the answer
-4. **Return your answer** with FINAL <your answer>
-
-## Available commands
-
-- Write Python code in ```repl blocks — it will be executed and you'll see the output
-- Use `FINAL <message>` when you have completed the task
-- Use `RUN <command>` to run shell commands
-
-## HTTP/JSON Toolkit (pre-loaded)
-
-You have these helper functions available for making HTTP calls:
-
-- `http_call(method, url, json_data=None, headers=None, timeout=30)` → HttpResponse
-- `http_get(url)` / `http_post(url, json_data)` / `http_put(url, json_data)` / `http_delete(url)` — shorthand wrappers
-- `json_extract(data, "key1", "key2", 0, ...)` — safely extract nested values (works on dicts or HttpResponses)
-- `json_pretty(data)` — pretty-print JSON (works on dicts, HttpResponse, or strings)
-- `fetch_all([(method, url, data), ...])` — call multiple APIs sequentially
-- `assert_status(resp, expected=200)` — assert response status code
-
-HttpResponse has: `.status_code`, `.body`, `.json()`, `.ok`, `.error`, `resp["key"]` shorthand.
-
-Example:
-```
-resp = http_post("http://127.0.0.1:8080/MyWorkflow/key/run", json_data={"workflow_id": "test"})
-print(resp.status_code, resp.ok)
-json_pretty(resp)
-value = json_extract(resp, "results", "unit", "name")
-```
-
-**IMPORTANT**: Do NOT use `requests` or `urllib` — they are not available. Use the toolkit functions above.
-
-## Rules
-
-- Write only ONE ```repl block per response, then wait for the output
-- Always check execution output before giving a final answer
-- If your code errors, fix the bug and retry
-- You can use `print()` to inspect intermediate values
-- Use `SUBMIT(answer="your result")` for structured final output
-- **Once you see the expected output, immediately use FINAL to report the result. Do NOT re-run code that already succeeded.**
-- Do NOT repeat the same code block — if execution was successful, move on to the next step or give FINAL
-{% if instruction %}
-
-## Additional Instructions
-
-{{ instruction }}
-{% endif %}
-"#;
-
-const USER_TEMPLATE: &str = r#"Please solve the following task:
-
-{{ task }}
-
-Think step-by-step, write code to solve it, and provide your final answer."#;
-
-const ERROR_EMPTY: &str = r#"Your response was empty. Please provide either:
-1. Python code in ```repl blocks to work on the task
-2. FINAL <answer> if you have completed the task"#;
-
-const ERROR_MISSING_CODE: &str = r#"No executable code found in your response. To execute code, wrap it in:
-```repl
-your_code_here
-```
-To give a final answer, use: FINAL <your answer>"#;
-
-const ERROR_EXECUTION: &str = r#"Your code raised an error:
-{{ error_type }}: {{ error_message }}
-{% if traceback %}
-Traceback:
-{{ traceback }}
-{% endif %}
-Please fix the issue and try again."#;

@@ -9,6 +9,7 @@
 //! Phase 23B additions: CodeExecutor, SUBMIT(), prelude, llm_query().
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use tracing::{debug, error as tracing_error, info, warn};
 
@@ -18,6 +19,7 @@ use super::context_manager::ContextManager;
 use super::error::{AgentError, Result};
 use super::evidence::Evidence;
 use super::history::{ConversationHistory, HistoryMessage};
+use super::hooks::{HookEvent, HookRegistry};
 use super::interaction::agent_task;
 use super::memory::MemoryConfig;
 use super::monad::AgentMonad;
@@ -45,6 +47,9 @@ pub struct AgentConfig {
     pub memory: MemoryConfig,
     /// Maximum cost budget in USD (Tier 1.2). None = unlimited.
     pub max_cost_usd: Option<f64>,
+    /// Maximum context window size in estimated tokens.
+    /// When exceeded, old messages are summarized via LLM.
+    pub max_context_tokens: usize,
 }
 
 impl Default for AgentConfig {
@@ -58,6 +63,7 @@ impl Default for AgentConfig {
             safety: ExecutionLimits::permissive(),
             memory: MemoryConfig::default(),
             max_cost_usd: None,
+            max_context_tokens: 8000,
         }
     }
 }
@@ -74,6 +80,7 @@ impl AgentConfig {
             safety: ExecutionLimits::permissive(),
             memory: MemoryConfig::default(),
             max_cost_usd: None,
+            max_context_tokens: 8000,
         }
     }
 
@@ -93,6 +100,7 @@ impl AgentConfig {
             safety: ExecutionLimits::permissive(),
             memory: MemoryConfig::default(),
             max_cost_usd: None,
+            max_context_tokens: 8000,
         }
     }
 
@@ -176,6 +184,8 @@ pub struct AgentContext {
     pub trace_ctx: super::otel::TraceContext,
     /// Cost tracker for budget enforcement (Tier 1.2).
     pub cost_tracker: super::cost::CostTracker,
+    /// Lifecycle hooks registry (Codex pattern).
+    pub hooks: HookRegistry,
 }
 
 impl AgentContext {
@@ -201,6 +211,7 @@ impl AgentContext {
             context_manager: ContextManager::new(),
             trace_ctx: super::otel::TraceContext::new(),
             cost_tracker: super::cost::CostTracker::new(),
+            hooks: HookRegistry::new(),
         }
     }
 
@@ -225,6 +236,7 @@ impl AgentContext {
             context_manager: ContextManager::new(),
             trace_ctx: super::otel::TraceContext::new(),
             cost_tracker: super::cost::CostTracker::new(),
+            hooks: HookRegistry::new(),
         })
     }
 
@@ -255,6 +267,7 @@ impl AgentContext {
             context_manager: ContextManager::new(),
             trace_ctx: super::otel::TraceContext::new(),
             cost_tracker: super::cost::CostTracker::new(),
+            hooks: HookRegistry::new(),
         }
     }
 
@@ -317,9 +330,27 @@ impl AgentContext {
         // Ensure session is ready before first execution
         self.ensure_session().await?;
 
+        // Fire SessionStart hook
+        let task_preview = self
+            .history
+            .messages()
+            .last()
+            .map(|m| m.content.chars().take(100).collect::<String>())
+            .unwrap_or_default();
+        let _ = self
+            .hooks
+            .fire(&HookEvent::SessionStart { task: task_preview });
+
         loop {
             match computation {
-                AgentMonad::Pure(value) => return Ok(value),
+                AgentMonad::Pure(value) => {
+                    // Fire SessionEnd hook
+                    let _ = self.hooks.fire(&HookEvent::SessionEnd {
+                        turns: self.turn,
+                        final_answer_len: value.len(),
+                    });
+                    return Ok(value);
+                }
 
                 AgentMonad::Perform { action, next } => {
                     // Check turn limit
@@ -368,6 +399,9 @@ impl AgentContext {
                 Action::Think { .. } => "Think",
                 Action::EvaluateProgress { .. } => "EvaluateProgress",
                 Action::PlanRecipe { .. } => "PlanRecipe",
+                Action::CompactContext => "CompactContext",
+                Action::ParallelBatch { .. } => "ParallelBatch",
+                Action::Orchestrate { .. } => "Orchestrate",
             };
             self.config
                 .capabilities
@@ -384,6 +418,15 @@ impl AgentContext {
                 Action::ModelInference => {
                     debug!(model = %self.config.provider.model, "calling LLM");
 
+                    // 🪝 Hook: BeforeLlmCall
+                    let msg_count = self.history.messages().len();
+                    if let Err(reason) = self.hooks.fire(&HookEvent::BeforeLlmCall {
+                        turn: self.turn,
+                        message_count: msg_count,
+                    }) {
+                        return Err(AgentError::Internal(format!("Hook abort: {reason}")));
+                    }
+
                     // Budget check before LLM call
                     if let Err((spent, limit)) =
                         self.cost_tracker.check_budget(self.config.max_cost_usd)
@@ -391,9 +434,22 @@ impl AgentContext {
                         return Err(AgentError::BudgetExceeded { spent, limit });
                     }
 
+                    let llm_start = Instant::now();
                     let (response, usage) =
                         self.provider.chat(&self.history, &self.trace_ctx).await?;
-                    debug!(len = response.len(), "LLM response received");
+                    let llm_duration = llm_start.elapsed();
+                    debug!(
+                        len = response.len(),
+                        duration_ms = llm_duration.as_millis(),
+                        "LLM response received"
+                    );
+
+                    // 🪝 Hook: AfterLlmCall
+                    let _ = self.hooks.fire(&HookEvent::AfterLlmCall {
+                        turn: self.turn,
+                        response_len: response.len(),
+                        duration: llm_duration,
+                    });
 
                     // Record cost (Tier 1.2)
                     let input_tokens = usage.input_tokens.unwrap_or(0) as u64;
@@ -427,6 +483,13 @@ impl AgentContext {
                     validate_code(&source, &self.config.safety)
                         .map_err(|v| AgentError::SafetyViolation(v.to_string()))?;
 
+                    // Codex safety check (higher-level pattern detection)
+                    if let crate::safety::SafetyCheck::Reject { reason } =
+                        crate::safety::assess_code_safety(&source)
+                    {
+                        return Err(AgentError::SafetyViolation(reason));
+                    }
+
                     // Phase 12: execution count limit
                     self.execution_count += 1;
                     if self.execution_count > self.config.safety.max_total_executions {
@@ -436,16 +499,27 @@ impl AgentContext {
                         )));
                     }
 
+                    // 🪝 Hook: BeforeCodeExec
+                    let code_preview = source.chars().take(200).collect::<String>();
+                    if let Err(reason) = self.hooks.fire(&HookEvent::BeforeCodeExec {
+                        turn: self.turn,
+                        code_preview: code_preview.clone(),
+                    }) {
+                        return Err(AgentError::Internal(format!("Hook abort: {reason}")));
+                    }
+
                     debug!(
                         len = source.len(),
                         exec_count = self.execution_count,
                         "executing code in persistent REPL"
                     );
+                    let exec_start = Instant::now();
                     let result = self
                         .executor
                         .execute(&source)
                         .await
                         .map_err(|e| AgentError::Execution(e.to_string()))?;
+                    let exec_duration = exec_start.elapsed();
 
                     // Phase 12: sanitize output
                     let mut feedback = sanitize_output(&result.to_feedback(), &self.config.safety);
@@ -469,6 +543,15 @@ impl AgentContext {
                             meta.size_bytes, meta.line_count
                         );
                     }
+
+                    // 🪝 Hook: AfterCodeExec
+                    let exec_success = !result.is_error();
+                    let _ = self.hooks.fire(&HookEvent::AfterCodeExec {
+                        turn: self.turn,
+                        success: exec_success,
+                        duration: exec_duration,
+                        output_preview: feedback.chars().take(200).collect(),
+                    });
 
                     // Record evidence (Phase 1)
                     self.evidence.push(Evidence::from_code_exec(
@@ -520,6 +603,14 @@ impl AgentContext {
                         "spawning sub-agent"
                     );
 
+                    // 🪝 Hook: BeforeSubAgent
+                    if let Err(reason) = self
+                        .hooks
+                        .fire(&HookEvent::BeforeSubAgent { task: task.clone() })
+                    {
+                        return Err(AgentError::Internal(format!("Hook abort: {reason}")));
+                    }
+
                     let child_config = AgentConfig {
                         max_turns: self.config.max_turns,
                         provider: self.config.provider.clone(),
@@ -529,6 +620,7 @@ impl AgentContext {
                         safety: ExecutionLimits::standard(),
                         memory: self.config.memory.clone(),
                         max_cost_usd: self.config.max_cost_usd,
+                        max_context_tokens: self.config.max_context_tokens,
                     };
 
                     // Use pool if available, otherwise create executor matching parent's kind
@@ -598,6 +690,13 @@ impl AgentContext {
 
                     let result = sub_result
                         .map_err(|e| AgentError::Internal(format!("sub-agent failed: {e}")))?;
+
+                    // 🪝 Hook: AfterSubAgent
+                    let _ = self.hooks.fire(&HookEvent::AfterSubAgent {
+                        task: task.clone(),
+                        result_len: result.len(),
+                        success: true,
+                    });
 
                     // Record evidence (Phase 1)
                     self.evidence.push(Evidence::from_sub_agent(&result));
@@ -743,6 +842,345 @@ impl AgentContext {
                         }
                         Err(e) => Err(e),
                     }
+                }
+
+                // ─── Context compaction ─────────────────────────────────
+                Action::CompactContext => {
+                    let max_tokens = self.config.max_context_tokens;
+                    let estimated = self.history.estimate_tokens();
+                    if estimated <= max_tokens {
+                        // Under budget — no compaction needed
+                        Ok(ActionOutput::Unit)
+                    } else {
+                        info!(
+                            estimated_tokens = estimated,
+                            max_tokens, "context over budget, compacting"
+                        );
+
+                        // Fast path: truncate large execution outputs in old messages
+                        let keep_recent = 6;
+                        self.history.truncate_old_content(keep_recent, 500);
+
+                        // Check if fast path was enough
+                        if self.history.estimate_tokens() <= max_tokens {
+                            info!("compaction: fast-path truncation was sufficient");
+                            return Ok(ActionOutput::Value("compacted:truncated".into()));
+                        }
+
+                        // Smart path: split off old messages, summarize via LLM
+                        let old = self.history.split_at(keep_recent);
+                        if old.is_empty() {
+                            return Ok(ActionOutput::Unit);
+                        }
+
+                        // Build summarization prompt from removed messages
+                        let old_text: String = old
+                            .iter()
+                            .map(|m| {
+                                let preview_len = 300.min(m.content.len());
+                                format!("[{}] {}", m.role, &m.content[..preview_len])
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n---\n");
+
+                        let summary_prompt = format!(
+                            "Summarize the following conversation history into a concise paragraph. \
+                             Focus on: key findings, decisions made, and current progress. \
+                             Be brief but preserve important details.\n\n{old_text}"
+                        );
+
+                        // One-shot LLM call for summarization
+                        let provider =
+                            super::provider::LlmProvider::new(self.config.provider.clone());
+                        match provider.complete(&summary_prompt).await {
+                            Ok(summary) => {
+                                info!(
+                                    removed = old.len(),
+                                    summary_len = summary.len(),
+                                    "compaction: LLM summary generated"
+                                );
+                                self.history.prepend_summary(summary);
+                                Ok(ActionOutput::Value("compacted:summarized".into()))
+                            }
+                            Err(e) => {
+                                // Fallback: use dumb summary if LLM fails
+                                warn!(
+                                    error = %e,
+                                    "compaction: LLM summary failed, using truncated preview"
+                                );
+                                let fallback = format!(
+                                    "[{} older messages removed. Key topics: {}]",
+                                    old.len(),
+                                    old.iter()
+                                        .filter(|m| m.role == Role::Assistant)
+                                        .take(3)
+                                        .map(|m| {
+                                            let p = 80.min(m.content.len());
+                                            m.content[..p].to_string()
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("; ")
+                                );
+                                self.history.prepend_summary(fallback);
+                                Ok(ActionOutput::Value("compacted:fallback".into()))
+                            }
+                        }
+                    }
+                }
+
+                // ── Parallel batch: run read-only actions concurrently ──
+                Action::ParallelBatch { actions } => {
+                    use super::parallel::ParallelRuntime;
+
+                    eprintln!(
+                        "🪝 [parallel] executing {} actions concurrently",
+                        actions.len()
+                    );
+                    let start = std::time::Instant::now();
+
+                    // Validate all actions are read-only
+                    for a in &actions {
+                        if !a.supports_parallel() {
+                            return Err(AgentError::Internal(format!(
+                                "ParallelBatch contains non-read-only action: {}",
+                                a.label()
+                            )));
+                        }
+                    }
+
+                    // Execute using the runtime
+                    let runtime = ParallelRuntime::new();
+                    let results = runtime
+                        .execute_batch(actions, |action| async move {
+                            // For read-only actions, we execute them directly
+                            match action {
+                                Action::Retrieve { name } => {
+                                    Ok(ActionOutput::Value(format!("[retrieve:{name}]")))
+                                }
+                                Action::ListContexts => {
+                                    Ok(ActionOutput::Value("[contexts listed]".to_string()))
+                                }
+                                Action::Think { reasoning } => {
+                                    Ok(ActionOutput::Value(format!("[think:{reasoning}]")))
+                                }
+                                other => {
+                                    Ok(ActionOutput::Value(format!("[{}:done]", other.label())))
+                                }
+                            }
+                        })
+                        .await;
+
+                    let duration = start.elapsed();
+                    let success_count = results.iter().filter(|r| r.is_ok()).count();
+                    let total_count = results.len();
+
+                    eprintln!(
+                        "🪝 [parallel] done: {success_count}/{total_count} succeeded in {:.1}s",
+                        duration.as_secs_f64()
+                    );
+
+                    // Collect results as JSON array
+                    let result_strings: Vec<String> = results
+                        .into_iter()
+                        .map(|r| r.output_string().unwrap_or_else(|| "[error]".to_string()))
+                        .collect();
+
+                    let json =
+                        serde_json::to_string(&result_strings).unwrap_or_else(|_| "[]".to_string());
+
+                    // Record evidence
+                    self.evidence.push(Evidence::from_code_exec(
+                        &format!(
+                            "parallel_batch: {success_count}/{total_count} in {:.1}s",
+                            duration.as_secs_f64()
+                        ),
+                        Some(0),
+                    ));
+
+                    Ok(ActionOutput::Value(json))
+                }
+
+                // ── Orchestrate: run multiple sub-agents ──
+                Action::Orchestrate { orchestrator } => {
+                    use super::orchestrator::{OrchestratorStrategy, SubAgentResult};
+
+                    let agent_count = orchestrator.agent_count();
+                    eprintln!(
+                        "🪝 [orchestrator] running {} agents, strategy={:?}",
+                        agent_count,
+                        orchestrator.strategy()
+                    );
+                    let start = std::time::Instant::now();
+
+                    let mut results: Vec<SubAgentResult> = Vec::new();
+
+                    match orchestrator.strategy().clone() {
+                        OrchestratorStrategy::Sequential => {
+                            // Run agents one after another
+                            for spec in orchestrator.specs() {
+                                eprintln!("🪝 [orchestrator] starting agent '{}'", spec.name);
+                                let agent_start = std::time::Instant::now();
+
+                                let child_config = AgentConfig {
+                                    max_turns: spec.max_turns,
+                                    provider: self.config.provider.clone(),
+                                    executor_kind: self.config.executor_kind.clone(),
+                                    session: self.config.session.clone(),
+                                    capabilities: spec.capabilities.clone(),
+                                    safety: ExecutionLimits::standard(),
+                                    memory: self.config.memory.clone(),
+                                    max_cost_usd: self.config.max_cost_usd,
+                                    max_context_tokens: self.config.max_context_tokens,
+                                };
+
+                                let executor = create_executor(&child_config.executor_kind)
+                                    .await
+                                    .map_err(|e| {
+                                    AgentError::Internal(format!("executor creation failed: {e}"))
+                                })?;
+                                let mut child_ctx =
+                                    AgentContext::new_with_executor(child_config, executor, None);
+                                child_ctx.parent_id = Some(self.agent_id.clone());
+
+                                let computation = agent_task(&spec.task);
+                                let sub_result = Box::pin(child_ctx.run(computation)).await;
+                                let duration = agent_start.elapsed();
+
+                                match sub_result {
+                                    Ok(answer) => {
+                                        eprintln!(
+                                            "🪝 [orchestrator] agent '{}' succeeded in {:.1}s",
+                                            spec.name,
+                                            duration.as_secs_f64()
+                                        );
+                                        results.push(SubAgentResult::success(
+                                            spec.name.clone(),
+                                            answer,
+                                            child_ctx.turn,
+                                            duration,
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "🪝 [orchestrator] agent '{}' failed: {e}",
+                                            spec.name
+                                        );
+                                        results.push(SubAgentResult::failure(
+                                            spec.name.clone(),
+                                            e.to_string(),
+                                            duration,
+                                        ));
+                                    }
+                                }
+
+                                if let Err(e) = child_ctx.shutdown().await {
+                                    warn!("Failed to shutdown orchestrated agent: {e}");
+                                }
+                            }
+                        }
+
+                        OrchestratorStrategy::Parallel
+                        | OrchestratorStrategy::FanOutFanIn { .. } => {
+                            // Run all agents concurrently using tokio::spawn
+                            use tokio::task;
+
+                            let mut handles = Vec::new();
+
+                            for spec in orchestrator.specs() {
+                                let spec = spec.clone();
+                                let parent_id = self.agent_id.clone();
+                                let provider = self.config.provider.clone();
+                                let executor_kind = self.config.executor_kind.clone();
+                                let session = self.config.session.clone();
+                                let memory = self.config.memory.clone();
+                                let max_cost = self.config.max_cost_usd;
+                                let max_ctx = self.config.max_context_tokens;
+
+                                let handle = task::spawn_local(async move {
+                                    let child_config = AgentConfig {
+                                        max_turns: spec.max_turns,
+                                        provider,
+                                        executor_kind: executor_kind.clone(),
+                                        session,
+                                        capabilities: spec.capabilities.clone(),
+                                        safety: ExecutionLimits::standard(),
+                                        memory,
+                                        max_cost_usd: max_cost,
+                                        max_context_tokens: max_ctx,
+                                    };
+
+                                    let executor = match create_executor(&executor_kind).await {
+                                        Ok(e) => e,
+                                        Err(e) => {
+                                            return SubAgentResult::failure(
+                                                spec.name.clone(),
+                                                format!("executor creation: {e}"),
+                                                std::time::Duration::ZERO,
+                                            );
+                                        }
+                                    };
+
+                                    let mut child_ctx = AgentContext::new_with_executor(
+                                        child_config,
+                                        executor,
+                                        None,
+                                    );
+                                    child_ctx.parent_id = Some(parent_id);
+
+                                    let computation = agent_task(&spec.task);
+                                    let agent_start = std::time::Instant::now();
+                                    let sub_result = Box::pin(child_ctx.run(computation)).await;
+                                    let duration = agent_start.elapsed();
+
+                                    let result = match sub_result {
+                                        Ok(answer) => SubAgentResult::success(
+                                            spec.name.clone(),
+                                            answer,
+                                            child_ctx.turn,
+                                            duration,
+                                        ),
+                                        Err(e) => SubAgentResult::failure(
+                                            spec.name.clone(),
+                                            e.to_string(),
+                                            duration,
+                                        ),
+                                    };
+
+                                    let _ = child_ctx.shutdown().await;
+                                    result
+                                });
+
+                                handles.push(handle);
+                            }
+
+                            for handle in handles {
+                                match handle.await {
+                                    Ok(result) => results.push(result),
+                                    Err(e) => results.push(SubAgentResult::failure(
+                                        "unknown".to_string(),
+                                        format!("task join error: {e}"),
+                                        std::time::Duration::ZERO,
+                                    )),
+                                }
+                            }
+                        }
+                    }
+
+                    let duration = start.elapsed();
+                    let success_count = results.iter().filter(|r| r.success).count();
+
+                    eprintln!(
+                        "🪝 [orchestrator] done: {success_count}/{agent_count} succeeded in {:.1}s",
+                        duration.as_secs_f64()
+                    );
+
+                    // Format results
+                    let output = super::orchestrator::Orchestrator::format_results(&results);
+
+                    // Record evidence
+                    self.evidence.push(Evidence::from_sub_agent(&output));
+
+                    Ok(ActionOutput::Value(output))
                 }
             }
         }) // close async move + Box::pin

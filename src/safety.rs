@@ -245,6 +245,52 @@ fn indent_code(code: &str, spaces: usize) -> String {
         .join("\n")
 }
 
+// ── SafetyCheck (inspired by Codex CLI) ──────────────────────────
+
+/// Higher-level safety assessment for code execution.
+///
+/// Complements the existing `validate_code()` (which checks against
+/// `ExecutionLimits`) with pattern-based detection of dangerous operations.
+#[derive(Debug, PartialEq)]
+pub enum SafetyCheck {
+    /// Code is safe to auto-approve.
+    AutoApprove,
+    /// Code should be rejected with a reason.
+    Reject { reason: String },
+}
+
+/// Dangerous shell patterns that should be rejected.
+const DANGEROUS_PATTERNS: &[(&str, &str)] = &[
+    ("rm -rf /", "recursive deletion of root filesystem"),
+    ("rm -rf ~", "recursive deletion of home directory"),
+    ("mkfs.", "filesystem formatting"),
+    ("dd if=", "raw disk write"),
+    (":(){:|:&};:", "fork bomb"),
+    ("chmod -R 777 /", "recursive permission change on root"),
+    ("shutdown", "system shutdown"),
+    ("reboot", "system reboot"),
+    ("init 0", "system halt"),
+];
+
+/// Assess whether code is safe to execute.
+///
+/// This runs *before* the existing `validate_code()` and provides
+/// a higher-level check for patterns that are dangerous regardless
+/// of the `ExecutionLimits` configuration.
+pub fn assess_code_safety(code: &str) -> SafetyCheck {
+    let code_lower = code.to_lowercase();
+
+    for (pattern, reason) in DANGEROUS_PATTERNS {
+        if code_lower.contains(pattern) {
+            return SafetyCheck::Reject {
+                reason: format!("Dangerous pattern detected: {reason}"),
+            };
+        }
+    }
+
+    SafetyCheck::AutoApprove
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

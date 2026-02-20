@@ -6,6 +6,7 @@
 use std::fmt;
 
 use super::capabilities::Capabilities;
+use super::orchestrator::Orchestrator;
 
 /// A side effect the agent can perform.
 ///
@@ -86,6 +87,24 @@ pub enum Action {
     /// cost, and executes the full pipeline. Returns a summary of all
     /// step results.
     PlanRecipe { recipe_yaml: String },
+
+    // ─── Context compaction ───────────────────────────────────────
+    /// Check if context window is over budget and compact if needed.
+    /// Truncates large execution outputs first (fast path), then
+    /// summarizes old turns via a one-shot LLM call (smart path).
+    CompactContext,
+
+    // ─── Parallel execution (Codex pattern) ───────────────────────
+    /// Execute multiple read-only actions concurrently.
+    /// All actions in the batch must be `ActionSafety::ReadOnly`.
+    /// Returns a JSON array of results.
+    ParallelBatch { actions: Vec<Action> },
+
+    // ─── Multi-agent orchestration (Codex pattern) ────────────────
+    /// Configure and run multiple sub-agents.
+    /// Uses the Orchestrator's strategy (Sequential/Parallel/FanOutFanIn).
+    /// Returns a formatted summary of all sub-agent results.
+    Orchestrate { orchestrator: Orchestrator },
 }
 
 impl Action {
@@ -106,6 +125,9 @@ impl Action {
             Self::Think { .. } => "think",
             Self::EvaluateProgress { .. } => "eval",
             Self::PlanRecipe { .. } => "recipe",
+            Self::CompactContext => "compact",
+            Self::ParallelBatch { .. } => "parallel",
+            Self::Orchestrate { .. } => "orchestrate",
         }
     }
 
@@ -114,7 +136,12 @@ impl Action {
     pub fn is_io(&self) -> bool {
         matches!(
             self,
-            Self::ModelInference | Self::ExecuteCode { .. } | Self::SpawnSubAgent { .. }
+            Self::ModelInference
+                | Self::ExecuteCode { .. }
+                | Self::SpawnSubAgent { .. }
+                | Self::CompactContext
+                | Self::ParallelBatch { .. }
+                | Self::Orchestrate { .. }
         )
     }
 }

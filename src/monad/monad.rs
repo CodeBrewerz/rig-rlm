@@ -207,6 +207,32 @@ impl AgentMonad {
             |output| Self::Pure(output.into_string()),
         )
     }
+
+    // ─── Context compaction builder ─────────────────────────────────
+
+    /// Check and compact context if over token budget.
+    /// Returns empty string if no compaction needed, or "compacted" if it was.
+    pub fn compact_context() -> Self {
+        Self::perform(Action::CompactContext, |_| Self::Pure(String::new()))
+    }
+
+    // ─── Parallel + Orchestration builders (Codex patterns) ─────────
+
+    /// Execute multiple read-only actions concurrently.
+    /// Returns a JSON array of their results.
+    pub fn parallel_batch(actions: Vec<Action>) -> Self {
+        Self::perform(Action::ParallelBatch { actions }, |output| {
+            Self::Pure(output.into_string())
+        })
+    }
+
+    /// Run multiple sub-agents via the orchestrator.
+    /// Returns a formatted summary of all results.
+    pub fn orchestrate(orchestrator: super::orchestrator::Orchestrator) -> Self {
+        Self::perform(Action::Orchestrate { orchestrator }, |output| {
+            Self::Pure(output.into_string())
+        })
+    }
 }
 
 // Debug impl that doesn't try to print the continuation closure.

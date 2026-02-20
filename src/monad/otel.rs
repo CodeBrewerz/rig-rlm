@@ -69,7 +69,7 @@ pub mod genai {
 /// Context propagated to all spans in a trace for LangFuse enrichment.
 ///
 /// Set this on `AgentContext` to enrich all spans with session/user/tags.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TraceContext {
     /// User ID for LangFuse user tracking.
     pub user_id: Option<String>,

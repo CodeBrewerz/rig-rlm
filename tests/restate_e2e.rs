@@ -167,6 +167,7 @@ async fn restate_e2e_full_stack() {
         max_turns: Some(3),
         max_cost_usd: Some(0.10),
         preamble: Some("You are a helpful assistant. Be concise.".to_string()),
+        delegate: false,
     };
 
     eprintln!("  Task ID: {task_id}");

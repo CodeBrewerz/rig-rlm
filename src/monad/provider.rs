@@ -21,6 +21,11 @@ pub struct ProviderConfig {
     pub api_key: String,
     /// System prompt / preamble.
     pub preamble: Option<String>,
+    /// Fallback model to try if primary model retries are exhausted.
+    /// Uses same provider/base_url/api_key.
+    pub fallback_model: Option<String>,
+    /// Max retry attempts for transient errors (429, 500, 502, 503). Default: 3.
+    pub max_retries: usize,
 }
 
 impl ProviderConfig {
@@ -32,6 +37,8 @@ impl ProviderConfig {
             base_url: "http://127.0.0.1:1234/v1".to_string(),
             api_key: String::new(),
             preamble: None,
+            fallback_model: None,
+            max_retries: 3,
         }
     }
 
@@ -43,6 +50,8 @@ impl ProviderConfig {
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: api_key.into(),
             preamble: None,
+            fallback_model: None,
+            max_retries: 3,
         }
     }
 
@@ -59,12 +68,26 @@ impl ProviderConfig {
             base_url: base_url.into(),
             api_key: api_key.into(),
             preamble: None,
+            fallback_model: None,
+            max_retries: 3,
         }
     }
 
     /// Set the system preamble.
     pub fn with_preamble(mut self, preamble: impl Into<String>) -> Self {
         self.preamble = Some(preamble.into());
+        self
+    }
+
+    /// Set a fallback model to try if primary retries are exhausted.
+    pub fn with_fallback(mut self, model: impl Into<String>) -> Self {
+        self.fallback_model = Some(model.into());
+        self
+    }
+
+    /// Set max retry attempts for transient errors.
+    pub fn with_max_retries(mut self, n: usize) -> Self {
+        self.max_retries = n;
         self
     }
 }
@@ -107,69 +130,122 @@ impl LlmProvider {
             .build()
             .map_err(|e| AgentError::Inference(e.to_string()))?;
 
-        let model = client
-            .completion_model(&self.config.model)
-            .completions_api();
-
         let (prompt, chat_history) = history.to_rig_prompt();
         let prompt_snapshot = prompt.clone();
 
-        // Build completion request with chat history
-        let mut req_builder = model.completion_request(prompt).messages(chat_history);
-        if let Some(ref preamble) = self.config.preamble {
-            req_builder = req_builder.preamble(preamble.clone());
-        }
-        let request = req_builder.build();
-
-        // Use low-level completion API to get token usage
-        let completion_result = model
-            .completion(request)
-            .await
-            .map_err(|e: rig::completion::CompletionError| AgentError::Inference(e.to_string()));
-
-        let duration = start.elapsed();
-        let success = completion_result.is_ok();
-
-        // Extract response text and usage
-        let (response_text, usage): (Result<String>, _) = match completion_result {
-            Ok(resp) => {
-                // Extract text from the first assistant content choice
-                use rig::message::AssistantContent;
-                let text = match resp.choice.first() {
-                    AssistantContent::Text(t) => t.text.clone(),
-                    _ => String::new(),
-                };
-                let usage = super::otel::TokenUsage {
-                    input_tokens: Some(resp.usage.input_tokens as i64),
-                    output_tokens: Some(resp.usage.output_tokens as i64),
-                };
-                (Ok(text), usage)
+        // ── Retry loop with exponential backoff ──────────────────────
+        // Retries on transient errors: 429, 500, 502, 503, timeouts.
+        // Non-retryable errors (400, 401, 403) fail immediately.
+        let max_attempts = self.config.max_retries.max(1);
+        let models_to_try: Vec<&str> = {
+            let mut m = vec![self.config.model.as_str()];
+            if let Some(ref fallback) = self.config.fallback_model {
+                m.push(fallback.as_str());
             }
-            Err(e) => (Err(e), super::otel::TokenUsage::default()),
+            m
         };
 
-        eprintln!(
-            "🔗 [provider] chat() ← {:.1}s, success={success}, tokens={}in/{}out",
-            duration.as_secs_f64(),
-            usage.input_tokens.unwrap_or(0),
-            usage.output_tokens.unwrap_or(0),
-        );
+        let mut last_err = None;
 
-        // Record OTEL span with GenAI + LangFuse attributes (including token usage)
-        let output_str = response_text.as_ref().ok().map(|s| s.as_str());
+        for model_id in models_to_try {
+            let model = client.completion_model(model_id).completions_api();
+
+            for attempt in 0..max_attempts {
+                // Build request fresh each attempt
+                let mut req_builder = model
+                    .completion_request(prompt.clone())
+                    .messages(chat_history.clone());
+                if let Some(ref preamble) = self.config.preamble {
+                    req_builder = req_builder.preamble(preamble.clone());
+                }
+                let request = req_builder.build();
+
+                match model.completion(request).await {
+                    Ok(resp) => {
+                        let duration = start.elapsed();
+                        use rig::message::AssistantContent;
+                        let text = match resp.choice.first() {
+                            AssistantContent::Text(t) => t.text.clone(),
+                            _ => String::new(),
+                        };
+                        let usage = super::otel::TokenUsage {
+                            input_tokens: Some(resp.usage.input_tokens as i64),
+                            output_tokens: Some(resp.usage.output_tokens as i64),
+                        };
+
+                        eprintln!(
+                            "🔗 [provider] chat() ← {:.1}s, success=true, tokens={}in/{}out{}",
+                            duration.as_secs_f64(),
+                            usage.input_tokens.unwrap_or(0),
+                            usage.output_tokens.unwrap_or(0),
+                            if attempt > 0 {
+                                format!(" (retry #{attempt})")
+                            } else {
+                                String::new()
+                            },
+                        );
+
+                        super::otel::record_llm_span(
+                            "chat",
+                            &self.config.name,
+                            model_id,
+                            &usage,
+                            duration,
+                            true,
+                            trace_ctx,
+                            Some(&prompt_snapshot),
+                            Some(&text),
+                        );
+
+                        return Ok((text, usage));
+                    }
+                    Err(e) => {
+                        let err_str = e.to_string();
+                        let is_retryable = err_str.contains("429")
+                            || err_str.contains("500")
+                            || err_str.contains("502")
+                            || err_str.contains("503")
+                            || err_str.contains("timeout")
+                            || err_str.contains("connection")
+                            || err_str.contains("rate limit");
+
+                        if !is_retryable || attempt + 1 >= max_attempts {
+                            eprintln!(
+                                "🔗 [provider] chat() ← {:.1}s, FAILED (attempt {}/{max_attempts}, model={model_id}): {err_str}",
+                                start.elapsed().as_secs_f64(),
+                                attempt + 1,
+                            );
+                            last_err = Some(AgentError::Inference(err_str));
+                            break; // try fallback model
+                        }
+
+                        // Exponential backoff: 1s, 2s, 4s, ...
+                        let backoff = std::time::Duration::from_secs(1 << attempt);
+                        eprintln!(
+                            "🔗 [provider] chat() ⚠ attempt {}/{max_attempts} failed (model={model_id}): {err_str}, retrying in {:.0}s",
+                            attempt + 1,
+                            backoff.as_secs_f64(),
+                        );
+                        tokio::time::sleep(backoff).await;
+                    }
+                }
+            }
+        }
+
+        let duration = start.elapsed();
         super::otel::record_llm_span(
             "chat",
             &self.config.name,
             &self.config.model,
-            &usage,
+            &super::otel::TokenUsage::default(),
             duration,
-            success,
+            false,
             trace_ctx,
             Some(&prompt_snapshot),
-            output_str,
+            None,
         );
 
-        response_text.map(|text| (text, usage))
+        Err(last_err.unwrap_or_else(|| AgentError::Inference("all retries exhausted".into())))
     }
 
     /// Single-prompt completion — convenience for sub-LLM bridging.

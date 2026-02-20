@@ -120,6 +120,7 @@ fn interaction_loop() -> AgentMonad {
                     Role::Execution,
                     format!("Execution result:\n{output}"),
                 )
+                .then(AgentMonad::compact_context())
                 .then(interaction_loop())
             });
         }
@@ -134,6 +135,7 @@ fn interaction_loop() -> AgentMonad {
                     Role::Execution,
                     format!("Shell output:\n{output}"),
                 )
+                .then(AgentMonad::compact_context())
                 .then(interaction_loop())
             });
         }
@@ -141,9 +143,11 @@ fn interaction_loop() -> AgentMonad {
         // Case 4: No code, no final — prompt the LLM to provide code
         if response.trim().is_empty() {
             AgentMonad::insert(Role::Execution, ErrorGuidance::EMPTY_RESPONSE.to_string())
+                .then(AgentMonad::compact_context())
                 .then(interaction_loop())
         } else {
             AgentMonad::insert(Role::Execution, ErrorGuidance::MISSING_CODE.to_string())
+                .then(AgentMonad::compact_context())
                 .then(interaction_loop())
         }
     })
