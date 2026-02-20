@@ -212,6 +212,90 @@ def llm_query_batched(prompts: list[str]) -> list[str]:
     return response["result"]
 "#.to_string()
     }
+
+    /// Generate Python helper functions for context operations (Phase 3).
+    ///
+    /// These functions are available in the sandbox and print instructions
+    /// that guide the agent's next action. They don't directly call the
+    /// host — instead they produce structured output that the interaction
+    /// loop can interpret.
+    pub fn generate_context_tools_code() -> String {
+        r#"
+def search_context(context_id: str, pattern: str) -> str:
+    """Search within a named context for a pattern.
+
+    Use this when a large result was auto-loaded into a context.
+    Returns matching lines with line numbers.
+
+    Args:
+        context_id: The context name (e.g. 'auto_exec_3')
+        pattern: Text pattern to search for
+    """
+    print(f"[CONTEXT_SEARCH] id={context_id} pattern={pattern}")
+    return f"Searching context '{context_id}' for '{pattern}'..."
+
+def peek_context(context_id: str, start: int = 1, end: int = 50) -> str:
+    """View a range of lines from a named context.
+
+    Use this to examine specific sections of auto-loaded data.
+
+    Args:
+        context_id: The context name (e.g. 'auto_exec_3')
+        start: First line to view (1-indexed)
+        end: Last line to view (inclusive)
+    """
+    print(f"[CONTEXT_PEEK] id={context_id} start={start} end={end}")
+    return f"Peeking context '{context_id}' lines {start}-{end}..."
+
+def list_contexts() -> str:
+    """List all loaded data contexts with metadata.
+
+    Shows context names, sizes, line counts, and detected formats.
+    """
+    print("[CONTEXT_LIST]")
+    return "Listing loaded contexts..."
+"#
+        .to_string()
+    }
+
+    /// Generate Python helper for recipe pipeline execution (Phase 8).
+    ///
+    /// Allows the agent to define and submit a multi-step pipeline
+    /// from within the sandbox.
+    pub fn generate_recipe_tools_code() -> String {
+        r#"
+def run_pipeline(recipe_yaml: str) -> str:
+    """Define and execute a multi-step pipeline.
+
+    Write a YAML recipe with named steps, dependencies, and task prompts.
+    Each step runs as an independent agent task. Step outputs chain into
+    downstream steps via {{step_id.output}} templates.
+
+    Example:
+        run_pipeline('''
+        name: Analysis Pipeline
+        steps:
+          - id: load
+            task: "Load and explore the data"
+            kind: code_gen
+          - id: model
+            task: "Build model from: {{load.output}}"
+            depends_on: [load]
+          - id: report
+            task: "Write report: {{model.output}}"
+            kind: text_gen
+            depends_on: [model]
+        ''')
+
+    Args:
+        recipe_yaml: YAML string defining the pipeline steps
+    """
+    import json
+    print("__PLAN_RECIPE__" + recipe_yaml + "__PLAN_RECIPE__")
+    return "Pipeline submitted for execution..."
+"#
+        .to_string()
+    }
 }
 
 /// Specification for a host-side tool to inject into the sandbox.

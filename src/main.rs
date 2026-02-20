@@ -37,8 +37,8 @@ pub mod session;
 // ARC-AGI Benchmark (Phases 18-21)
 pub mod arc;
 
-use crate::monad::interaction::{agent_task, agent_task_with_instruction};
-use crate::monad::{AgentConfig, AgentContext, AgentMonad, Role};
+use crate::monad::interaction::agent_task_full;
+use crate::monad::{AgentConfig, AgentContext, AgentMonad, MemoryConfig, Role};
 use crate::persistence::{AgentStore, Session, Turn};
 use crate::sandbox::{ExecutorKind, create_executor};
 
@@ -80,6 +80,18 @@ enum Commands {
         /// Use with GEPA-optimized instructions.
         #[arg(long)]
         instruction: Option<String>,
+
+        /// Paths to AGENTS.md files for project-level instructions.
+        #[arg(long = "agents-md")]
+        agents_md: Vec<String>,
+
+        /// Paths to skill directories containing .md files.
+        #[arg(long = "skill-dir")]
+        skill_dirs: Vec<String>,
+
+        /// Path to a recipe YAML file for multi-step pipeline execution.
+        #[arg(long)]
+        recipe: Option<String>,
     },
 
     /// Run end-to-end test: agent → sandbox → Turso → verify.
@@ -154,6 +166,11 @@ async fn main() -> anyhow::Result<()> {
     // Load .env file (silently ignored if missing)
     dotenvy::dotenv().ok();
 
+    // Initialize OpenTelemetry + LangFuse (no-op if keys not set)
+    if let Err(e) = monad::otel::init_tracing() {
+        eprintln!("⚠️ OTEL init failed (continuing without tracing): {e}");
+    }
+
     // Initialize tracing
     tracing_subscriber::registry()
         .with(
@@ -175,6 +192,9 @@ async fn main() -> anyhow::Result<()> {
             max_turns,
             sub_llm,
             instruction,
+            agents_md,
+            skill_dirs,
+            recipe,
         } => {
             run_agent(
                 &task,
@@ -184,6 +204,9 @@ async fn main() -> anyhow::Result<()> {
                 max_turns,
                 sub_llm,
                 instruction,
+                agents_md,
+                skill_dirs,
+                recipe,
             )
             .await?;
         }
@@ -235,6 +258,9 @@ async fn run_agent(
     max_turns: usize,
     sub_llm: bool,
     instruction: Option<String>,
+    agents_md: Vec<String>,
+    skill_dirs: Vec<String>,
+    recipe: Option<String>,
 ) -> anyhow::Result<()> {
     println!("═══════════════════════════════════════════");
     println!("  rig-rlm — Monadic Agent");
@@ -295,6 +321,24 @@ async fn run_agent(
         agent_config = agent_config.with_sub_llm();
     }
 
+    // Phase 4: build memory config from CLI flags + auto-discovery
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut memory = MemoryConfig::auto_discover(&cwd);
+    for path in &agents_md {
+        memory.agents_md_paths.push(std::path::PathBuf::from(path));
+    }
+    for path in &skill_dirs {
+        memory.skill_dirs.push(std::path::PathBuf::from(path));
+    }
+    if !memory.agents_md_paths.is_empty() || !memory.skill_dirs.is_empty() {
+        println!(
+            "📚 Memory: {} AGENTS.md, {} skill dirs",
+            memory.agents_md_paths.len(),
+            memory.skill_dirs.len()
+        );
+    }
+    agent_config = agent_config.with_memory(memory);
+
     let mut ctx = match &executor_kind {
         crate::sandbox::ExecutorKind::Microsandbox => {
             let pool = std::sync::Arc::new(crate::sandbox::SandboxPool::new(4, 1, None).await?);
@@ -316,67 +360,109 @@ async fn run_agent(
         }
     });
 
-    let program = match &resolved_instruction {
-        Some(instr) => agent_task_with_instruction(task, Some(instr)),
-        None => agent_task(task),
-    };
-    let result = ctx.run(program).await;
+    // 6. Build and run — either recipe pipeline or single task
+    if let Some(recipe_path) = recipe {
+        // Recipe mode: load YAML, validate, run pipeline
+        let yaml = std::fs::read_to_string(&recipe_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read recipe {recipe_path}: {e}"))?;
+        let recipe = crate::monad::Recipe::from_yaml(&yaml)
+            .map_err(|e| anyhow::anyhow!("Invalid recipe YAML: {e}"))?;
 
-    match result {
-        Ok(answer) => {
-            println!("\n═══════════════════════════════════════════");
-            println!("  ✅ Final Answer:");
-            println!("  {answer}");
-            println!("═══════════════════════════════════════════");
-
-            // Print full conversation replay
-            println!("\n📜 Conversation Replay ({} turns):", ctx.history.len());
-            println!("{}", "─".repeat(60));
-            for (i, msg) in ctx.history.messages().iter().enumerate() {
-                let role_icon = match format!("{:?}", msg.role).as_str() {
-                    "System" => "🔧",
-                    "User" => "👤",
-                    "Assistant" => "🤖",
-                    "Execution" => "⚡",
-                    _ => "  ",
-                };
-                println!("{role_icon} Turn {} [{:?}]:", i, msg.role);
-                // Truncate system prompt for readability
-                if msg.role == Role::System && msg.content.len() > 100 {
-                    println!("   {}...", &msg.content[..100]);
-                } else {
-                    for line in msg.content.lines() {
-                        println!("   {line}");
-                    }
-                }
-                println!("{}", "─".repeat(60));
-            }
-
-            // Persist turns
-            for (i, msg) in ctx.history.messages().iter().enumerate() {
-                store
-                    .record_turn(&Turn {
-                        session_id: session_id.clone(),
-                        turn_num: i as i32,
-                        role: format!("{:?}", msg.role),
-                        content: msg.content.clone(),
-                        code: None,
-                        exec_stdout: None,
-                        exec_stderr: None,
-                        exec_return: None,
-                        timestamp_ms: Utc::now().timestamp_millis(),
-                    })
-                    .await?;
-            }
-
-            store
-                .finish_session(&session_id, Some(&answer), None)
-                .await?;
-            println!("\n📦 Session {session_id} saved to {db_path}");
+        let estimate = recipe.estimate_cost();
+        println!("\n🍳 Recipe: {}", recipe.name);
+        if let Some(desc) = &recipe.description {
+            println!("   {desc}");
         }
-        Err(e) => {
-            eprintln!("\n❌ Agent error: {e}");
-            store.finish_session(&session_id, None, None).await?;
+        println!(
+            "   Steps: {}, ~{} LLM calls, ~{:.0} min",
+            estimate.total_steps, estimate.estimated_llm_calls, estimate.estimated_minutes
+        );
+        println!();
+
+        let result = ctx.run_recipe(recipe).await;
+        match result {
+            Ok(recipe_result) => {
+                recipe_result.print_summary();
+                if let Some(final_output) = recipe_result.final_output() {
+                    // Persist final output
+                    store
+                        .finish_session(&session_id, Some(final_output), None)
+                        .await?;
+                } else {
+                    store.finish_session(&session_id, None, None).await?;
+                }
+                println!("\n📦 Session {session_id} saved to {db_path}");
+            }
+            Err(e) => {
+                eprintln!("\n❌ Recipe error: {e}");
+                store.finish_session(&session_id, None, None).await?;
+            }
+        }
+    } else {
+        // Single task mode
+        let program = agent_task_full(
+            task,
+            resolved_instruction.as_deref(),
+            Some(&ctx.config.memory),
+        );
+        let result = ctx.run(program).await;
+
+        match result {
+            Ok(answer) => {
+                println!("\n═══════════════════════════════════════════");
+                println!("  ✅ Final Answer:");
+                println!("  {answer}");
+                println!("═══════════════════════════════════════════");
+
+                // Print full conversation replay
+                println!("\n📜 Conversation Replay ({} turns):", ctx.history.len());
+                println!("{}", "─".repeat(60));
+                for (i, msg) in ctx.history.messages().iter().enumerate() {
+                    let role_icon = match format!("{:?}", msg.role).as_str() {
+                        "System" => "🔧",
+                        "User" => "👤",
+                        "Assistant" => "🤖",
+                        "Execution" => "⚡",
+                        _ => "  ",
+                    };
+                    println!("{role_icon} Turn {} [{:?}]:", i, msg.role);
+                    // Truncate system prompt for readability
+                    if msg.role == Role::System && msg.content.len() > 100 {
+                        println!("   {}...", &msg.content[..100]);
+                    } else {
+                        for line in msg.content.lines() {
+                            println!("   {line}");
+                        }
+                    }
+                    println!("{}", "─".repeat(60));
+                }
+
+                // Persist turns
+                for (i, msg) in ctx.history.messages().iter().enumerate() {
+                    store
+                        .record_turn(&Turn {
+                            session_id: session_id.clone(),
+                            turn_num: i as i32,
+                            role: format!("{:?}", msg.role),
+                            content: msg.content.clone(),
+                            code: None,
+                            exec_stdout: None,
+                            exec_stderr: None,
+                            exec_return: None,
+                            timestamp_ms: Utc::now().timestamp_millis(),
+                        })
+                        .await?;
+                }
+
+                store
+                    .finish_session(&session_id, Some(&answer), None)
+                    .await?;
+                println!("\n📦 Session {session_id} saved to {db_path}");
+            }
+            Err(e) => {
+                eprintln!("\n❌ Agent error: {e}");
+                store.finish_session(&session_id, None, None).await?;
+            }
         }
     }
 
@@ -698,7 +784,7 @@ async fn run_optimization(
 
 /// Show session summary from Turso DB.
 async fn show_summary(db_path: &str, _session_id: &str) -> anyhow::Result<()> {
-    let store = AgentStore::open(db_path).await?;
+    let _store = AgentStore::open(db_path).await?;
     // For now, just show basic info
     println!("📊 Database: {db_path}");
     println!("   (Use session ID to query specific sessions)");

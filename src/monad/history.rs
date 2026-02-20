@@ -4,9 +4,9 @@
 //! to rig's message format for LLM calls.
 
 use rig::{
+    OneOrMany,
     agent::Text,
     message::{AssistantContent, Message, UserContent},
-    OneOrMany,
 };
 
 use super::action::Role;
@@ -124,6 +124,68 @@ impl ConversationHistory {
         }
 
         (latest_user_prompt, history)
+    }
+}
+
+impl ConversationHistory {
+    // ─── Phase 5: Compaction support ──────────────────────────────
+
+    /// Split off old messages, keeping only the most recent `keep_recent` messages.
+    ///
+    /// Returns the removed older messages. The system prompt (first message) is
+    /// always preserved even if it would otherwise be removed.
+    pub fn split_at(&mut self, keep_recent: usize) -> Vec<HistoryMessage> {
+        if self.messages.len() <= keep_recent {
+            return Vec::new();
+        }
+        let split_point = self.messages.len() - keep_recent;
+        // Always keep the system prompt (index 0) if present
+        let actual_split = if !self.messages.is_empty()
+            && self.messages[0].role == Role::System
+            && split_point > 0
+        {
+            split_point.max(1)
+        } else {
+            split_point
+        };
+        let old: Vec<_> = self.messages.drain(..actual_split).collect();
+        old
+    }
+
+    /// Prepend a summary message at the beginning of history.
+    ///
+    /// Inserts after the system prompt if one exists, otherwise at position 0.
+    pub fn prepend_summary(&mut self, summary: String) {
+        let insert_pos = if !self.messages.is_empty() && self.messages[0].role == Role::System {
+            1
+        } else {
+            0
+        };
+        self.messages.insert(
+            insert_pos,
+            HistoryMessage {
+                role: Role::System,
+                content: format!("[Context Summary]\n{summary}"),
+            },
+        );
+    }
+
+    /// Rough token estimate (total chars / 4).
+    pub fn estimate_tokens(&self) -> usize {
+        self.messages.iter().map(|m| m.content.len()).sum::<usize>() / 4
+    }
+
+    /// Truncate large content in old messages (not the most recent `keep_recent`).
+    ///
+    /// Replaces content over `max_length` chars with a truncated preview.
+    pub fn truncate_old_content(&mut self, keep_recent: usize, max_length: usize) {
+        let cutoff = self.messages.len().saturating_sub(keep_recent);
+        for msg in self.messages[..cutoff].iter_mut() {
+            if msg.content.len() > max_length {
+                let preview = &msg.content[..max_length];
+                msg.content = format!("{preview}\n...[truncated, was {} chars]", msg.content.len());
+            }
+        }
     }
 }
 

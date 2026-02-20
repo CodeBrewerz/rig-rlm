@@ -85,10 +85,20 @@ impl LlmProvider {
     /// Send a chat completion request.
     ///
     /// Takes the current conversation history and returns the model's
-    /// response text.
-    pub async fn chat(&self, history: &ConversationHistory) -> Result<String> {
+    /// response text. Records an OTEL span with GenAI semantic conventions.
+    pub async fn chat(
+        &self,
+        history: &ConversationHistory,
+        trace_ctx: &super::otel::TraceContext,
+    ) -> Result<String> {
         use rig::client::CompletionClient;
-        use rig::completion::Chat;
+        use rig::completion::CompletionModel as _;
+
+        let start = std::time::Instant::now();
+        eprintln!(
+            "🔗 [provider] chat() → calling {}/{}",
+            self.config.name, self.config.model
+        );
 
         let client = rig::providers::openai::Client::<reqwest::Client>::builder()
             .base_url(&self.config.base_url)
@@ -97,27 +107,69 @@ impl LlmProvider {
             .build()
             .map_err(|e| AgentError::Inference(e.to_string()))?;
 
-        let mut builder = client
+        let model = client
             .completion_model(&self.config.model)
-            .completions_api()
-            .into_agent_builder();
-
-        if let Some(ref preamble) = self.config.preamble {
-            builder = builder.preamble(preamble);
-        }
-
-        let agent = builder.build();
+            .completions_api();
 
         let (prompt, chat_history) = history.to_rig_prompt();
+        let prompt_snapshot = prompt.clone();
 
-        let response: String = agent
-            .chat(prompt, chat_history)
+        // Build completion request with chat history
+        let mut req_builder = model.completion_request(prompt).messages(chat_history);
+        if let Some(ref preamble) = self.config.preamble {
+            req_builder = req_builder.preamble(preamble.clone());
+        }
+        let request = req_builder.build();
+
+        // Use low-level completion API to get token usage
+        let completion_result = model
+            .completion(request)
             .await
-            .map_err(|e: rig::completion::PromptError| {
-                AgentError::Inference(e.to_string())
-            })?;
+            .map_err(|e: rig::completion::CompletionError| AgentError::Inference(e.to_string()));
 
-        Ok(response)
+        let duration = start.elapsed();
+        let success = completion_result.is_ok();
+
+        // Extract response text and usage
+        let (response_text, usage): (Result<String>, _) = match completion_result {
+            Ok(resp) => {
+                // Extract text from the first assistant content choice
+                use rig::message::AssistantContent;
+                let text = match resp.choice.first() {
+                    AssistantContent::Text(t) => t.text.clone(),
+                    _ => String::new(),
+                };
+                let usage = super::otel::TokenUsage {
+                    input_tokens: Some(resp.usage.input_tokens as i64),
+                    output_tokens: Some(resp.usage.output_tokens as i64),
+                };
+                (Ok(text), usage)
+            }
+            Err(e) => (Err(e), super::otel::TokenUsage::default()),
+        };
+
+        eprintln!(
+            "🔗 [provider] chat() ← {:.1}s, success={success}, tokens={}in/{}out",
+            duration.as_secs_f64(),
+            usage.input_tokens.unwrap_or(0),
+            usage.output_tokens.unwrap_or(0),
+        );
+
+        // Record OTEL span with GenAI + LangFuse attributes (including token usage)
+        let output_str = response_text.as_ref().ok().map(|s| s.as_str());
+        super::otel::record_llm_span(
+            "chat",
+            &self.config.name,
+            &self.config.model,
+            &usage,
+            duration,
+            success,
+            trace_ctx,
+            Some(&prompt_snapshot),
+            output_str,
+        );
+
+        response_text
     }
 
     /// Single-prompt completion — convenience for sub-LLM bridging.
@@ -130,7 +182,7 @@ impl LlmProvider {
             role: super::action::Role::User,
             content: prompt.to_string(),
         });
-        self.chat(&history).await
+        self.chat(&history, &super::otel::TraceContext::new()).await
     }
 
     /// Get the model name.

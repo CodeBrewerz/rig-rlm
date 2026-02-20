@@ -128,6 +128,85 @@ impl AgentMonad {
             |_| Self::Pure(String::new()),
         )
     }
+
+    // ─── Phase 3: Context operation builders ────────────────────────
+
+    /// Load content into an isolated context.
+    pub fn load_context(id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self::perform(
+            Action::LoadContext {
+                id: id.into(),
+                content: content.into(),
+            },
+            |output| Self::Pure(output.into_string()),
+        )
+    }
+
+    /// Search within a named context for a pattern.
+    pub fn search_context(id: impl Into<String>, pattern: impl Into<String>) -> Self {
+        Self::perform(
+            Action::SearchContext {
+                id: id.into(),
+                pattern: pattern.into(),
+            },
+            |output| Self::Pure(output.into_string()),
+        )
+    }
+
+    /// Peek at a range of lines in a context.
+    pub fn peek_context(id: impl Into<String>, start: usize, end: usize) -> Self {
+        Self::perform(
+            Action::PeekContext {
+                id: id.into(),
+                start,
+                end,
+            },
+            |output| Self::Pure(output.into_string()),
+        )
+    }
+
+    /// List all loaded contexts.
+    pub fn list_contexts() -> Self {
+        Self::perform(Action::ListContexts, |output| {
+            Self::Pure(output.into_string())
+        })
+    }
+
+    // ─── Phase 7: Reasoning builders ────────────────────────────────
+
+    /// Record structured reasoning (not inserted into conversation history).
+    pub fn think(reasoning: impl Into<String>) -> Self {
+        Self::perform(
+            Action::Think {
+                reasoning: reasoning.into(),
+            },
+            |_| Self::Pure(String::new()),
+        )
+    }
+
+    /// Record a self-assessment of progress and confidence.
+    pub fn evaluate_progress(confidence: f64, remaining: impl Into<String>) -> Self {
+        Self::perform(
+            Action::EvaluateProgress {
+                confidence,
+                remaining: remaining.into(),
+            },
+            |output| Self::Pure(output.into_string()),
+        )
+    }
+
+    // ─── Phase 8: Recipe builder ────────────────────────────────────
+
+    /// Submit a recipe YAML for dynamic pipeline execution.
+    /// The runtime parses, validates, and executes all steps.
+    pub fn plan_recipe(recipe_yaml: impl Into<String>) -> Self {
+        Self::perform(
+            Action::PlanRecipe {
+                recipe_yaml: recipe_yaml.into(),
+            },
+            |output| Self::Pure(output.into_string()),
+        )
+    }
 }
 
 // Debug impl that doesn't try to print the continuation closure.

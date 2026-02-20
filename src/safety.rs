@@ -32,6 +32,10 @@ pub struct ExecutionLimits {
     pub banned_builtins: Vec<String>,
     /// Max total executions per agent session.
     pub max_total_executions: usize,
+    /// Threshold (chars) above which execution output is auto-loaded into
+    /// an isolated context instead of inline in conversation (Phase 2).
+    /// Set to 0 to disable auto-loading.
+    pub auto_load_threshold: usize,
 }
 
 impl ExecutionLimits {
@@ -47,6 +51,7 @@ impl ExecutionLimits {
             banned_modules: vec![],
             banned_builtins: vec![],
             max_total_executions: 1000,
+            auto_load_threshold: 10_000,
         }
     }
 
@@ -62,6 +67,7 @@ impl ExecutionLimits {
             banned_modules: vec!["shutil".into()],
             banned_builtins: vec![],
             max_total_executions: 200,
+            auto_load_threshold: 10_000,
         }
     }
 
@@ -92,6 +98,7 @@ impl ExecutionLimits {
                 "__import__".into(),
             ],
             max_total_executions: 50,
+            auto_load_threshold: 5_000,
         }
     }
 }
@@ -304,7 +311,7 @@ mod tests {
     fn test_wrap_with_timeout() {
         let code = "x = expensive_computation()";
         let wrapped = wrap_with_timeout(code, 30);
-        assert!(wrapped.contains("signal.SIGALRM"));
+        assert!(wrapped.contains("_sig.SIGALRM"));
         assert!(wrapped.contains("30 seconds"));
         assert!(wrapped.contains("x = expensive_computation()"));
     }

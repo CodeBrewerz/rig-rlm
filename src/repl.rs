@@ -133,7 +133,7 @@ impl Command {
 
 #[cfg(test)]
 mod test {
-    use crate::repl::{Command, RunArgs, REPL};
+    use crate::repl::{Command, REPL, RunArgs};
 
     #[test]
     fn it_works() {
@@ -146,9 +146,11 @@ mod test {
 
         let res = repl.run_command(cmd).unwrap();
 
-        assert_eq!(
-            res,
-            "AGENTICA_IDEAS.md\nCargo.lock\nCargo.toml\nREADME.md\nsrc\ntarget\n".to_string()
-        );
+        // Check that known files are present (don't hardcode full listing
+        // since it changes as files are added to the repo)
+        assert!(res.contains("Cargo.toml"));
+        assert!(res.contains("Cargo.lock"));
+        assert!(res.contains("src"));
+        assert!(res.contains("README.md"));
     }
 }

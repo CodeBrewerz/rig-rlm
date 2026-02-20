@@ -431,6 +431,7 @@ impl CodeExecutor for Pyo3CodeExecutor {
                                 return_value: None,
                                 exception: None,
                                 has_result: false,
+                                submitted: false,
                             }
                         }
                     }

@@ -8,15 +8,24 @@
 pub mod action;
 pub mod capabilities;
 pub mod context;
+pub mod context_manager;
 pub mod error;
+pub mod evidence;
 pub mod execution;
 pub mod generation;
 pub mod history;
 pub mod interaction;
+pub mod memory;
 pub mod monad;
+pub mod otel;
 pub mod prompts;
 pub mod provider;
+pub mod recipe;
 
+#[cfg(test)]
+mod integration_tests;
+#[cfg(test)]
+mod live_llm_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -26,11 +35,15 @@ mod tests_modules;
 pub use action::{Action, ActionOutput, LogLevel, Role};
 pub use capabilities::Capabilities;
 pub use context::{AgentConfig, AgentContext};
+pub use context_manager::{ContextManager, IsolatedContext};
 pub use error::{AgentError, Result};
+pub use evidence::{Evidence, EvidenceSource};
 pub use execution::{ExecutionError, ExecutionResult};
 pub use generation::Generation;
 pub use history::{ConversationHistory, HistoryMessage};
-pub use interaction::{agent_task, agent_task_with_instruction};
+pub use interaction::{agent_task, agent_task_full, agent_task_with_instruction};
+pub use memory::MemoryConfig;
 pub use monad::AgentMonad;
 pub use prompts::PromptSystem;
 pub use provider::{LlmProvider, ProviderConfig};
+pub use recipe::{Recipe, RecipeResult, RecipeStep, StepKind};

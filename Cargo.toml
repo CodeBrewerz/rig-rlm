@@ -28,9 +28,14 @@ pyo3 = { version = "0.28.1", features = ["auto-initialize"] }
 # Templates
 tera = "1.20.1"
 
-# Logging
+# Logging / Observability
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
+
+# OpenTelemetry + LangFuse (versions aligned with opentelemetry-langfuse 0.6)
+opentelemetry = "0.31"
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
+opentelemetry-langfuse = "0.6"
 
 # DSRs (prompt optimization)
 dspy-rs = "0.7.3"
@@ -40,3 +45,6 @@ turso = { version = "0.4.4", default-features = false }
 
 # Sandbox
 microsandbox = "0.1.2"
+
+[dev-dependencies]
+tempfile = "3"

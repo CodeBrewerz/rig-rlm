@@ -19,6 +19,8 @@ pub struct ExecutionResult {
     pub exception: Option<ExecutionError>,
     /// Whether the code produced a final result.
     pub has_result: bool,
+    /// Whether this result came from SUBMIT() (not a regular return).
+    pub submitted: bool,
 }
 
 /// Structured Python exception.
@@ -38,6 +40,7 @@ impl ExecutionResult {
             return_value: None,
             exception: None,
             has_result: false,
+            submitted: false,
         }
     }
 
@@ -49,6 +52,7 @@ impl ExecutionResult {
             return_value: Some(value.into()),
             exception: None,
             has_result: true,
+            submitted: false,
         }
     }
 
@@ -64,6 +68,7 @@ impl ExecutionResult {
                 traceback: None,
             }),
             has_result: false,
+            submitted: false,
         }
     }
 
@@ -78,6 +83,7 @@ impl ExecutionResult {
             return_value: Some(result_json.into()),
             exception: None,
             has_result: true,
+            submitted: true,
         }
     }
 
@@ -129,6 +135,6 @@ impl ExecutionResult {
 
     /// Was this a SUBMIT result (structured final output)?
     pub fn is_submitted(&self) -> bool {
-        self.has_result && self.return_value.is_some() && self.exception.is_none()
+        self.submitted && self.return_value.is_some() && self.exception.is_none()
     }
 }

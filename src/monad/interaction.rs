@@ -33,8 +33,20 @@ pub fn agent_task(task: &str) -> AgentMonad {
 /// system prompt under "## Additional Instructions". This is how
 /// GEPA-optimized instructions flow into the agent at runtime.
 pub fn agent_task_with_instruction(task: &str, instruction: Option<&str>) -> AgentMonad {
+    agent_task_full(task, instruction, None)
+}
+
+/// Build the agent computation with instruction override and memory config.
+///
+/// When `memory` is `Some(config)`, AGENTS.md content and skill listings
+/// are appended to the system prompt (Phase 4).
+pub fn agent_task_full(
+    task: &str,
+    instruction: Option<&str>,
+    memory: Option<&super::memory::MemoryConfig>,
+) -> AgentMonad {
     let prompts = PromptSystem::default();
-    let system_prompt = match instruction {
+    let mut system_prompt = match instruction {
         Some(instr) => prompts
             .render_system_with_instruction(instr, &Default::default())
             .unwrap_or_else(|_| "You are a helpful AI agent.".to_string()),
@@ -42,6 +54,16 @@ pub fn agent_task_with_instruction(task: &str, instruction: Option<&str>) -> Age
             .render_system(&Default::default())
             .unwrap_or_else(|_| "You are a helpful AI agent.".to_string()),
     };
+
+    // Phase 4: inject memory content (AGENTS.md + skills) into system prompt
+    if let Some(mem) = memory {
+        let memory_block = mem.format_for_prompt();
+        if !memory_block.is_empty() {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&memory_block);
+        }
+    }
+
     let user_prompt = prompts
         .render_user(task)
         .unwrap_or_else(|_| task.to_string());

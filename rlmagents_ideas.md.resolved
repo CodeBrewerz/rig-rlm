@@ -1,0 +1,331 @@
+# RLMAgents → rig-rlm: Ideas Worth Adopting
+
+Analysis of [rlmagents](file:///home/sumit-mittal/dev-stuff/rlmagents) (Python/LangChain fork) for ideas to bring into [rig-rlm](file:///home/sumit-mittal/dev-stuff/rig-rlm) (Rust/Rig monadic agent).
+
+> [!NOTE]
+> You already have a great [AGENTICA_IDEAS.md](file:///home/sumit-mittal/dev-stuff/rig-rlm/AGENTICA_IDEAS.md) from the Agentica analysis. This document focuses on **new** ideas from [rlmagents](file:///home/sumit-mittal/dev-stuff/rlmagents) that go beyond what Agentica covered.
+
+---
+
+## What rlmagents Brings (that rig-rlm doesn't have yet)
+
+### rig-rlm Already Has (✅ No Action Needed)
+
+| Feature | rig-rlm location | Notes |
+|---------|-------------------|-------|
+| Monadic agent loop | `monad/` (14 files) | More mature than rlmagents' LangGraph graph |
+| Sub-agent delegation | [pipeline.rs](file:///home/sumit-mittal/dev-stuff/rig-rlm/src/pipeline.rs) with [SubAgentConfig](file:///home/sumit-mittal/dev-stuff/rig-rlm/src/pipeline.rs#26-38) | Chunked parallel delegation |
+| Capability-based permissions | [capabilities.rs](file:///home/sumit-mittal/dev-stuff/rig-rlm/src/monad/capabilities.rs) | [root](file:///home/sumit-mittal/dev-stuff/rig-rlm/src/monad/capabilities.rs#38-49), [code_worker](file:///home/sumit-mittal/dev-stuff/rig-rlm/src/monad/capabilities.rs#50-64), [analyst](file:///home/sumit-mittal/dev-stuff/rig-rlm/src/monad/capabilities.rs#65-79), [inference_only](file:///home/sumit-mittal/dev-stuff/rig-rlm/src/monad/capabilities.rs#80-91) |
+| Safety guardrails | [safety.rs](file:///home/sumit-mittal/dev-stuff/rig-rlm/src/safety.rs) | Code validation, output sanitization, timeout wrapping |
+| DSPy-rs prompt optimization | [agent_module.rs](file:///home/sumit-mittal/dev-stuff/rig-rlm/src/agent_module.rs) + GEPA | Unique to rig-rlm — rlmagents has nothing like this |
+| Turso persistence | [persistence.rs](file:///home/sumit-mittal/dev-stuff/rig-rlm/src/persistence.rs) | Sessions + turns with full history |
+| Sub-LLM bridging | [session.rs](file:///home/sumit-mittal/dev-stuff/rig-rlm/src/session.rs) with `llm_query()` | In-sandbox recursive calls |
+| ARC benchmarks | [arc/](file:///home/sumit-mittal/dev-stuff/rlmagents/libs/rlmagents/rlmagents/middleware/_tools.py#1018-1098) module | Evaluation infrastructure |
+
+---
+
+## 🔴 High-Impact Ideas
+
+### 1. Multi-Context Isolation (RLM Contexts)
+
+**What rlmagents does:**
+Each analysis task gets one or more *isolated contexts* — named sandboxed workspaces with their own text buffer, REPL state, evidence, and variables. The agent can have `"config"`, `"source"`, `"logs"` contexts simultaneously, cross-reference between them, and they never pollute the main conversation history.
+
+```
+Key tools: load_context, load_file_context, peek_context, search_context,
+           semantic_search, chunk_context, diff_contexts, cross_context_search
+```
+
+The [RLMSessionManager](file:///home/sumit-mittal/dev-stuff/rlmagents/libs/rlmagents/rlmagents/session_manager.py#113-547) manages these contexts:
+- Each context has its own REPL session with 100+ pre-loaded helpers
+- Contexts track metadata: format, size, line count, token estimate
+- Contexts can be serialized/deserialized ([save_session](file:///home/sumit-mittal/dev-stuff/rlmagents/libs/rlmagents/rlmagents/session_manager.py#427-440)/[load_session](file:///home/sumit-mittal/dev-stuff/rlmagents/libs/rlmagents/rlmagents/middleware/_tools.py#557-569))
+
+**What rig-rlm lacks:**
+[AgentContext](file:///home/sumit-mittal/dev-stuff/rig-rlm/src/monad/context.rs#129-153) has a single flat `HashMap<String, String>` for variables. There's no concept of named isolated workspaces for parallel data analysis.
+
+**Adoption plan:**
+```rust
+struct IsolatedContext {
+    id: String,
+    content: String,
+    metadata: ContextMetadata,  // format, size, tokens
+    evidence: Vec<Evidence>,
+    variables: HashMap<String, String>,
+}
+
+struct ContextManager {
+    contexts: HashMap<String, IsolatedContext>,
+}
+
+impl ContextManager {
+    fn load(&mut self, id: &str, content: &str) -> ContextMetadata;
+    fn search(&self, id: &str, pattern: &str) -> Vec<SearchResult>;
+    fn peek(&self, id: &str, start: usize, end: usize) -> String;
+    fn diff(&self, a: &str, b: &str) -> String;
+}
+```
+
+**Why this matters:** When the agent analyzes multiple files, each should get its own context so the LLM's limited attention isn't consumed by the raw content. The context stays out of chat history.
+
+---
+
+### 2. Evidence Tracking with Provenance
+
+**What rlmagents does:**
+Every search, peek, and exec is automatically recorded as `Evidence` with full provenance:
+
+```python
+@dataclass
+class Evidence:
+    source: str           # "search", "peek", "exec", "action"
+    source_op: str        # "search_context", "exec_python", etc.
+    context_id: str       # which context it came from
+    file_path: str | None # if loaded from a file
+    line_range: tuple | None
+    pattern: str | None   # what was searched for
+    snippet: str          # the actual evidence text
+    command_exit_status: int | None
+```
+
+Evidence is surfaced via [get_evidence](file:///home/sumit-mittal/dev-stuff/rlmagents/libs/rlmagents/rlmagents/middleware/_tools.py#1418-1450) and used in [finalize](file:///home/sumit-mittal/dev-stuff/rlmagents/libs/rlmagents/rlmagents/middleware/_tools.py#1471-1500) to produce *cited conclusions*. You can also inspect via [evaluate_progress](file:///home/sumit-mittal/dev-stuff/rlmagents/libs/rlmagents/rlmagents/middleware/_tools.py#1278-1317) which shows evidence summaries grouped by source.
+
+**What rig-rlm lacks:**
+No evidence tracking. Execution results go into chat history but aren't structured or queryable.
+
+**Adoption plan:**
+```rust
+struct Evidence {
+    source: String,         // "code_exec", "sub_agent", "search"
+    context_id: Option<String>,
+    snippet: String,
+    line_range: Option<(usize, usize)>,
+    pattern: Option<String>,
+    exit_code: Option<i32>,
+    timestamp: DateTime<Utc>,
+}
+
+// Add to AgentContext
+evidence: Vec<Evidence>,
+
+// In interpret_action, after ExecuteCode:
+self.evidence.push(Evidence { ... });
+```
+
+**Why this matters:** When the agent produces a final answer, you want to know *what evidence it found and where*. This feeds directly into the GEPA evaluation metric — you could score based on evidence quality.
+
+---
+
+### 3. Auto-Load Large Results into Contexts
+
+**What rlmagents does:**
+The [RLMMiddleware](file:///home/sumit-mittal/dev-stuff/rlmagents/libs/rlmagents/rlmagents/middleware/rlm.py#136-350) intercepts tool results. If any result exceeds `auto_load_threshold` (default 10K chars), it's autom atically loaded into an RLM context instead of being dumped into chat history. The agent sees a truncated preview + a pointer:
+
+```
+[Large result (42,500 chars) auto-loaded into RLM context 'auto_read_file'.
+ Use search_context/peek_context to explore.]
+```
+
+**What rig-rlm lacks:**
+Code execution results go directly into the conversation. Long outputs consume the context window and dilute attention.
+
+**Adoption plan:**
+In `interpret_action()` for `ExecuteCode`, after [sanitize_output()](file:///home/sumit-mittal/dev-stuff/rig-rlm/src/safety.rs#182-198):
+```rust
+if result.stdout.len() > AUTO_LOAD_THRESHOLD {
+    let ctx_id = format!("auto_exec_{}", self.turn_count());
+    self.context_manager.load(&ctx_id, &result.stdout);
+    // Replace the feedback with a pointer
+    let preview = &result.stdout[..600];
+    format!("{preview}\n...[Full output ({} chars) in context '{}']",
+            result.stdout.len(), ctx_id)
+} else {
+    result.stdout.clone()
+}
+```
+
+---
+
+## 🟡 Medium-Impact Ideas
+
+### 4. Context Pressure & Auto-Compaction
+
+**What rlmagents does:**
+[RLMSessionManager](file:///home/sumit-mittal/dev-stuff/rlmagents/libs/rlmagents/rlmagents/session_manager.py#113-547) tracks "context pressure" — how much work has been done in a context. When pressure exceeds thresholds (token count > 20K or iterations > 100), it automatically compacts:
+1. Synthesizes a summary of work done so far
+2. Prunes old evidence (keeps recent + evidence referenced in summary)
+3. Replaces context content with the summary
+4. Resets iteration counter
+
+This prevents unbounded growth of REPL state during long analysis sessions.
+
+**What rig-rlm lacks:**
+The `max_turns` limit is the only guard. No automatic state compaction.
+
+**Adoption plan:**
+Add compaction to `AgentContext::run()`:
+```rust
+if self.turn_count() > 0 && self.turn_count() % COMPACTION_INTERVAL == 0 {
+    self.compact_history(); // Summarize old turns, keep recent N
+}
+```
+
+---
+
+### 5. Recipe DSL (Declarative Multi-Step Pipelines)
+
+**What rlmagents does:**
+A declarative pipeline specification ([validate_recipe](file:///home/sumit-mittal/dev-stuff/rlmagents/libs/rlmagents/rlmagents/recipes.py#71-162) → [estimate_recipe](file:///home/sumit-mittal/dev-stuff/rlmagents/libs/rlmagents/rlmagents/recipes.py#164-184) → [run_recipe](file:///home/sumit-mittal/dev-stuff/rlmagents/libs/rlmagents/rlmagents/middleware/_tools.py#1712-1743)) with operations like:
+
+```json
+{
+  "version": "rlm.recipe.v1",
+  "context_id": "analysis",
+  "steps": [
+    {"op": "load", "input": "file.txt"},
+    {"op": "search", "pattern": "TODO"},
+    {"op": "chunk", "chunk_size": 5000},
+    {"op": "map_sub_query", "prompt": "Summarize this chunk"},
+    {"op": "aggregate", "prompt": "Combine these summaries"},
+    {"op": "finalize"}
+  ],
+  "budget": {"max_steps": 10, "max_sub_queries": 20}
+}
+```
+
+This pre-validates the entire pipeline, estimates cost (sub-queries, steps), and then executes with budget constraints.
+
+**Why this is interesting for rig-rlm:**
+Your `ModulePipeline<A, B>` in [pipeline.rs](file:///home/sumit-mittal/dev-stuff/rig-rlm/src/pipeline.rs) already does two-stage composition. Recipes would extend this to N-stage declarative pipelines. Combined with GEPA optimization, you could optimize entire pipeline **sequences**, not just single instructions.
+
+**Adoption plan:**
+```rust
+struct Recipe {
+    steps: Vec<RecipeStep>,
+    budget: Budget,
+}
+
+enum RecipeStep {
+    Load { path: String },
+    Search { pattern: String },
+    Chunk { size: usize, overlap: usize },
+    MapSubQuery { prompt: String },
+    Aggregate { prompt: String },
+    Finalize,
+}
+
+impl AgentContext {
+    async fn run_recipe(&mut self, recipe: Recipe) -> Result<String>;
+}
+```
+
+---
+
+### 6. Conversation Summarization Middleware
+
+**What rlmagents does:**
+[SummarizationMiddleware](file:///home/sumit-mittal/dev-stuff/rlmagents/libs/rlmagents/rlmagents/_harness/summarization.py#170-967) monitors conversation length. When it exceeds a trigger (token count or message count), it:
+1. Partitions messages into "to summarize" and "to keep"
+2. Persists the full history to backend storage (retrievable later)
+3. Generates an LLM summary of the old messages
+4. Replaces old messages with the summary
+5. Also truncates large tool arguments in old messages ([TruncateArgsSettings](file:///home/sumit-mittal/dev-stuff/rlmagents/libs/rlmagents/rlmagents/_harness/summarization.py#97-111))
+
+**What rig-rlm lacks:**
+History grows unboundedly. The `max_turns` limit just stops the agent rather than compacting.
+
+**Adoption plan:**
+Add a `summarize_history()` method to [AgentContext](file:///home/sumit-mittal/dev-stuff/rig-rlm/src/monad/context.rs#129-153):
+```rust
+async fn summarize_history(&mut self) -> Result<()> {
+    if self.history.len() < TRIGGER_THRESHOLD { return Ok(()); }
+    let to_summarize = &self.history.messages()[..cutoff];
+    let summary = self.infer_summary(to_summarize).await?;
+    self.history.replace_old_with_summary(summary, cutoff);
+    Ok(())
+}
+```
+
+---
+
+### 7. Skills & Memory Middleware
+
+**What rlmagents does:**
+- **MemoryMiddleware**: Loads [AGENTS.md](file:///home/sumit-mittal/dev-stuff/rlmagents/AGENTS.md) files from configured paths and injects their content into the system prompt. This gives the agent persistent project knowledge.
+- **SkillsMiddleware**: Discovers skill directories containing `SKILL.md` files (with YAML frontmatter), exposes a skill listing in the system prompt, and provides a `read_skill` tool for progressive disclosure (agent requests full skill content only when needed).
+
+**What rig-rlm lacks:**
+The system prompt is either hardcoded or loaded from `--instruction`. No mechanism for injecting project-specific or task-specific knowledge.
+
+**Adoption plan:**
+```rust
+struct MemoryConfig {
+    agents_md_paths: Vec<PathBuf>,
+    skill_dirs: Vec<PathBuf>,
+}
+
+impl AgentContext {
+    fn load_memory(&mut self) {
+        for path in &self.config.memory.agents_md_paths {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                self.system_prompt.push_str(&content);
+            }
+        }
+    }
+}
+```
+
+---
+
+## 🟢 Nice-to-Have Ideas
+
+### 8. Profile-Based Tool Filtering
+
+**What rlmagents does:**
+RLM tools are organized into profiles: `full` (24 tools), `reasoning` (21 tools), `core` (14 tools). You can also include/exclude individual tools. This prevents tool-overload for simpler agents.
+
+**Relevance to rig-rlm:**
+Your [Capabilities](file:///home/sumit-mittal/dev-stuff/rig-rlm/src/monad/capabilities.rs#22-36) struct already does action-level gating. But when you add more tools to the sandbox (SUBMIT, llm_query, etc.), having named profiles could be cleaner.
+
+### 9. Cross-Context Search ([rg_search](file:///home/sumit-mittal/dev-stuff/rlmagents/libs/rlmagents/rlmagents/middleware/_tools.py#1018-1098) Integration)
+
+**What rlmagents does:**
+[rg_search](file:///home/sumit-mittal/dev-stuff/rlmagents/libs/rlmagents/rlmagents/middleware/_tools.py#1018-1098) tool wraps ripgrep for file-system-level code search, with an option to load results directly into an RLM context:
+```python
+rg_search(pattern="TODO", path="/repo", load_context_id="todos")
+```
+
+This bridges filesystem search with the context isolation system — search results go straight into an analysable context rather than polluting chat.
+
+### 10. [think](file:///home/sumit-mittal/dev-stuff/rlmagents/libs/rlmagents/rlmagents/middleware/_tools.py#1237-1258) and [evaluate_progress](file:///home/sumit-mittal/dev-stuff/rlmagents/libs/rlmagents/rlmagents/middleware/_tools.py#1278-1317) Tools
+
+**What rlmagents does:**
+- [think](file:///home/sumit-mittal/dev-stuff/rlmagents/libs/rlmagents/rlmagents/middleware/_tools.py#1237-1258): A structured scratchpad — the agent writes reasoning steps that are recorded but don't go to the LLM. Forces deliberate planning.
+- [evaluate_progress](file:///home/sumit-mittal/dev-stuff/rlmagents/libs/rlmagents/rlmagents/middleware/_tools.py#1278-1317): Agent self-assesses confidence and lists work remaining. Feeds into iteration control.
+
+**Relevance to rig-rlm:**
+You already have `AgentMonad::log()`. But a formal [think](file:///home/sumit-mittal/dev-stuff/rlmagents/libs/rlmagents/rlmagents/middleware/_tools.py#1237-1258) action that records structured reasoning could improve transparency and feed into GEPA scoring.
+
+---
+
+## Recommended Integration Priority
+
+> [!IMPORTANT]
+> The items below are **new** relative to what's already in your [AGENTICA_IDEAS.md](file:///home/sumit-mittal/dev-stuff/rig-rlm/AGENTICA_IDEAS.md). That document already covers monadic loop improvements, provider abstraction, error handling, few-shot examples, and session persistence.
+
+| # | Idea | Effort | Impact | Synergy with existing rig-rlm |
+|---|------|--------|--------|-------------------------------|
+| 1 | **Multi-Context Isolation** | Medium | 🔴 High | Builds on `Capture`/`Retrieve` variables |
+| 2 | **Evidence Tracking** | Low | 🔴 High | Feeds into GEPA evaluation metrics |
+| 3 | **Auto-Load Large Results** | Low | 🔴 High | Slot into existing [sanitize_output](file:///home/sumit-mittal/dev-stuff/rig-rlm/src/safety.rs#182-198) |
+| 4 | **Context Auto-Compaction** | Medium | 🟡 Medium | Extends beyond `max_turns` hard limit |
+| 5 | **Recipe DSL** | High | 🟡 Medium | Extends `ModulePipeline<A,B>` to N stages |
+| 6 | **Conversation Summarization** | Medium | 🟡 Medium | Needs LLM call; extends history management |
+| 7 | **Skills/Memory Loading** | Low | 🟡 Medium | System prompt injection, filesystem |
+| 8 | **Tool Profiles** | Low | 🟢 Nice | Extends [Capabilities](file:///home/sumit-mittal/dev-stuff/rig-rlm/src/monad/capabilities.rs#22-36) |
+| 9 | **rg_search → Context** | Low | 🟢 Nice | Filesystem + context bridge |
+| 10 | **think/evaluate_progress** | Low | 🟢 Nice | Extends logging/capture system |
+
+**Suggested order:** Items 2 → 3 → 1 → 7 → 4 → 6 → 5 → rest
+
+Start with **evidence tracking** (low effort, high value, directly improves GEPA scoring), then **auto-load** (trivial addition to `interpret_action`), then **multi-context isolation** (the biggest architectural win but requires more work).

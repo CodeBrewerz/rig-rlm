@@ -49,6 +49,43 @@ pub enum Action {
         task: String,
         capabilities: Capabilities,
     },
+
+    // ─── Phase 3: Context operations ─────────────────────────────
+    /// Load content into an isolated context.
+    /// Returns metadata (format, size, lines, token_estimate).
+    LoadContext { id: String, content: String },
+
+    /// Search within a named context for a pattern.
+    /// Returns formatted search results.
+    SearchContext { id: String, pattern: String },
+
+    /// Peek at a range of lines (1-indexed, inclusive) in a context.
+    /// Returns the requested lines.
+    PeekContext {
+        id: String,
+        start: usize,
+        end: usize,
+    },
+
+    /// List all loaded contexts with metadata.
+    ListContexts,
+
+    // ─── Phase 7: Reasoning tools ──────────────────────────────
+    /// Structured reasoning scratchpad.
+    /// Recorded in evidence trail but NOT inserted into conversation history.
+    /// Gives the agent a private "thinking" space.
+    Think { reasoning: String },
+
+    /// Self-assess progress and confidence.
+    /// Recorded in evidence trail for GEPA scoring. Not sent to LLM.
+    EvaluateProgress { confidence: f64, remaining: String },
+
+    // ─── Phase 8: Recipe execution ────────────────────────────────
+    /// Dynamically define and execute a multi-step pipeline.
+    /// The agent generates recipe YAML, the runtime validates, estimates
+    /// cost, and executes the full pipeline. Returns a summary of all
+    /// step results.
+    PlanRecipe { recipe_yaml: String },
 }
 
 /// Conversation roles.
