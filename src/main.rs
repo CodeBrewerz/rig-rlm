@@ -13,34 +13,16 @@ use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{EnvFilter, fmt::Layer, layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
-// Existing modules
-pub mod exec;
-pub mod llm;
-pub mod repl;
+// Import from library crate
+use rig_rlm::arc;
+use rig_rlm::monad;
+use rig_rlm::persistence;
+use rig_rlm::sandbox;
 
-// Core monadic architecture (Phases 1-9)
-pub mod monad;
-
-// DSRs integration (Phases 13-16)
-pub mod agent_metric;
-pub mod agent_module;
-pub mod signature;
-
-// Infrastructure (Phases 22-26)
-pub mod chunking;
-pub mod persistence;
-pub mod pipeline;
-pub mod safety;
-pub mod sandbox;
-pub mod session;
-
-// ARC-AGI Benchmark (Phases 18-21)
-pub mod arc;
-
-use crate::monad::interaction::agent_task_full;
-use crate::monad::{AgentConfig, AgentContext, AgentMonad, MemoryConfig, Role};
-use crate::persistence::{AgentStore, Session, Turn};
-use crate::sandbox::{ExecutorKind, create_executor};
+use monad::interaction::agent_task_full;
+use monad::{AgentConfig, AgentContext, AgentMonad, MemoryConfig, Role};
+use persistence::{AgentStore, Session, Turn};
+use sandbox::{ExecutorKind, create_executor};
 
 #[derive(Parser)]
 #[command(name = "rig-rlm", about = "Monadic AI agent with DSRs optimization")]
@@ -296,17 +278,17 @@ async fn run_agent(
 
     let provider = if api_key.is_empty() {
         println!("🏠 No OPENAI_API_KEY set — using local LLM at localhost:1234");
-        crate::monad::provider::ProviderConfig::local(model)
+        rig_rlm::monad::provider::ProviderConfig::local(model)
     } else {
         println!("🔑 Using API key with base URL: {base_url}");
-        crate::monad::provider::ProviderConfig::openai_compatible(
+        rig_rlm::monad::provider::ProviderConfig::openai_compatible(
             "openai", model, &base_url, &api_key,
         )
     };
 
     let executor_kind = match executor_name {
-        "microsandbox" => crate::sandbox::ExecutorKind::Microsandbox,
-        _ => crate::sandbox::ExecutorKind::Pyo3,
+        "microsandbox" => rig_rlm::sandbox::ExecutorKind::Microsandbox,
+        _ => rig_rlm::sandbox::ExecutorKind::Pyo3,
     };
 
     // 4. Build and run the monadic agent
@@ -340,8 +322,8 @@ async fn run_agent(
     agent_config = agent_config.with_memory(memory);
 
     let mut ctx = match &executor_kind {
-        crate::sandbox::ExecutorKind::Microsandbox => {
-            let pool = std::sync::Arc::new(crate::sandbox::SandboxPool::new(4, 1, None).await?);
+        rig_rlm::sandbox::ExecutorKind::Microsandbox => {
+            let pool = std::sync::Arc::new(rig_rlm::sandbox::SandboxPool::new(4, 1, None).await?);
             let executor = pool.checkout().await?;
             let ctx = AgentContext::new_with_executor(agent_config, Box::new(executor), Some(pool));
             ctx
@@ -365,7 +347,7 @@ async fn run_agent(
         // Recipe mode: load YAML, validate, run pipeline
         let yaml = std::fs::read_to_string(&recipe_path)
             .map_err(|e| anyhow::anyhow!("Failed to read recipe {recipe_path}: {e}"))?;
-        let recipe = crate::monad::Recipe::from_yaml(&yaml)
+        let recipe = rig_rlm::monad::Recipe::from_yaml(&yaml)
             .map_err(|e| anyhow::anyhow!("Invalid recipe YAML: {e}"))?;
 
         let estimate = recipe.estimate_cost();
@@ -611,7 +593,7 @@ async fn run_e2e_test(executor_name: &str, db_path: &str) -> anyhow::Result<()> 
         .then(AgentMonad::capture("answer", "4"))
         .then(AgentMonad::retrieve("answer"))
         .bind(|answer| {
-            AgentMonad::log(crate::monad::LogLevel::Info, format!("Answer: {answer}"))
+            AgentMonad::log(rig_rlm::monad::LogLevel::Info, format!("Answer: {answer}"))
                 .then(AgentMonad::pure(format!("The answer is {answer}")))
         });
 
@@ -637,9 +619,9 @@ async fn run_optimization(
     iterations: usize,
     _db_path: &str,
 ) -> anyhow::Result<()> {
-    use crate::agent_module::AgentModule;
-    use crate::monad::provider::ProviderConfig;
     use dspy_rs::*;
+    use rig_rlm::agent_module::AgentModule;
+    use rig_rlm::monad::provider::ProviderConfig;
 
     println!("═══════════════════════════════════════════");
     println!("  GEPA Optimization");
@@ -700,7 +682,7 @@ async fn run_optimization(
     };
 
     // 3. Build the agent module
-    let seed_instruction = crate::signature::CodeGenAgent::new().instruction();
+    let seed_instruction = rig_rlm::signature::CodeGenAgent::new().instruction();
     println!(
         "📝 Seed instruction: {}",
         &seed_instruction[..seed_instruction.len().min(80)]
@@ -800,8 +782,8 @@ async fn run_arc_benchmark(
     max_tasks: usize,
     iterations: usize,
 ) -> anyhow::Result<()> {
-    use crate::arc::bench::{BenchmarkConfig, run_baseline, run_optimized};
-    use crate::monad::provider::ProviderConfig;
+    use rig_rlm::arc::bench::{BenchmarkConfig, run_baseline, run_optimized};
+    use rig_rlm::monad::provider::ProviderConfig;
 
     println!("═══════════════════════════════════════════");
     println!("  rig-rlm — ARC-AGI Benchmark");

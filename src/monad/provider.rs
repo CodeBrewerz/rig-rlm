@@ -90,7 +90,7 @@ impl LlmProvider {
         &self,
         history: &ConversationHistory,
         trace_ctx: &super::otel::TraceContext,
-    ) -> Result<String> {
+    ) -> Result<(String, super::otel::TokenUsage)> {
         use rig::client::CompletionClient;
         use rig::completion::CompletionModel as _;
 
@@ -169,7 +169,7 @@ impl LlmProvider {
             output_str,
         );
 
-        response_text
+        response_text.map(|text| (text, usage))
     }
 
     /// Single-prompt completion — convenience for sub-LLM bridging.
@@ -182,7 +182,9 @@ impl LlmProvider {
             role: super::action::Role::User,
             content: prompt.to_string(),
         });
-        self.chat(&history, &super::otel::TraceContext::new()).await
+        self.chat(&history, &super::otel::TraceContext::new())
+            .await
+            .map(|(text, _usage)| text)
     }
 
     /// Get the model name.

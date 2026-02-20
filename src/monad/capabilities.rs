@@ -5,7 +5,8 @@
 //! to enforce the principle of least privilege.
 //!
 //! Usage:
-//! ```
+//! ```no_run
+//! use rig_rlm::monad::Capabilities;
 //! let root_caps = Capabilities::root();          // full access
 //! let worker = Capabilities::code_worker();      // code + inference, no sub-agents
 //! let analyst = Capabilities::analyst();         // inference only, no code

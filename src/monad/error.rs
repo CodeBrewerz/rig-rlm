@@ -21,6 +21,8 @@ pub enum AgentError {
     PermissionDenied(String),
     /// Code failed safety validation (Phase 12).
     SafetyViolation(String),
+    /// Agent exceeded cost budget (Tier 1.2).
+    BudgetExceeded { spent: f64, limit: f64 },
     /// Catch-all for unexpected errors.
     Internal(String),
 }
@@ -36,6 +38,9 @@ impl fmt::Display for AgentError {
             Self::Cancelled => write!(f, "agent cancelled"),
             Self::PermissionDenied(msg) => write!(f, "permission denied: {msg}"),
             Self::SafetyViolation(msg) => write!(f, "safety violation: {msg}"),
+            Self::BudgetExceeded { spent, limit } => {
+                write!(f, "budget exceeded: ${spent:.4} spent, ${limit:.4} limit")
+            }
             Self::Internal(msg) => write!(f, "internal error: {msg}"),
         }
     }

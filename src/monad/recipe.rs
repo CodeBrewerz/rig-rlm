@@ -373,6 +373,8 @@ pub struct RecipeResult {
     pub total_turns: usize,
     /// Wall-clock time for the entire recipe.
     pub elapsed: Duration,
+    /// Total cost in USD for the entire recipe.
+    pub total_cost_usd: f64,
 }
 
 /// The result of a single recipe step.
@@ -386,6 +388,8 @@ pub struct StepResult {
     pub elapsed: Duration,
     /// Completion status.
     pub status: StepStatus,
+    /// Cost in USD for this step.
+    pub cost_usd: f64,
 }
 
 /// Status of a recipe step.
@@ -401,22 +405,24 @@ pub enum StepStatus {
 
 impl StepResult {
     /// Create a completed step result.
-    pub fn completed(output: String, turns: usize, elapsed: Duration) -> Self {
+    pub fn completed(output: String, turns: usize, elapsed: Duration, cost_usd: f64) -> Self {
         Self {
             output,
             turns,
             elapsed,
             status: StepStatus::Completed,
+            cost_usd,
         }
     }
 
     /// Create a failed step result.
-    pub fn failed(error: String, turns: usize, elapsed: Duration) -> Self {
+    pub fn failed(error: String, turns: usize, elapsed: Duration, cost_usd: f64) -> Self {
         Self {
             output: String::new(),
             turns,
             elapsed,
             status: StepStatus::Failed(error),
+            cost_usd,
         }
     }
 
@@ -427,6 +433,7 @@ impl StepResult {
             turns: 0,
             elapsed: Duration::ZERO,
             status: StepStatus::Skipped,
+            cost_usd: 0.0,
         }
     }
 }
@@ -439,6 +446,9 @@ impl RecipeResult {
         println!("  Steps: {}", self.steps.len());
         println!("  Total turns: {}", self.total_turns);
         println!("  Elapsed: {:.1}s", self.elapsed.as_secs_f64());
+        if self.total_cost_usd > 0.0 {
+            println!("  Total cost: ${:.6}", self.total_cost_usd);
+        }
         println!("═══════════════════════════════════════════");
         for (id, result) in &self.steps {
             let icon = match &result.status {
@@ -651,7 +661,7 @@ mod tests {
         let mut outputs = IndexMap::new();
         outputs.insert(
             "load".to_string(),
-            StepResult::completed("loaded data".to_string(), 3, Duration::from_secs(1)),
+            StepResult::completed("loaded data".to_string(), 3, Duration::from_secs(1), 0.0),
         );
         let resolved = Recipe::resolve_task(step, &outputs);
         assert_eq!(resolved, "Clean: loaded data");

@@ -4,7 +4,7 @@
 //! and optimization history in a local Turso (libSQL) database.
 
 use chrono::Utc;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// A Turso-backed persistence store for agent state.
 pub struct AgentStore {
@@ -43,12 +43,16 @@ pub struct Turn {
 impl AgentStore {
     /// Open or create a Turso database at the given path.
     pub async fn open(path: &str) -> anyhow::Result<Self> {
-        let db = turso::Builder::new_local(path).build().await
+        let db = turso::Builder::new_local(path)
+            .build()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to open Turso DB: {e}"))?;
-        let conn = db.connect()
+        let conn = db
+            .connect()
             .map_err(|e| anyhow::anyhow!("Failed to connect: {e}"))?;
 
-        conn.execute_batch("
+        conn.execute_batch(
+            "
             CREATE TABLE IF NOT EXISTS sessions (
                 session_id    TEXT PRIMARY KEY,
                 model         TEXT NOT NULL,
@@ -88,14 +92,34 @@ impl AgentStore {
 
             CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
             CREATE INDEX IF NOT EXISTS idx_opt_session ON optimization_history(session_id);
-        ").await.map_err(|e| anyhow::anyhow!("Schema init failed: {e}"))?;
+        ",
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Schema init failed: {e}"))?;
+
+        // Tier 1.2: Add cost/token columns (idempotent ALTER TABLE)
+        for stmt in &[
+            "ALTER TABLE sessions ADD COLUMN total_cost_usd REAL DEFAULT 0.0",
+            "ALTER TABLE sessions ADD COLUMN total_input_tokens INTEGER DEFAULT 0",
+            "ALTER TABLE sessions ADD COLUMN total_output_tokens INTEGER DEFAULT 0",
+            "ALTER TABLE turns ADD COLUMN input_tokens INTEGER DEFAULT 0",
+            "ALTER TABLE turns ADD COLUMN output_tokens INTEGER DEFAULT 0",
+            "ALTER TABLE turns ADD COLUMN cost_usd REAL DEFAULT 0.0",
+        ] {
+            // SQLite silently ignores duplicate column additions in IF NOT EXISTS,
+            // but ALTER TABLE doesn't support IF NOT EXISTS, so we catch the error.
+            let conn2 = db.connect().map_err(|e| anyhow::anyhow!("connect: {e}"))?;
+            let _ = conn2.execute(*stmt, ()).await; // ignore "duplicate column" errors
+        }
 
         Ok(Self { db })
     }
 
     /// Start a new session.
     pub async fn create_session(&self, session: &Session) -> anyhow::Result<()> {
-        let conn = self.db.connect()
+        let conn = self
+            .db
+            .connect()
             .map_err(|e| anyhow::anyhow!("connect: {e}"))?;
         conn.execute(
             "INSERT INTO sessions (session_id, model, task, executor, optimizer, started_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -113,7 +137,9 @@ impl AgentStore {
 
     /// Record a conversation turn.
     pub async fn record_turn(&self, turn: &Turn) -> anyhow::Result<()> {
-        let conn = self.db.connect()
+        let conn = self
+            .db
+            .connect()
             .map_err(|e| anyhow::anyhow!("connect: {e}"))?;
         conn.execute(
             "INSERT INTO turns (session_id, turn_num, role, content, code, exec_stdout, exec_stderr, exec_return, timestamp_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -139,7 +165,9 @@ impl AgentStore {
         final_answer: Option<&str>,
         score: Option<f64>,
     ) -> anyhow::Result<()> {
-        let conn = self.db.connect()
+        let conn = self
+            .db
+            .connect()
             .map_err(|e| anyhow::anyhow!("connect: {e}"))?;
         let now = Utc::now().to_rfc3339();
         conn.execute(
@@ -159,7 +187,9 @@ impl AgentStore {
         avg_score: f64,
         feedback: &str,
     ) -> anyhow::Result<()> {
-        let conn = self.db.connect()
+        let conn = self
+            .db
+            .connect()
             .map_err(|e| anyhow::anyhow!("connect: {e}"))?;
         conn.execute(
             "INSERT INTO optimization_history (session_id, generation, candidate_id, instruction, avg_score, feedback_summary) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -170,21 +200,23 @@ impl AgentStore {
 
     /// Get summary stats for a session.
     pub async fn session_summary(&self, session_id: &str) -> anyhow::Result<String> {
-        let conn = self.db.connect()
+        let conn = self
+            .db
+            .connect()
             .map_err(|e| anyhow::anyhow!("connect: {e}"))?;
         let mut rows = conn.query(
             "SELECT COUNT(*) as num_turns, MIN(timestamp_ms) as first_ms, MAX(timestamp_ms) as last_ms FROM turns WHERE session_id = ?1",
             (session_id,),
         ).await.map_err(|e| anyhow::anyhow!("query: {e}"))?;
 
-        if let Some(row) = rows.next().await
-            .map_err(|e| anyhow::anyhow!("next: {e}"))? {
-            let num_turns: i64 = row.get(0)
-                .map_err(|e| anyhow::anyhow!("get: {e}"))?;
-            let first_ms: i64 = row.get(1)
-                .map_err(|e| anyhow::anyhow!("get: {e}"))?;
-            let last_ms: i64 = row.get(2)
-                .map_err(|e| anyhow::anyhow!("get: {e}"))?;
+        if let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| anyhow::anyhow!("next: {e}"))?
+        {
+            let num_turns: i64 = row.get(0).map_err(|e| anyhow::anyhow!("get: {e}"))?;
+            let first_ms: i64 = row.get(1).map_err(|e| anyhow::anyhow!("get: {e}"))?;
+            let last_ms: i64 = row.get(2).map_err(|e| anyhow::anyhow!("get: {e}"))?;
             let duration_s = (last_ms - first_ms) as f64 / 1000.0;
             Ok(format!("{num_turns} turns, {duration_s:.1}s"))
         } else {

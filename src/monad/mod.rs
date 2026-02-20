@@ -9,6 +9,7 @@ pub mod action;
 pub mod capabilities;
 pub mod context;
 pub mod context_manager;
+pub mod cost;
 pub mod error;
 pub mod evidence;
 pub mod execution;
@@ -21,6 +22,8 @@ pub mod otel;
 pub mod prompts;
 pub mod provider;
 pub mod recipe;
+pub mod restate;
+pub mod restate_helpers;
 
 #[cfg(test)]
 mod integration_tests;

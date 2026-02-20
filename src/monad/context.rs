@@ -43,6 +43,8 @@ pub struct AgentConfig {
     pub safety: ExecutionLimits,
     /// Memory/skills configuration (Phase 4).
     pub memory: MemoryConfig,
+    /// Maximum cost budget in USD (Tier 1.2). None = unlimited.
+    pub max_cost_usd: Option<f64>,
 }
 
 impl Default for AgentConfig {
@@ -55,6 +57,7 @@ impl Default for AgentConfig {
             capabilities: Capabilities::root(),
             safety: ExecutionLimits::permissive(),
             memory: MemoryConfig::default(),
+            max_cost_usd: None,
         }
     }
 }
@@ -70,6 +73,7 @@ impl AgentConfig {
             capabilities: Capabilities::root(),
             safety: ExecutionLimits::permissive(),
             memory: MemoryConfig::default(),
+            max_cost_usd: None,
         }
     }
 
@@ -88,6 +92,7 @@ impl AgentConfig {
             capabilities: Capabilities::root(),
             safety: ExecutionLimits::permissive(),
             memory: MemoryConfig::default(),
+            max_cost_usd: None,
         }
     }
 
@@ -152,7 +157,7 @@ pub struct AgentContext {
     /// Code executor (persistent REPL session).
     executor: Box<dyn CodeExecutor>,
     /// Turn counter (for max_turns enforcement).
-    turn: usize,
+    pub turn: usize,
     /// Whether the session has been set up.
     session_ready: bool,
     /// Unique agent ID (for lineage tracking).
@@ -169,6 +174,8 @@ pub struct AgentContext {
     pub context_manager: ContextManager,
     /// OTEL/LangFuse tracing context (session, user, tags, metadata).
     pub trace_ctx: super::otel::TraceContext,
+    /// Cost tracker for budget enforcement (Tier 1.2).
+    pub cost_tracker: super::cost::CostTracker,
 }
 
 impl AgentContext {
@@ -193,6 +200,7 @@ impl AgentContext {
             evidence: Vec::new(),
             context_manager: ContextManager::new(),
             trace_ctx: super::otel::TraceContext::new(),
+            cost_tracker: super::cost::CostTracker::new(),
         }
     }
 
@@ -216,6 +224,7 @@ impl AgentContext {
             evidence: Vec::new(),
             context_manager: ContextManager::new(),
             trace_ctx: super::otel::TraceContext::new(),
+            cost_tracker: super::cost::CostTracker::new(),
         })
     }
 
@@ -245,6 +254,7 @@ impl AgentContext {
             evidence: Vec::new(),
             context_manager: ContextManager::new(),
             trace_ctx: super::otel::TraceContext::new(),
+            cost_tracker: super::cost::CostTracker::new(),
         }
     }
 
@@ -366,8 +376,32 @@ impl AgentContext {
 
                 Action::ModelInference => {
                     debug!(model = %self.config.provider.model, "calling LLM");
-                    let response = self.provider.chat(&self.history, &self.trace_ctx).await?;
+
+                    // Budget check before LLM call
+                    if let Err((spent, limit)) =
+                        self.cost_tracker.check_budget(self.config.max_cost_usd)
+                    {
+                        return Err(AgentError::BudgetExceeded { spent, limit });
+                    }
+
+                    let (response, usage) =
+                        self.provider.chat(&self.history, &self.trace_ctx).await?;
                     debug!(len = response.len(), "LLM response received");
+
+                    // Record cost (Tier 1.2)
+                    let input_tokens = usage.input_tokens.unwrap_or(0) as u64;
+                    let output_tokens = usage.output_tokens.unwrap_or(0) as u64;
+                    let call_cost = self.cost_tracker.record(
+                        &self.config.provider.model,
+                        input_tokens,
+                        output_tokens,
+                    );
+                    if call_cost > 0.0 {
+                        eprintln!(
+                            "💰 [cost] ${:.6} this call, ${:.6} cumulative",
+                            call_cost, self.cost_tracker.total_cost_usd,
+                        );
+                    }
 
                     // Record evidence (Phase 1)
                     self.evidence.push(Evidence::from_inference(&response));
@@ -487,6 +521,7 @@ impl AgentContext {
                         capabilities,
                         safety: ExecutionLimits::standard(),
                         memory: self.config.memory.clone(),
+                        max_cost_usd: self.config.max_cost_usd,
                     };
 
                     // Use pool if available, otherwise create executor matching parent's kind
@@ -825,6 +860,7 @@ impl AgentContext {
             }
 
             let step_start = std::time::Instant::now();
+            let cost_before = self.cost_tracker.total_cost_usd;
             let program = super::interaction::agent_task_full(
                 &resolved_task,
                 None,
@@ -840,7 +876,8 @@ impl AgentContext {
                         "✅  [recipe] step '{step_id}' completed — {turns} turns, {:.1}s",
                         step_start.elapsed().as_secs_f64()
                     );
-                    StepResult::completed(output, turns, step_start.elapsed())
+                    let step_cost = self.cost_tracker.total_cost_usd - cost_before;
+                    StepResult::completed(output, turns, step_start.elapsed(), step_cost)
                 }
                 Err(e) => {
                     let turns = self.turn;
@@ -850,7 +887,8 @@ impl AgentContext {
                         "❌  [recipe] step '{step_id}' failed — {turns} turns, {:.1}s: {e}",
                         step_start.elapsed().as_secs_f64()
                     );
-                    StepResult::failed(e.to_string(), turns, step_start.elapsed())
+                    let step_cost = self.cost_tracker.total_cost_usd - cost_before;
+                    StepResult::failed(e.to_string(), turns, step_start.elapsed(), step_cost)
                 }
             };
 
@@ -865,6 +903,7 @@ impl AgentContext {
             steps: outputs,
             total_turns,
             elapsed: recipe_start.elapsed(),
+            total_cost_usd: self.cost_tracker.total_cost_usd,
         };
 
         // Record OTEL recipe span
