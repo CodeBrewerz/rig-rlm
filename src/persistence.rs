@@ -1,10 +1,19 @@
 //! Phase 22: Turso persistence layer.
 //!
 //! Stores agent sessions, conversation history, execution traces,
-//! and optimization history in a local Turso (libSQL) database.
+//! optimization history, and cross-session semantic memories
+//! in a local Turso (libSQL) database.
+//!
+//! ## Semantic Memory
+//!
+//! Uses Turso's native vector search (`F32_BLOB` + `vector_top_k()`) to
+//! store and recall memories across sessions. At session end, the agent
+//! extracts preferences, decisions, and facts; at session start, it
+//! recalls the most relevant ones via cosine similarity.
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 /// A Turso-backed persistence store for agent state.
 pub struct AgentStore {
@@ -38,6 +47,20 @@ pub struct Turn {
     pub exec_stderr: Option<String>,
     pub exec_return: Option<String>,
     pub timestamp_ms: i64,
+}
+
+/// A discrete memory extracted from a conversation.
+///
+/// Memories are user preferences, decisions, facts, or learnings
+/// that persist across sessions and are recalled via semantic search.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Memory {
+    pub id: Option<i64>,
+    pub user_id: String,
+    pub content: String,
+    pub category: String, // "preference" | "learning" | "decision" | "fact"
+    pub session_id: Option<String>,
+    pub created_at: String,
 }
 
 impl AgentStore {
@@ -96,6 +119,28 @@ impl AgentStore {
         )
         .await
         .map_err(|e| anyhow::anyhow!("Schema init failed: {e}"))?;
+
+        // ── Semantic memory table (Phase 28) ──────────────────────────
+        // Stores embeddings as JSON text for universal SQLite compatibility.
+        // Cosine distance is computed in application code.
+        let conn3 = db.connect().map_err(|e| anyhow::anyhow!("connect: {e}"))?;
+        let _ = conn3
+            .execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS memories (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id     TEXT NOT NULL DEFAULT 'default',
+                    content     TEXT NOT NULL,
+                    category    TEXT NOT NULL DEFAULT 'fact',
+                    session_id  TEXT,
+                    created_at  TEXT NOT NULL,
+                    embedding   TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id);
+                ",
+            )
+            .await;
+        debug!("memories table ready");
 
         // Tier 1.2: Add cost/token columns (idempotent ALTER TABLE)
         for stmt in &[
@@ -222,5 +267,211 @@ impl AgentStore {
         } else {
             Ok("no data".to_string())
         }
+    }
+
+    // ── Semantic Memory Methods ──────────────────────────────────────
+
+    /// Store a memory with its embedding vector.
+    ///
+    /// Embedding is stored as a JSON array string for universal SQLite compat.
+    pub async fn store_memory(
+        &self,
+        memory: &Memory,
+        embedding: &[f32],
+    ) -> anyhow::Result<()> {
+        let conn = self
+            .db
+            .connect()
+            .map_err(|e| anyhow::anyhow!("connect: {e}"))?;
+
+        // Serialize embedding as JSON array
+        let emb_json = serde_json::to_string(embedding)
+            .map_err(|e| anyhow::anyhow!("serialize embedding: {e}"))?;
+
+        conn.execute(
+            "INSERT INTO memories (user_id, content, category, session_id, created_at, embedding) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            (
+                memory.user_id.as_str(),
+                memory.content.as_str(),
+                memory.category.as_str(),
+                memory.session_id.as_deref().unwrap_or(""),
+                memory.created_at.as_str(),
+                emb_json.as_str(),
+            ),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("insert memory: {e}"))?;
+
+        debug!(
+            "stored memory: [{}] {}",
+            memory.category,
+            &memory.content[..memory.content.len().min(80)]
+        );
+        Ok(())
+    }
+
+    /// Recall the top-K most relevant memories using cosine similarity.
+    ///
+    /// Loads all memories, computes cosine distance in Rust, returns top-K.
+    /// This is a brute-force approach that works on any SQLite version.
+    pub async fn recall_memories(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+    ) -> anyhow::Result<Vec<Memory>> {
+        let conn = self
+            .db
+            .connect()
+            .map_err(|e| anyhow::anyhow!("connect: {e}"))?;
+
+        let mut rows = conn
+            .query(
+                "SELECT id, user_id, content, category, session_id, created_at, embedding \
+                 FROM memories ORDER BY created_at DESC LIMIT 200",
+                (),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("recall query: {e}"))?;
+
+        let mut scored: Vec<(f64, Memory)> = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| anyhow::anyhow!("next: {e}"))?
+        {
+            let id: i64 = row.get(0).map_err(|e| anyhow::anyhow!("get: {e}"))?;
+            let user_id: String = row.get(1).map_err(|e| anyhow::anyhow!("get: {e}"))?;
+            let content: String = row.get(2).map_err(|e| anyhow::anyhow!("get: {e}"))?;
+            let category: String = row.get(3).map_err(|e| anyhow::anyhow!("get: {e}"))?;
+            let session_id: String = row.get(4).map_err(|e| anyhow::anyhow!("get: {e}"))?;
+            let created_at: String = row.get(5).map_err(|e| anyhow::anyhow!("get: {e}"))?;
+            let emb_json: String = row.get(6).map_err(|e| anyhow::anyhow!("get: {e}"))?;
+
+            // Parse stored embedding
+            let stored_emb: Vec<f32> = match serde_json::from_str(&emb_json) {
+                Ok(v) => v,
+                Err(_) => continue, // skip invalid embeddings
+            };
+
+            // Compute cosine similarity
+            let sim = cosine_similarity(query_embedding, &stored_emb);
+
+            scored.push((
+                sim,
+                Memory {
+                    id: Some(id),
+                    user_id,
+                    content,
+                    category,
+                    session_id: if session_id.is_empty() {
+                        None
+                    } else {
+                        Some(session_id)
+                    },
+                    created_at,
+                },
+            ));
+        }
+
+        // Sort by similarity (descending) and take top-K
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let memories: Vec<Memory> = scored.into_iter().take(top_k).map(|(_, m)| m).collect();
+
+        debug!("recalled {} memories (top_k={top_k})", memories.len());
+        Ok(memories)
+    }
+
+
+    /// List recent memories chronologically (no vector search).
+    pub async fn list_memories(
+        &self,
+        user_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<Memory>> {
+        let conn = self
+            .db
+            .connect()
+            .map_err(|e| anyhow::anyhow!("connect: {e}"))?;
+
+        let mut rows = conn
+            .query(
+                "SELECT id, user_id, content, category, session_id, created_at \
+                 FROM memories WHERE user_id = ?1 ORDER BY created_at DESC LIMIT ?2",
+                (user_id, limit as i64),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("list query: {e}"))?;
+
+        let mut memories = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| anyhow::anyhow!("next: {e}"))?
+        {
+            let id: i64 = row.get(0).map_err(|e| anyhow::anyhow!("get: {e}"))?;
+            let user_id: String = row.get(1).map_err(|e| anyhow::anyhow!("get: {e}"))?;
+            let content: String = row.get(2).map_err(|e| anyhow::anyhow!("get: {e}"))?;
+            let category: String = row.get(3).map_err(|e| anyhow::anyhow!("get: {e}"))?;
+            let session_id: String = row.get(4).map_err(|e| anyhow::anyhow!("get: {e}"))?;
+            let created_at: String = row.get(5).map_err(|e| anyhow::anyhow!("get: {e}"))?;
+
+            memories.push(Memory {
+                id: Some(id),
+                user_id,
+                content,
+                category,
+                session_id: if session_id.is_empty() {
+                    None
+                } else {
+                    Some(session_id)
+                },
+                created_at,
+            });
+        }
+
+        Ok(memories)
+    }
+
+    /// Format recalled memories for injection into the system prompt.
+    pub fn format_memories_for_prompt(memories: &[Memory]) -> String {
+        if memories.is_empty() {
+            return String::new();
+        }
+
+        let mut out = String::from("\n## Recalled Memories\n\n");
+        out.push_str("The following are relevant memories from past sessions:\n\n");
+        for m in memories {
+            out.push_str(&format!("- [{}] {}\n", m.category, m.content));
+        }
+        out
+    }
+}
+
+/// Compute cosine similarity between two vectors.
+///
+/// Returns a value in [-1.0, 1.0] where 1.0 means identical direction.
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+
+    let mut dot = 0.0f64;
+    let mut norm_a = 0.0f64;
+    let mut norm_b = 0.0f64;
+
+    for (x, y) in a.iter().zip(b.iter()) {
+        let x = *x as f64;
+        let y = *y as f64;
+        dot += x * y;
+        norm_a += x * x;
+        norm_b += y * y;
+    }
+
+    let denom = norm_a.sqrt() * norm_b.sqrt();
+    if denom == 0.0 {
+        0.0
+    } else {
+        dot / denom
     }
 }

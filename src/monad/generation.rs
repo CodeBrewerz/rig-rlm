@@ -3,6 +3,18 @@
 //! The LLM's response is parsed into structured form: text explanation
 //! + optional code block + optional final answer. This drives the
 //! interaction monad's decision logic.
+//!
+//! Phase 30: Added `orchestrate` field for LLM-triggered multi-agent
+//! spawning via ```orchestrate blocks.
+
+/// Specification for a sub-agent parsed from an ```orchestrate block.
+#[derive(Debug, Clone)]
+pub struct AgentSpec {
+    /// Human-readable name for this agent.
+    pub name: String,
+    /// The task prompt for this agent.
+    pub task: String,
+}
 
 /// Parsed LLM generation — what the model actually produced.
 #[derive(Debug, Clone)]
@@ -15,6 +27,10 @@ pub struct Generation {
     pub final_answer: Option<String>,
     /// Shell command (if RUN command found).
     pub shell_command: Option<String>,
+    /// Unified diff patch (if ```diff block found).
+    pub patch: Option<String>,
+    /// Orchestration specs (if ```orchestrate block found).
+    pub orchestrate: Option<Vec<AgentSpec>>,
     /// Plain text explanation (everything outside special blocks).
     pub text: String,
 }
@@ -37,6 +53,8 @@ impl Generation {
                 code: None,
                 final_answer: Some(final_text),
                 shell_command: None,
+                patch: None,
+                orchestrate: None,
                 text: raw.to_string(),
             };
         }
@@ -53,9 +71,17 @@ impl Generation {
                 code: None,
                 final_answer: None,
                 shell_command: Some(cmd),
+                patch: None,
+                orchestrate: None,
                 text: raw.to_string(),
             };
         }
+
+        // Extract diff/patch blocks (```diff ... ```)
+        let patch = Self::extract_diff_block(trimmed);
+
+        // Extract orchestrate blocks (```orchestrate ... ```)
+        let orchestrate = Self::extract_orchestrate_block(trimmed);
 
         // Extract ALL code blocks and concatenate them
         let code = Self::extract_all_code_blocks(trimmed);
@@ -65,6 +91,8 @@ impl Generation {
             code,
             final_answer: None,
             shell_command: None,
+            patch,
+            orchestrate,
             text: raw.to_string(),
         }
     }
@@ -162,6 +190,100 @@ impl Generation {
     pub fn is_final(&self) -> bool {
         self.final_answer.is_some()
     }
+
+    /// Does this generation contain a unified diff patch?
+    pub fn has_patch(&self) -> bool {
+        self.patch.is_some()
+    }
+
+    /// Does this generation contain an orchestrate directive?
+    pub fn has_orchestrate(&self) -> bool {
+        self.orchestrate.is_some()
+    }
+
+    /// Extract a ```diff block from the response.
+    fn extract_diff_block(text: &str) -> Option<String> {
+        for tag in &["```diff", "```patch"] {
+            if let Some(start) = text.find(tag) {
+                let code_start = start + tag.len();
+                // Skip to next line
+                let code_start = match text[code_start..].find('\n') {
+                    Some(i) => code_start + i + 1,
+                    None => continue,
+                };
+                // Find closing fence
+                if let Some(end) = text[code_start..].find("\n```") {
+                    let diff = text[code_start..code_start + end].trim().to_string();
+                    if !diff.is_empty() && (diff.contains("---") || diff.contains("+++")) {
+                        return Some(diff);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Extract a ```orchestrate block from the response.
+    ///
+    /// Parses a simple YAML-like list of agent specs:
+    /// ```orchestrate
+    /// - name: "auditor-1"
+    ///   task: "Deep-audit manage_obligation workflow"
+    /// - name: "reviewer"
+    ///   task: "Review for hidden edge cases"
+    /// ```
+    fn extract_orchestrate_block(text: &str) -> Option<Vec<AgentSpec>> {
+        let tag = "```orchestrate";
+        let start = text.find(tag)?;
+        let code_start = start + tag.len();
+        let code_start = code_start + text[code_start..].find('\n')? + 1;
+        let end = text[code_start..].find("\n```")?;
+        let block = text[code_start..code_start + end].trim();
+
+        if block.is_empty() {
+            return None;
+        }
+
+        // Parse YAML-like format: lines starting with "- name:" followed by "  task:"
+        let mut specs = Vec::new();
+        let mut current_name: Option<String> = None;
+
+        for line in block.lines() {
+            let trimmed = line.trim();
+
+            if trimmed.starts_with("- name:") {
+                // If we had a previous spec without task, skip it
+                let name = trimmed
+                    .strip_prefix("- name:")
+                    .unwrap_or("")
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string();
+                current_name = Some(name);
+            } else if trimmed.starts_with("task:") {
+                let task = trimmed
+                    .strip_prefix("task:")
+                    .unwrap_or("")
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string();
+
+                if let Some(name) = current_name.take() {
+                    if !name.is_empty() && !task.is_empty() {
+                        specs.push(AgentSpec { name, task });
+                    }
+                }
+            }
+        }
+
+        if specs.is_empty() {
+            None
+        } else {
+            Some(specs)
+        }
+    }
 }
 
 // ── Error guidance templates ─────────────────────────────────────
@@ -184,4 +306,103 @@ impl ErrorGuidance {
 
     pub const MULTIPLE_CODE_BLOCKS: &'static str = "Multiple code blocks detected. Only the first code block will \
          be executed. Please combine your code into a single ```repl block.";
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_detects_diff_block() {
+        let input = r#"Here's the change:
+
+```diff
+--- a/hello.py
++++ b/hello.py
+@@ -1,3 +1,4 @@
+ def hello():
+-    print("hi")
++    print("hello world")
++    return True
+     pass
+```
+
+This updates the greeting."#;
+
+        let parsed = Generation::parse(input);
+        assert!(parsed.has_patch(), "should detect diff block");
+        let patch = parsed.patch.unwrap();
+        assert!(patch.contains("--- a/hello.py"));
+        assert!(patch.contains("+++ b/hello.py"));
+        assert!(patch.contains("-    print(\"hi\")"));
+        assert!(patch.contains("+    print(\"hello world\")"));
+    }
+
+    #[test]
+    fn parse_detects_patch_block() {
+        let input = "```patch\n--- a/foo.rs\n+++ b/foo.rs\n@@ -1 +1 @@\n-old\n+new\n```";
+        let parsed = Generation::parse(input);
+        assert!(parsed.has_patch());
+    }
+
+    #[test]
+    fn parse_no_diff_when_no_markers() {
+        let input = "```diff\nsome random text without diff markers\n```";
+        let parsed = Generation::parse(input);
+        assert!(!parsed.has_patch(), "should not detect diff without --- or +++");
+    }
+
+    #[test]
+    fn parse_diff_and_code_coexist() {
+        let input = r#"```diff
+--- a/x.py
++++ b/x.py
+@@ -1 +1 @@
+-old
++new
+```
+
+```repl
+print("hello")
+```"#;
+
+        let parsed = Generation::parse(input);
+        assert!(parsed.has_patch(), "should have patch");
+        assert!(parsed.has_code(), "should have code too");
+    }
+
+    #[test]
+    fn parse_final_takes_priority() {
+        let parsed = Generation::parse("FINAL the answer is 42");
+        assert!(parsed.is_final());
+        assert!(!parsed.has_patch());
+        assert!(!parsed.has_code());
+    }
+
+    #[test]
+    fn parse_orchestrate_block() {
+        let input = r#"I'll spawn two auditors to review independently.
+
+```orchestrate
+- name: "auditor-1"
+  task: "Deep-audit the manage_obligation workflow"
+- name: "edge-reviewer"
+  task: "Review for hidden edge cases"
+```
+"#;
+        let parsed = Generation::parse(input);
+        assert!(parsed.has_orchestrate());
+        let specs = parsed.orchestrate.unwrap();
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].name, "auditor-1");
+        assert_eq!(specs[1].name, "edge-reviewer");
+        assert!(specs[0].task.contains("manage_obligation"));
+    }
+
+    #[test]
+    fn parse_no_orchestrate_when_empty() {
+        let input = "Just some text, no orchestrate block";
+        let parsed = Generation::parse(input);
+        assert!(!parsed.has_orchestrate());
+    }
 }

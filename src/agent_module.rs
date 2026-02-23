@@ -167,7 +167,7 @@ fn extract_code_and_answer(result: &str, ctx: &AgentContext) -> (String, String)
                     return m.content[code_start..code_start + end].trim().to_string();
                 }
             }
-            m.content.clone()
+            m.content.to_string()
         })
         .unwrap_or_default();
 

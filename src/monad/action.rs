@@ -22,7 +22,13 @@ use super::orchestrator::Orchestrator;
 #[derive(Debug, Clone)]
 pub enum Action {
     /// Insert content into conversation history.
-    Insert { role: Role, content: String },
+    /// Optionally carries multimodal attachments (images, PDFs).
+    Insert {
+        role: Role,
+        content: String,
+        #[allow(dead_code)]
+        attachments: Vec<super::attachment::Attachment>,
+    },
 
     /// Call the LLM with current conversation state.
     /// Returns the model's text response.

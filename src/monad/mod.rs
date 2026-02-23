@@ -6,6 +6,7 @@
 //! **User entry point**: `interaction::agent_task("your task")`
 
 pub mod action;
+pub mod attachment;
 pub mod capabilities;
 pub mod context;
 pub mod context_manager;
@@ -22,6 +23,7 @@ pub mod interaction;
 pub mod memories;
 pub mod memory;
 pub mod monad;
+pub mod normalize;
 pub mod orchestrator;
 pub mod otel;
 pub mod parallel;

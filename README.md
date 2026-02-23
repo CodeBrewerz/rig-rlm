@@ -1,150 +1,167 @@
 # rig-rlm
 
-Monadic AI agent with DSPy-rs prompt optimization, Turso persistence, and sandboxed Python execution.
+Monadic AI agent with durable execution, MCP server, sandboxed Python, and DSPy-rs prompt optimization.
 
-**Stack:** Rig (LLM) · DSPy-rs (optimization) · Turso (persistence) · PyO3/Microsandbox (execution)
+**Stack:** [Rig](https://rig.rs) (LLM) · [Restate](https://restate.dev) (durable execution) · [rmcp](https://crates.io/crates/rmcp) (MCP server) · [PyO3](https://pyo3.rs) (Python sandbox) · [DSPy-rs](https://crates.io/crates/dspy) (optimization) · [Turso](https://turso.tech) (persistence)
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    Entry Points                      │
+├──────────┬──────────────┬───────────────────────────┤
+│  CLI     │  MCP Server  │  Restate Workflow          │
+│ (main)   │  (stdio)     │  (HTTP, durable)           │
+└────┬─────┴──────┬───────┴───────────┬───────────────┘
+     │            │                   │
+     ▼            ▼                   ▼
+┌─────────────────────────────────────────────────────┐
+│              AgentMonad (Free Monad)                 │
+│  Pure(value) | Perform { action, continuation }      │
+└──────────────────────┬──────────────────────────────┘
+                       │ interpreted by
+                       ▼
+┌─────────────────────────────────────────────────────┐
+│              AgentContext (Interpreter)               │
+│                                                      │
+│  Action::ModelInference  → Rig LLM Provider          │
+│  Action::ExecuteCode     → PyO3 Sandbox REPL         │
+│  Action::ApplyPatch      → Unified Diff Engine       │
+│  Action::SpawnSubAgent   → Child Context             │
+│  Action::CompactContext  → Normalize + Compress      │
+│  Action::Log             → Evidence + OTEL           │
+└──────────────────────────────────────────────────────┘
+```
+
+## Quick Start
+
+### Prerequisites
+
+- Rust 1.75+ (`rustup update`)
+- Python 3.10+ (for PyO3 sandbox)
+- Optional: [Restate CLI](https://docs.restate.dev/develop/local_dev#running-restate-server--cli-locally) for durable mode
 
 ### Environment Variables
 
-Variable	When Needed	Example
-OPENAI_API_KEY	Using OpenAI models	export OPENAI_API_KEY=sk-...
-RUST_LOG	Debug tracing	export RUST_LOG=rig_rlm=debug
+| Variable | When Needed | Example |
+|----------|-------------|---------|
+| `OPENROUTER_API_KEY` | Using OpenRouter | `export OPENROUTER_API_KEY=sk-...` |
+| `OPENAI_API_KEY` | Using OpenAI | `export OPENAI_API_KEY=sk-...` |
+| `RUST_LOG` | Debug tracing | `export RUST_LOG=rig_rlm=debug` |
 
-## Quick Start
+### Build
 
 ```bash
 cargo build --release
 ```
 
-## Commands
+## Usage
 
-### `run` — Single task
-
-```bash
-cargo run --release -- run "Write a function to compute fibonacci" \
-  --model gpt-4o \
-  --executor pyo3 \
-  --max-turns 25 \
-  --db agent.db
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--model` | `gpt-4o` | LLM model name |
-| `--executor` | `pyo3` | `pyo3` (in-process) or `microsandbox` (isolated VM) |
-| `--max-turns` | `25` | Max generate→execute→feedback cycles |
-| `--db` | `agent.db` | Turso database path |
-
----
-
-### `optimize` — DSPy-rs GEPA prompt optimization
+### 1. CLI — Direct Mode
 
 ```bash
-cargo run --release -- optimize \
-  --trainset examples.json \
-  --iterations 10 \
-  --db optimize.db
-```
+# Single task
+cargo run --release -- run "Write fibonacci in Python" \
+  --model gpt-4o --executor pyo3 --max-turns 25 --db agent.db
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--trainset` | *(required)* | Path to training examples JSON |
-| `--iterations` | `10` | Number of GEPA iterations |
-| `--db` | `optimize.db` | Turso database path |
+# DSPy-rs GEPA optimization
+cargo run --release -- optimize --trainset examples.json --iterations 10
 
----
+# ARC-AGI benchmark
+cargo run --release -- arc-bench --dataset ./arc-agi-2/evaluation --model gpt-4o
 
-### `arc-bench` — ARC-AGI benchmark
-
-```bash
-# Baseline — direct evaluation
-cargo run --release -- arc-bench \
-  --dataset ./arc-agi-2/evaluation \
-  --model gpt-4o
-
-# Optimized — GEPA trains on first N tasks, evaluates on the rest
-cargo run --release -- arc-bench \
-  --dataset ./arc-agi-2 \
-  --model gpt-4o \
-  --optimize \
-  --train-split 50 \
-  --iterations 10
-
-# Quick test — just 1 task
-cargo run --release -- arc-bench \
-  --dataset ./arc-test \
-  --max-tasks 1 \
-  --model gpt-4o
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--dataset` | `./arc-agi-2/evaluation` | Directory of ARC JSON task files |
-| `--model` | `gpt-4o` | LLM model |
-| `--optimize` | `false` | Run GEPA optimization before evaluation |
-| `--train-split` | `50` | Tasks for training (rest = eval). Only with `--optimize` |
-| `--iterations` | `10` | GEPA iterations. Only with `--optimize` |
-| `--max-tasks` | `0` (all) | Limit number of tasks to evaluate |
-
----
-
-### `e2e-test` — End-to-end smoke test
-
-```bash
+# E2E smoke test
 cargo run --release -- e2e-test --executor pyo3 --db test.db
 ```
 
-### `summary` — Session summary from Turso
+### 2. Restate — Durable Mode
+
+The agent runs as a Restate workflow with journaled execution, crash recovery, and lifecycle hooks.
 
 ```bash
-cargo run --release -- summary turso.db --session latest
+# Terminal 1: Start Restate
+restate-server --dev
+
+# Terminal 2: Start the agent workflow server
+cargo run --bin restate-server
+
+# Terminal 3: Register + invoke
+curl -X POST http://localhost:9070/deployments \
+  -H 'Content-Type: application/json' \
+  -d '{"uri": "http://localhost:9091"}'
+
+curl -X POST http://localhost:8080/AgentWorkflow/task-1/run \
+  -H 'Content-Type: application/json' \
+  -d '{"task": "Write a sorting algorithm in Python"}'
+
+# Check status
+curl http://localhost:8080/AgentWorkflow/task-1/status
 ```
 
----
+**Response:**
+```json
+{"turn": 5, "phase": "completed", "total_tokens": 2341, "output": "...", "error": null}
+```
 
-## Toy ARC Problem
+### 3. MCP Server — Claude Desktop / VS Code
 
-Create a test task and run it:
+The agent exposes 4 tools via the Model Context Protocol:
+
+| Tool | Description |
+|------|-------------|
+| `run_task` | Full agent workflow via Restate |
+| `execute_python` | Policy-checked Python execution |
+| `apply_patch` | Unified diff file editing |
+| `check_policy` | Command safety evaluation |
 
 ```bash
-mkdir -p arc-test
+# Start MCP server (stdio)
+cargo run --bin mcp-server
+```
 
-cat > arc-test/invert_fill.json << 'EOF'
+**Claude Desktop config** (`~/.config/claude/claude_desktop_config.json`):
+```json
 {
-  "train": [
-    {
-      "input":  [[0,0,0],[0,1,0],[0,0,0]],
-      "output": [[1,1,1],[1,0,1],[1,1,1]]
-    },
-    {
-      "input":  [[0,0,0,0],[0,0,2,0],[0,0,0,0],[0,0,0,0]],
-      "output": [[2,2,2,2],[2,2,0,2],[2,2,2,2],[2,2,2,2]]
+  "mcpServers": {
+    "rig-rlm": {
+      "command": "/path/to/target/release/mcp-server"
     }
-  ],
-  "test": [
-    {
-      "input":  [[0,0,0],[0,3,0],[0,0,0]],
-      "output": [[3,3,3],[3,0,3],[3,3,3]]
-    }
-  ]
+  }
 }
-EOF
-
-cargo run --release -- arc-bench --dataset ./arc-test --max-tasks 1 --model gpt-4o
 ```
 
-The pattern: find the non-zero cell, flood-fill the grid with that color, set the original cell to 0.
+## Key Features
 
-## Architecture
+| Feature | Module | Description |
+|---------|--------|-------------|
+| Monadic composition | `monad/` | Free monad for composable, testable agent logic |
+| Durable execution | `monad/restate.rs` | Crash-recoverable workflows via Restate |
+| Execution policy | `exec_policy.rs` | Configurable allow/deny for commands |
+| Apply-patch | `apply_patch.rs` | Unified diff editing (like Codex) |
+| Context normalization | `monad/normalize.rs` | Role alternation, output truncation |
+| Token tracking | `monad/history.rs` | Budget tracking with 85% threshold |
+| Cost tracking | `monad/cost.rs` | Per-model USD cost with budget limits |
+| Lifecycle hooks | `monad/hooks.rs` | Pluggable before/after LLM, exec, session |
+| Multi-agent | `monad/orchestrator.rs` | Sub-agent spawning with capability scoping |
+| Evidence trail | `monad/evidence.rs` | Auto-recorded proof of work |
+| OTEL + LangFuse | `monad/otel.rs` | Distributed tracing with enrichment |
 
+## Development
+
+```bash
+# Check (zero warnings)
+cargo check
+
+# Test (221 tests)
+cargo test --lib
+
+# Lint
+cargo clippy --all-targets -- -D warnings
+
+# Format
+cargo fmt --all
 ```
-User Task
-  → AgentMonad (Pure | Perform { action, next })
-    → AgentContext::run() interpreter loop
-      → Action::ModelInference  → Rig LLM provider
-      → Action::ExecuteCode     → PyO3/Microsandbox REPL
-      → Action::SpawnSubAgent   → child context (capability-restricted)
-    → SUBMIT() terminates loop with structured result
-  → DSPy-rs GEPA optimizes the instruction via FeedbackEvaluator
-  → Turso persists sessions, turns, optimization history
-```
+
+## License
+
+See [LICENSE](LICENSE).

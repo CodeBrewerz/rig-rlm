@@ -14,7 +14,6 @@ use tracing_subscriber::{EnvFilter, fmt::Layer, layer::SubscriberExt, util::Subs
 use uuid::Uuid;
 
 // Import from library crate
-use rig_rlm::arc;
 use rig_rlm::monad;
 use rig_rlm::persistence;
 use rig_rlm::sandbox;
@@ -386,6 +385,8 @@ async fn run_agent(
             task,
             resolved_instruction.as_deref(),
             Some(&ctx.config.memory),
+            None,
+            vec![],
         );
         let result = ctx.run(program).await;
 
@@ -426,7 +427,7 @@ async fn run_agent(
                             session_id: session_id.clone(),
                             turn_num: i as i32,
                             role: format!("{:?}", msg.role),
-                            content: msg.content.clone(),
+                            content: msg.content.to_string(),
                             code: None,
                             exec_stdout: None,
                             exec_stderr: None,

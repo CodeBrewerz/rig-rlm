@@ -70,7 +70,7 @@ mod live_llm {
     async fn live_single_task_with_trinity() {
         let mut ctx = live_context(10);
 
-        let program = agent_task_full("What is 2 + 2? Reply with just the number.", None, None);
+        let program = agent_task_full("What is 2 + 2? Reply with just the number.", None, None, None, vec![]);
         let result = ctx.run(program).await;
         match &result {
             Ok(answer) => {
@@ -107,6 +107,8 @@ mod live_llm {
             "What is the capital of France? Reply with just the city name.",
             None,
             None,
+            None,
+            vec![],
         );
         let result = ctx.run(program).await;
         match &result {
@@ -144,6 +146,8 @@ mod live_llm {
             "Given this product data: Widget A=$10.99, Widget B=$24.50, Widget C=$7.25. Which product is the cheapest? Reply with just the product name.",
             None,
             None,
+            None,
+            vec![],
         );
         let result = ctx.run(program).await;
         match &result {
@@ -264,6 +268,8 @@ steps:
             "What programming language is Rust most similar to? Reply in one word.",
             None,
             None,
+            None,
+            vec![],
         );
         let result = ctx.run(program).await;
         let answer = match result {
@@ -300,7 +306,7 @@ steps:
                     session_id: session_id.clone(),
                     turn_num: i as i32,
                     role: format!("{:?}", msg.role),
-                    content: msg.content.clone(),
+                    content: msg.content.to_string(),
                     code: None,
                     exec_stdout: None,
                     exec_stderr: None,
@@ -342,6 +348,8 @@ steps:
             "Name the 3 primary colors. Reply with just the color names separated by commas.",
             None,
             None,
+            None,
+            vec![],
         );
         let result = ctx.run(program).await;
         let answer = match result {
@@ -395,7 +403,7 @@ steps:
                     session_id: session_id.clone(),
                     turn_num: i as i32,
                     role: format!("{:?}", msg.role),
-                    content: msg.content.clone(),
+                    content: msg.content.to_string(),
                     code: None,
                     exec_stdout: None,
                     exec_stderr: None,
@@ -555,6 +563,8 @@ steps:
             "What are the 3 branches of the US government? Reply with just the branch names separated by commas.",
             None,
             None,
+            None,
+            vec![],
         );
         let parent_result = ctx.run(program).await;
         match &parent_result {

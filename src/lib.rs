@@ -11,6 +11,7 @@ pub mod monad;
 pub mod apply_patch;
 pub mod cancellation;
 pub mod exec_policy;
+pub mod mcp_server;
 pub mod persistence;
 pub mod safety;
 pub mod sandbox;

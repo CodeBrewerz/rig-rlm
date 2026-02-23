@@ -98,11 +98,16 @@ impl ProviderConfig {
 /// is selected at construction time via `ProviderConfig`.
 pub struct LlmProvider {
     config: ProviderConfig,
+    /// Shared HTTP client — reuses TCP connection pool across calls.
+    http: reqwest::Client,
 }
 
 impl LlmProvider {
     pub fn new(config: ProviderConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            http: reqwest::Client::new(),
+        }
     }
 
     /// Send a chat completion request.
@@ -126,7 +131,7 @@ impl LlmProvider {
         let client = rig::providers::openai::Client::<reqwest::Client>::builder()
             .base_url(&self.config.base_url)
             .api_key(&self.config.api_key)
-            .http_client(reqwest::Client::new())
+            .http_client(self.http.clone())
             .build()
             .map_err(|e| AgentError::Inference(e.to_string()))?;
 
@@ -256,7 +261,8 @@ impl LlmProvider {
         let mut history = ConversationHistory::new();
         history.push(super::history::HistoryMessage {
             role: super::action::Role::User,
-            content: prompt.to_string(),
+            content: std::borrow::Cow::Owned(prompt.to_string()),
+            attachments: vec![],
         });
         self.chat(&history, &super::otel::TraceContext::new())
             .await
@@ -272,4 +278,104 @@ impl LlmProvider {
     pub fn provider_name(&self) -> &str {
         &self.config.name
     }
+
+    /// Generate an embedding vector for the given text.
+    ///
+    /// Uses the OpenAI-compatible `/embeddings` endpoint (works with OpenRouter).
+    /// Default model: `qwen/qwen3-embedding-8b` (4096 dimensions).
+    ///
+    /// Falls back to a deterministic hash-based pseudo-embedding if the API call fails.
+    pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        use serde_json::json;
+
+        let embed_model = std::env::var("RLM_EMBEDDING_MODEL")
+            .unwrap_or_else(|_| "qwen/qwen3-embedding-8b".to_string());
+        let url = format!(
+            "{}/embeddings",
+            self.config.base_url.trim_end_matches('/')
+        );
+
+        let body = json!({
+            "model": embed_model,
+            "input": text,
+        });
+
+        let response = self.http
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await;
+
+        match response {
+            Ok(resp) if resp.status().is_success() => {
+                let json: serde_json::Value = resp
+                    .json()
+                    .await
+                    .map_err(|e| AgentError::Internal(format!("embed parse: {e}")))?;
+
+                // OpenAI format: data[0].embedding = [f32, ...]
+                let embedding = json["data"][0]["embedding"]
+                    .as_array()
+                    .ok_or_else(|| {
+                        AgentError::Internal("missing embedding in response".to_string())
+                    })?
+                    .iter()
+                    .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+                    .collect::<Vec<f32>>();
+
+                Ok(embedding)
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                eprintln!(
+                    "⚠️ embed API returned {status}: {body}. Using hash fallback."
+                );
+                Ok(hash_embedding(text, HASH_EMBED_DIM))
+            }
+            Err(e) => {
+                eprintln!("⚠️ embed API error: {e}. Using hash fallback.");
+                Ok(hash_embedding(text, HASH_EMBED_DIM))
+            }
+        }
+    }
+}
+
+/// Dimension for hash-based fallback embeddings.
+const HASH_EMBED_DIM: usize = 4096;
+
+/// Deterministic hash-based pseudo-embedding fallback.
+///
+/// NOT semantically meaningful — only provides basic lexical similarity.
+/// Used when no embedding API is available.
+fn hash_embedding(text: &str, dim: usize) -> Vec<f32> {
+    use std::hash::{Hash, Hasher};
+
+    let mut embedding = vec![0.0f32; dim];
+
+    // Hash each word and distribute into the embedding dimensions
+    for (i, word) in text.split_whitespace().enumerate() {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        word.to_lowercase().hash(&mut hasher);
+        let hash = hasher.finish();
+
+        // Use different bits of the hash to set multiple dims
+        for offset in 0..4 {
+            let idx = ((hash >> (offset * 16)) as usize + i) % dim;
+            let val = ((hash >> (offset * 8)) & 0xFF) as f32 / 255.0 - 0.5;
+            embedding[idx] += val;
+        }
+    }
+
+    // L2-normalize
+    let norm: f32 = embedding.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for v in &mut embedding {
+            *v /= norm;
+        }
+    }
+
+    embedding
 }

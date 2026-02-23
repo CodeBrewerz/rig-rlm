@@ -44,6 +44,9 @@ pub struct AgentTaskRequest {
     pub max_turns: Option<usize>,
     pub max_cost_usd: Option<f64>,
     pub preamble: Option<String>,
+    /// Multimodal file attachments (images, PDFs, etc.).
+    #[serde(default)]
+    pub attachments: Vec<super::attachment::Attachment>,
     /// If true, this workflow delegates the task to a child sub-agent workflow.
     /// The parent acts as a supervisor and the child does the actual work.
     #[serde(default)]
@@ -167,6 +170,7 @@ impl AgentWorkflow for AgentWorkflowImpl {
         }
 
         let task_text = req.task.clone();
+        let attachments_for_sub = req.attachments.clone();
 
         // Channels
         let (bg_tx, mut bg_rx) = tokio::sync::mpsc::unbounded_channel::<BgToHandler>();
@@ -182,6 +186,7 @@ impl AgentWorkflow for AgentWorkflowImpl {
                         config,
                         &task_text,
                         req.delegate,
+                        req.attachments.clone(),
                         bg_tx,
                         handler_rx,
                     ))
@@ -236,7 +241,8 @@ impl AgentWorkflow for AgentWorkflowImpl {
                                 };
                                 history.push(super::history::HistoryMessage {
                                     role,
-                                    content: msg.content.clone(),
+                                    content: std::borrow::Cow::Owned(msg.content.clone()),
+                                    attachments: vec![],
                                 });
                             }
 
@@ -318,6 +324,7 @@ impl AgentWorkflow for AgentWorkflowImpl {
                         max_turns: Some(15), // sub-agents get fewer turns
                         max_cost_usd: req.max_cost_usd,
                         preamble: req.preamble.clone(),
+                        attachments: attachments_for_sub.clone(), // sub-agents inherit attachments
                         delegate: false, // child does actual work, no further delegation
                     };
 
@@ -457,6 +464,7 @@ async fn run_agent_loop(
     mut config: super::AgentConfig,
     task: &str,
     delegate: bool,
+    attachments: Vec<super::attachment::Attachment>,
     tx: tokio::sync::mpsc::UnboundedSender<BgToHandler>,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<HandlerToBg>,
 ) {
@@ -488,7 +496,37 @@ async fn run_agent_loop(
             |output| AgentMonad::Pure(output.into_string()),
         )
     } else {
-        agent_task_full(task, None, Some(&config.memory))
+        // Phase 28: Recall relevant memories from past sessions
+        // Open DB once — reused later for session persistence
+        let db_path = std::env::var("RIG_RLM_DB").unwrap_or_else(|_| "agent.db".to_string());
+        let recall_provider = super::provider::LlmProvider::new(provider_config.clone());
+        let recalled = match recall_provider.embed(task).await {
+            Ok(query_emb) => {
+                match AgentStore::open(&db_path).await {
+                    Ok(store) => match store.recall_memories(&query_emb, 5).await {
+                        Ok(memories) if !memories.is_empty() => {
+                            eprintln!(
+                                "\n• Recalled {} memories for task",
+                                memories.len()
+                            );
+                            for m in &memories {
+                                eprintln!(
+                                    "  └ [{}] {}",
+                                    m.category,
+                                    &m.content[..m.content.len().min(80)]
+                                );
+                            }
+                            Some(AgentStore::format_memories_for_prompt(&memories))
+                        }
+                        Ok(_) => None,
+                        Err(e) => { eprintln!("⚠️ recall query: {e}"); None }
+                    },
+                    Err(e) => { eprintln!("⚠️ recall db: {e}"); None }
+                }
+            }
+            Err(e) => { eprintln!("⚠️ recall embed: {e}"); None }
+        };
+        agent_task_full(task, None, Some(&config.memory), recalled.as_deref(), attachments)
     };
     let mut agent_ctx = AgentContext::new(config);
 
@@ -623,7 +661,7 @@ async fn run_agent_loop(
                             .iter()
                             .map(|m| HistoryMsg {
                                 role: format!("{:?}", m.role),
-                                content: m.content.clone(),
+                                content: m.content.to_string(),
                             })
                             .collect();
 
@@ -676,7 +714,8 @@ async fn run_agent_loop(
 
                         agent_ctx.history.push(HistoryMessage {
                             role: Role::Assistant,
-                            content: llm_result.response.clone(),
+                            content: std::borrow::Cow::Owned(llm_result.response.clone()),
+                            attachments: vec![],
                         });
 
                         let output = ActionOutput::Value(llm_result.response);
@@ -696,7 +735,7 @@ async fn run_agent_loop(
                     }
 
                     // ── Code execution: run on bg thread, record in journal ──
-                    Action::ExecuteCode { ref source } => {
+                    Action::ExecuteCode { source: ref _source } => {
                         let output = match agent_ctx.interpret_action(action).await {
                             Ok(out) => out,
                             Err(e) => break Err(format!("exec error: {e}")),
@@ -742,7 +781,8 @@ async fn run_agent_loop(
                         // Record sub-agent result in history
                         agent_ctx.history.push(super::history::HistoryMessage {
                             role: super::action::Role::Execution,
-                            content: format!("Sub-agent result: {result}"),
+                            content: std::borrow::Cow::Owned(format!("Sub-agent result: {result}")),
+                            attachments: vec![],
                         });
 
                         let output = super::action::ActionOutput::Value(result.clone());
@@ -756,6 +796,111 @@ async fn run_agent_loop(
                                 success: true,
                             });
                         }
+
+                        computation = next(output);
+                    }
+
+                    // ── Orchestrate: durable multi-agent via sequential child workflows ──
+                    //
+                    // Under Restate, we dispatch each sub-agent as a sequential
+                    // NeedSubAgent message. The handler invokes each as a durable
+                    // child workflow (journaled). On replay, Restate returns cached
+                    // results automatically.
+                    //
+                    // Tradeoff: sequential (not parallel) under Restate for journal
+                    // determinism. Locally, interpret_action() does true parallel.
+                    Action::Orchestrate { orchestrator } => {
+                        use super::orchestrator::SubAgentResult;
+
+                        let agent_count = orchestrator.agent_count();
+                        let agent_names: Vec<&str> = orchestrator
+                            .specs()
+                            .iter()
+                            .map(|s| s.name.as_str())
+                            .collect();
+
+                        // ── Codex-style: Agent spawned traces ──
+                        for spec in orchestrator.specs() {
+                            let prompt_preview: String =
+                                spec.task.chars().take(120).collect();
+                            eprintln!(
+                                "\n• Agent spawned (Restate durable)\n  └ name: \"{}\"\n    status: pending init\n    prompt: {prompt_preview}...",
+                                spec.name
+                            );
+                        }
+
+                        eprintln!(
+                            "\n• Waiting for agents (sequential under Restate)\n  └ receivers: {}",
+                            agent_names.join(", ")
+                        );
+
+                        let orch_start = std::time::Instant::now();
+                        let mut results: Vec<SubAgentResult> = Vec::new();
+
+                        // Dispatch each sub-agent sequentially as a durable child workflow
+                        for (i, spec) in orchestrator.specs().iter().enumerate() {
+                            let agent_start = std::time::Instant::now();
+
+                            eprintln!(
+                                "\n• Agent running (Restate child workflow)\n  └ name: \"{}\"\n    status: running ({}/{})",
+                                spec.name, i + 1, agent_count
+                            );
+
+                            // Send to handler — it calls ctx.workflow_client().run().call().await
+                            let _ = tx.send(BgToHandler::NeedSubAgent {
+                                task: spec.task.clone(),
+                                step: step + i,
+                                reply_tx: None,
+                            });
+
+                            // Wait for handler's durable result
+                            let result_str = match rx.recv().await {
+                                Some(HandlerToBg::SubAgentResult(output)) => output,
+                                _ => {
+                                    let err = format!(
+                                        "handler closed during orchestrated agent '{}'",
+                                        spec.name
+                                    );
+                                    eprintln!(
+                                        "\n• Agent failed\n  └ name: \"{}\"\n    error: {err}",
+                                        spec.name
+                                    );
+                                    results.push(SubAgentResult::failure(
+                                        spec.name.clone(),
+                                        err,
+                                        agent_start.elapsed(),
+                                    ));
+                                    continue;
+                                }
+                            };
+
+                            let duration = agent_start.elapsed();
+                            let snapshot: String =
+                                result_str.chars().take(150).collect();
+                            eprintln!(
+                                "\n• Agent complete\n  └ name: \"{}\"\n    status: success\n    duration: {:.1}s\n    snapshot: {snapshot}...",
+                                spec.name,
+                                duration.as_secs_f64(),
+                            );
+
+                            results.push(SubAgentResult::success(
+                                spec.name.clone(),
+                                result_str,
+                                0, // turns not tracked via channel
+                                duration,
+                            ));
+                        }
+
+                        let total_duration = orch_start.elapsed();
+                        let success_count = results.iter().filter(|r| r.success).count();
+                        eprintln!(
+                            "\n• Orchestration complete (Restate durable)\n  └ {success_count}/{agent_count} agents succeeded in {:.1}s",
+                            total_duration.as_secs_f64()
+                        );
+
+                        // Format combined results
+                        let formatted = super::orchestrator::Orchestrator::format_results(&results);
+                        let output = super::action::ActionOutput::Value(formatted);
 
                         computation = next(output);
                     }
@@ -793,6 +938,7 @@ async fn run_agent_loop(
     let db_path = std::env::var("RIG_RLM_DB").unwrap_or_else(|_| "agent.db".to_string());
     let session_id = uuid::Uuid::new_v4().to_string();
 
+    // Reuse the same DB handle (avoids reopening + schema re-init)
     if let Ok(store) = AgentStore::open(&db_path).await {
         let session = Session {
             session_id: session_id.clone(),
@@ -814,7 +960,7 @@ async fn run_agent_loop(
                     session_id: session_id.clone(),
                     turn_num: i as i32,
                     role: format!("{:?}", msg.role),
-                    content: msg.content.clone(),
+                    content: msg.content.to_string(),
                     code: None,
                     exec_stdout: None,
                     exec_stderr: None,
@@ -833,6 +979,15 @@ async fn run_agent_loop(
             }
         }
         eprintln!("📦 Restate session {session_id} saved to {db_path}");
+
+        // Phase 28: Extract and store memories for future recall
+        if final_result.is_ok() {
+            match agent_ctx.extract_and_store_memories(&session_id).await {
+                Ok(n) if n > 0 => eprintln!("🧠 {n} memories extracted and stored"),
+                Ok(_) => {} // nothing worth remembering
+                Err(e) => eprintln!("⚠️ memory extraction error: {e}"),
+            }
+        }
     }
 
     // Send final result

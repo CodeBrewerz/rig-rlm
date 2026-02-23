@@ -4,6 +4,20 @@
 //! - `MicrosandboxExecutor` — hardware-isolated microVM via microsandbox
 //! - `Pyo3CodeExecutor` — in-process Python via PyO3 (dev/test fallback)
 //!
+//! ## Module organization
+//!
+//! Single file (not split) because PyO3's `#[pyfunction]` macros and
+//! `wrap_pyfunction!` require same-module scope.
+//!
+//! **Sections** (search by `── Section Name ──`):
+//! - `CodeExecutor Trait` — trait + ExecutionResult (~90 lines)  
+//! - `Microsandbox Executor` — MicrosandboxExecutor (~130 lines)
+//! - `LLM + Restate Bridges` — global bridges for llm_query() (~290 lines)
+//! - `PyO3 Executor` — Pyo3CodeExecutor (~220 lines)
+//! - `Factory + Pool` — ExecutorKind, create_executor, SandboxPool (~125 lines)
+//! - `Helper Toolkit` — Python HTTP helpers injected at setup (~230 lines)
+//! - `Tests` — unit tests (~65 lines)
+//!
 //! Phase 23B additions (from Daytona PR analysis):
 //! - Persistent REPL state — variables survive across execute() calls
 //! - Session setup — inject SUBMIT(), prelude, llm_query()
@@ -168,7 +182,7 @@ impl CodeExecutor for MicrosandboxExecutor {
 
         // Check for SUBMIT marker in stdout
         if let Some(submit_value) = extract_submit_result(&stdout) {
-            let answer = submit_value
+            let _answer = submit_value
                 .get("answer")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
@@ -386,7 +400,10 @@ pub fn init_context_memory_store() -> SharedMemoryStore {
 /// Reset the store (for new sessions).
 pub fn reset_context_memory_store() {
     if let Some(store) = CONTEXT_MEMORY_STORE.get() {
-        let mut s = store.lock().unwrap();
+        let Ok(mut s) = store.lock() else {
+            tracing::error!("context memory store lock poisoned during reset");
+            return;
+        };
         *s = ContextMemoryStore::new();
     }
 }

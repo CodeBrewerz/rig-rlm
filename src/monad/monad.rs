@@ -78,6 +78,23 @@ impl AgentMonad {
             Action::Insert {
                 role,
                 content: content.into(),
+                attachments: vec![],
+            },
+            |_| Self::Pure(String::new()),
+        )
+    }
+
+    /// Insert a message with multimodal attachments.
+    pub fn insert_with_attachments(
+        role: Role,
+        content: impl Into<String>,
+        attachments: Vec<super::attachment::Attachment>,
+    ) -> Self {
+        Self::perform(
+            Action::Insert {
+                role,
+                content: content.into(),
+                attachments,
             },
             |_| Self::Pure(String::new()),
         )
@@ -230,6 +247,24 @@ impl AgentMonad {
     /// Returns a formatted summary of all results.
     pub fn orchestrate(orchestrator: super::orchestrator::Orchestrator) -> Self {
         Self::perform(Action::Orchestrate { orchestrator }, |output| {
+            Self::Pure(output.into_string())
+        })
+    }
+
+    /// Spawn parallel sub-agents from parsed `AgentSpec` list.
+    ///
+    /// This is the LLM-facing entry point — called when the model emits
+    /// a ```orchestrate block. Builds an `Orchestrator` with `Parallel`
+    /// strategy from the agent specs.
+    pub fn orchestrate_agents(specs: Vec<super::generation::AgentSpec>) -> Self {
+        use super::orchestrator::{Orchestrator, OrchestratorStrategy, SubAgentSpec};
+
+        let mut orch = Orchestrator::new()
+            .with_strategy(OrchestratorStrategy::Parallel);
+        for spec in specs {
+            orch = orch.add_agent(SubAgentSpec::new(spec.name, spec.task));
+        }
+        Self::perform(Action::Orchestrate { orchestrator: orch }, |output| {
             Self::Pure(output.into_string())
         })
     }

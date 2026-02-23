@@ -23,6 +23,32 @@ pub enum AgentError {
     SafetyViolation(String),
     /// Agent exceeded cost budget (Tier 1.2).
     BudgetExceeded { spent: f64, limit: f64 },
+    /// LLM provider returned a rate-limit (429) response.
+    ProviderRateLimit {
+        /// Suggested wait time before retrying.
+        retry_after: std::time::Duration,
+        /// Which provider/model hit the limit.
+        provider: String,
+    },
+    /// Context window capacity exceeded — history too large for model.
+    ContextWindowExceeded {
+        /// Tokens used (estimated or reported).
+        used: usize,
+        /// Model's maximum context window.
+        limit: usize,
+    },
+    /// Sandbox code execution timed out.
+    SandboxTimeout {
+        /// How long the code ran before being killed.
+        elapsed: std::time::Duration,
+    },
+    /// Patch could not be applied to the target file.
+    PatchConflict {
+        /// File that failed.
+        file: std::path::PathBuf,
+        /// Why the patch conflicted.
+        reason: String,
+    },
     /// Catch-all for unexpected errors.
     Internal(String),
 }
@@ -40,6 +66,26 @@ impl fmt::Display for AgentError {
             Self::SafetyViolation(msg) => write!(f, "safety violation: {msg}"),
             Self::BudgetExceeded { spent, limit } => {
                 write!(f, "budget exceeded: ${spent:.4} spent, ${limit:.4} limit")
+            }
+            Self::ProviderRateLimit {
+                retry_after,
+                provider,
+            } => write!(
+                f,
+                "rate limited by {provider}, retry after {:.1}s",
+                retry_after.as_secs_f64()
+            ),
+            Self::ContextWindowExceeded { used, limit } => {
+                write!(
+                    f,
+                    "context window exceeded: {used} tokens used, {limit} limit"
+                )
+            }
+            Self::SandboxTimeout { elapsed } => {
+                write!(f, "sandbox timed out after {:.1}s", elapsed.as_secs_f64())
+            }
+            Self::PatchConflict { file, reason } => {
+                write!(f, "patch conflict on {}: {reason}", file.display())
             }
             Self::Internal(msg) => write!(f, "internal error: {msg}"),
         }

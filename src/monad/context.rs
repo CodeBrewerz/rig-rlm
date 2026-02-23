@@ -304,6 +304,163 @@ impl AgentContext {
         super::evidence::summarize_evidence(&self.evidence)
     }
 
+    /// Extract memories from the current conversation and store them in the DB.
+    ///
+    /// Called at session end. Uses a quick LLM call to identify preferences,
+    /// decisions, facts, and learnings worth remembering. Each extracted memory
+    /// is embedded and stored in the `memories` table for future recall.
+    pub async fn extract_and_store_memories(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<usize> {
+        use crate::persistence::{AgentStore, Memory};
+
+        // Build a summary of the conversation for extraction
+        let conversation_summary: String = self
+            .history
+            .messages()
+            .iter()
+            .take(20) // Limit to prevent huge prompts
+            .map(|m| format!("[{}] {}", m.role, &m.content[..m.content.len().min(300)]))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        if conversation_summary.trim().is_empty() {
+            return Ok(0);
+        }
+
+        // Ask the LLM to extract discrete memories
+        let extraction_prompt = format!(
+            "Analyze this conversation and extract discrete, reusable facts. \
+             Return ONLY a JSON array of objects with 'content' and 'category' fields. \
+             Categories: preference, learning, decision, fact. \
+             Extract at most 5 items. Only extract things worth remembering for future sessions. \
+             If nothing is worth remembering, return an empty array [].\n\n\
+             Conversation:\n{conversation_summary}\n\n\
+             Return ONLY the JSON array, no explanation:"
+        );
+
+        let extracted = match self.provider.complete(&extraction_prompt).await {
+            Ok(text) => text,
+            Err(e) => {
+                eprintln!("⚠️ memory extraction failed: {e}");
+                return Ok(0);
+            }
+        };
+
+        // Parse the JSON array
+        let memories: Vec<serde_json::Value> = match serde_json::from_str(
+            extracted
+                .trim()
+                .trim_start_matches("```json")
+                .trim_start_matches("```")
+                .trim_end_matches("```")
+                .trim(),
+        ) {
+            Ok(arr) => arr,
+            Err(e) => {
+                eprintln!("⚠️ memory extraction parse failed: {e}");
+                return Ok(0);
+            }
+        };
+
+        // Store each memory with its embedding
+        let store = AgentStore::open("agent.db").await?;
+        let mut stored = 0;
+
+        for mem_val in &memories {
+            let content = match mem_val["content"].as_str() {
+                Some(c) if !c.is_empty() => c,
+                _ => continue,
+            };
+            let category = mem_val["category"]
+                .as_str()
+                .unwrap_or("fact")
+                .to_string();
+
+            // Embed the memory content
+            let embedding = match self.provider.embed(content).await {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("⚠️ embed failed for memory: {e}");
+                    continue;
+                }
+            };
+
+            let memory = Memory {
+                id: None,
+                user_id: "default".to_string(),
+                content: content.to_string(),
+                category,
+                session_id: Some(session_id.to_string()),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            };
+
+            if let Err(e) = store.store_memory(&memory, &embedding).await {
+                eprintln!("⚠️ store memory failed: {e}");
+                continue;
+            }
+            stored += 1;
+        }
+
+        if stored > 0 {
+            eprintln!("\n• Memories stored: {stored} items from this session");
+        }
+        Ok(stored)
+    }
+
+    /// Recall relevant memories for a task and format for prompt injection.
+    ///
+    /// Embeds the task description, queries the vector index for top-K matches,
+    /// and returns a formatted string suitable for injection into the system prompt.
+    pub async fn recall_relevant_memories(
+        &self,
+        task: &str,
+        top_k: usize,
+    ) -> Option<String> {
+        use crate::persistence::AgentStore;
+
+        // Embed the task
+        let query_embedding = match self.provider.embed(task).await {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("⚠️ recall: embed failed: {e}");
+                return None;
+            }
+        };
+
+        // Query the vector index
+        let store = match AgentStore::open("agent.db").await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("⚠️ recall: db open failed: {e}");
+                return None;
+            }
+        };
+
+        let memories = match store.recall_memories(&query_embedding, top_k).await {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("⚠️ recall: query failed: {e}");
+                return None;
+            }
+        };
+
+        if memories.is_empty() {
+            return None;
+        }
+
+        eprintln!(
+            "\n• Recalled {} memories for task",
+            memories.len()
+        );
+        for m in &memories {
+            eprintln!("  └ [{}] {}", m.category, &m.content[..m.content.len().min(80)]);
+        }
+
+        Some(AgentStore::format_memories_for_prompt(&memories))
+    }
+
     /// Ensure the session is set up (SUBMIT injected, prelude run, etc.).
     async fn ensure_session(&mut self) -> Result<()> {
         if !self.session_ready {
@@ -410,170 +567,15 @@ impl AgentContext {
                 .map_err(|reason| AgentError::PermissionDenied(reason))?;
 
             match action {
-                Action::Insert { role, content } => {
-                    debug!(role = %role, len = content.len(), "inserting message");
-                    self.history.push(HistoryMessage { role, content });
+                Action::Insert { role, content, attachments } => {
+                    debug!(role = %role, len = content.len(), attachments = attachments.len(), "inserting message");
+                    self.history.push(HistoryMessage { role, content: std::borrow::Cow::Owned(content), attachments });
                     Ok(ActionOutput::Unit)
                 }
 
-                Action::ModelInference => {
-                    debug!(model = %self.config.provider.model, "calling LLM");
+                Action::ModelInference => self.interpret_model_inference().await,
 
-                    // 🪝 Hook: BeforeLlmCall
-                    let msg_count = self.history.messages().len();
-                    if let Err(reason) = self.hooks.fire(&HookEvent::BeforeLlmCall {
-                        turn: self.turn,
-                        message_count: msg_count,
-                    }) {
-                        return Err(AgentError::Internal(format!("Hook abort: {reason}")));
-                    }
-
-                    // Budget check before LLM call
-                    if let Err((spent, limit)) =
-                        self.cost_tracker.check_budget(self.config.max_cost_usd)
-                    {
-                        return Err(AgentError::BudgetExceeded { spent, limit });
-                    }
-
-                    let llm_start = Instant::now();
-                    let (response, usage) =
-                        self.provider.chat(&self.history, &self.trace_ctx).await?;
-                    let llm_duration = llm_start.elapsed();
-                    debug!(
-                        len = response.len(),
-                        duration_ms = llm_duration.as_millis(),
-                        "LLM response received"
-                    );
-
-                    // 🪝 Hook: AfterLlmCall
-                    let _ = self.hooks.fire(&HookEvent::AfterLlmCall {
-                        turn: self.turn,
-                        response_len: response.len(),
-                        duration: llm_duration,
-                    });
-
-                    // Record cost (Tier 1.2)
-                    let input_tokens = usage.input_tokens.unwrap_or(0) as u64;
-                    let output_tokens = usage.output_tokens.unwrap_or(0) as u64;
-                    let call_cost = self.cost_tracker.record(
-                        &self.config.provider.model,
-                        input_tokens,
-                        output_tokens,
-                    );
-                    if call_cost > 0.0 {
-                        eprintln!(
-                            "💰 [cost] ${:.6} this call, ${:.6} cumulative",
-                            call_cost, self.cost_tracker.total_cost_usd,
-                        );
-                    }
-
-                    // Record evidence (Phase 1)
-                    self.evidence.push(Evidence::from_inference(&response));
-
-                    // Auto-insert the assistant response
-                    self.history.push(HistoryMessage {
-                        role: Role::Assistant,
-                        content: response.clone(),
-                    });
-
-                    Ok(ActionOutput::Value(response))
-                }
-
-                Action::ExecuteCode { source } => {
-                    // Phase 12: safety validation
-                    validate_code(&source, &self.config.safety)
-                        .map_err(|v| AgentError::SafetyViolation(v.to_string()))?;
-
-                    // Codex safety check (higher-level pattern detection)
-                    if let crate::safety::SafetyCheck::Reject { reason } =
-                        crate::safety::assess_code_safety(&source)
-                    {
-                        return Err(AgentError::SafetyViolation(reason));
-                    }
-
-                    // Phase 12: execution count limit
-                    self.execution_count += 1;
-                    if self.execution_count > self.config.safety.max_total_executions {
-                        return Err(AgentError::SafetyViolation(format!(
-                            "execution limit reached: {}/{}",
-                            self.execution_count, self.config.safety.max_total_executions
-                        )));
-                    }
-
-                    // 🪝 Hook: BeforeCodeExec
-                    let code_preview = source.chars().take(200).collect::<String>();
-                    if let Err(reason) = self.hooks.fire(&HookEvent::BeforeCodeExec {
-                        turn: self.turn,
-                        code_preview: code_preview.clone(),
-                    }) {
-                        return Err(AgentError::Internal(format!("Hook abort: {reason}")));
-                    }
-
-                    debug!(
-                        len = source.len(),
-                        exec_count = self.execution_count,
-                        "executing code in persistent REPL"
-                    );
-                    let exec_start = Instant::now();
-                    let result = self
-                        .executor
-                        .execute(&source)
-                        .await
-                        .map_err(|e| AgentError::Execution(e.to_string()))?;
-                    let exec_duration = exec_start.elapsed();
-
-                    // Phase 12: sanitize output
-                    let mut feedback = sanitize_output(&result.to_feedback(), &self.config.safety);
-
-                    // Phase 2: auto-load large results into isolated context
-                    let threshold = self.config.safety.auto_load_threshold;
-                    if threshold > 0 && feedback.len() > threshold {
-                        let ctx_id = format!("auto_exec_{}", self.turn);
-                        let meta = self.context_manager.load(&ctx_id, &feedback);
-                        let preview_len = 600.min(feedback.len());
-                        let preview = &feedback[..preview_len];
-                        info!(
-                            ctx_id = %ctx_id,
-                            size = meta.size_bytes,
-                            lines = meta.line_count,
-                            "auto-loaded large output into context"
-                        );
-                        feedback = format!(
-                            "{preview}\n...[Full output ({} chars, {} lines) in context '{ctx_id}'. \
-                         Use search_context/peek_context to explore.]",
-                            meta.size_bytes, meta.line_count
-                        );
-                    }
-
-                    // 🪝 Hook: AfterCodeExec
-                    let exec_success = !result.is_error();
-                    let _ = self.hooks.fire(&HookEvent::AfterCodeExec {
-                        turn: self.turn,
-                        success: exec_success,
-                        duration: exec_duration,
-                        output_preview: feedback.chars().take(200).collect(),
-                    });
-
-                    // Record evidence (Phase 1)
-                    self.evidence.push(Evidence::from_code_exec(
-                        &feedback,
-                        if result.is_error() { Some(1) } else { Some(0) },
-                    ));
-
-                    self.history.push(HistoryMessage {
-                        role: Role::Execution,
-                        content: feedback.clone(),
-                    });
-
-                    // If SUBMIT was called, return the structured result
-                    if result.is_submitted() {
-                        if let Some(ref return_val) = result.return_value {
-                            return Ok(ActionOutput::Submitted(return_val.clone()));
-                        }
-                    }
-
-                    Ok(ActionOutput::Value(feedback))
-                }
+                Action::ExecuteCode { source } => self.interpret_execute_code(source).await,
 
                 Action::Capture { name, value } => {
                     debug!(name = %name, "capturing variable");
@@ -846,88 +848,7 @@ impl AgentContext {
                 }
 
                 // ─── Context compaction ─────────────────────────────────
-                Action::CompactContext => {
-                    let max_tokens = self.config.max_context_tokens;
-                    let estimated = self.history.estimate_tokens();
-                    if estimated <= max_tokens {
-                        // Under budget — no compaction needed
-                        Ok(ActionOutput::Unit)
-                    } else {
-                        info!(
-                            estimated_tokens = estimated,
-                            max_tokens, "context over budget, compacting"
-                        );
-
-                        // Fast path: truncate large execution outputs in old messages
-                        let keep_recent = 6;
-                        self.history.truncate_old_content(keep_recent, 500);
-
-                        // Check if fast path was enough
-                        if self.history.estimate_tokens() <= max_tokens {
-                            info!("compaction: fast-path truncation was sufficient");
-                            return Ok(ActionOutput::Value("compacted:truncated".into()));
-                        }
-
-                        // Smart path: split off old messages, summarize via LLM
-                        let old = self.history.split_at(keep_recent);
-                        if old.is_empty() {
-                            return Ok(ActionOutput::Unit);
-                        }
-
-                        // Build summarization prompt from removed messages
-                        let old_text: String = old
-                            .iter()
-                            .map(|m| {
-                                let preview_len = 300.min(m.content.len());
-                                format!("[{}] {}", m.role, &m.content[..preview_len])
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n---\n");
-
-                        let summary_prompt = format!(
-                            "Summarize the following conversation history into a concise paragraph. \
-                             Focus on: key findings, decisions made, and current progress. \
-                             Be brief but preserve important details.\n\n{old_text}"
-                        );
-
-                        // One-shot LLM call for summarization
-                        let provider =
-                            super::provider::LlmProvider::new(self.config.provider.clone());
-                        match provider.complete(&summary_prompt).await {
-                            Ok(summary) => {
-                                info!(
-                                    removed = old.len(),
-                                    summary_len = summary.len(),
-                                    "compaction: LLM summary generated"
-                                );
-                                self.history.prepend_summary(summary);
-                                Ok(ActionOutput::Value("compacted:summarized".into()))
-                            }
-                            Err(e) => {
-                                // Fallback: use dumb summary if LLM fails
-                                warn!(
-                                    error = %e,
-                                    "compaction: LLM summary failed, using truncated preview"
-                                );
-                                let fallback = format!(
-                                    "[{} older messages removed. Key topics: {}]",
-                                    old.len(),
-                                    old.iter()
-                                        .filter(|m| m.role == Role::Assistant)
-                                        .take(3)
-                                        .map(|m| {
-                                            let p = 80.min(m.content.len());
-                                            m.content[..p].to_string()
-                                        })
-                                        .collect::<Vec<_>>()
-                                        .join("; ")
-                                );
-                                self.history.prepend_summary(fallback);
-                                Ok(ActionOutput::Value("compacted:fallback".into()))
-                            }
-                        }
-                    }
-                }
+                Action::CompactContext => self.interpret_compact_context().await,
 
                 // ── Parallel batch: run read-only actions concurrently ──
                 Action::ParallelBatch { actions } => {
@@ -1006,20 +927,41 @@ impl AgentContext {
                     use super::orchestrator::{OrchestratorStrategy, SubAgentResult};
 
                     let agent_count = orchestrator.agent_count();
-                    eprintln!(
-                        "🪝 [orchestrator] running {} agents, strategy={:?}",
-                        agent_count,
-                        orchestrator.strategy()
-                    );
-                    let start = std::time::Instant::now();
+                    let agent_names: Vec<&str> = orchestrator
+                        .specs()
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect();
 
+                    // ── Codex-style: Agent spawned traces ──
+                    for spec in orchestrator.specs() {
+                        let prompt_preview: String =
+                            spec.task.chars().take(120).collect();
+                        eprintln!(
+                            "\n• Agent spawned\n  └ name: \"{}\"\n    status: pending init\n    prompt: {prompt_preview}...",
+                            spec.name
+                        );
+                    }
+
+                    // ── Codex-style: Waiting for agents ──
+                    eprintln!(
+                        "\n• Waiting for agents\n  └ receivers: {}",
+                        agent_names.join(", ")
+                    );
+
+                    let start = std::time::Instant::now();
                     let mut results: Vec<SubAgentResult> = Vec::new();
 
                     match orchestrator.strategy().clone() {
                         OrchestratorStrategy::Sequential => {
                             // Run agents one after another
-                            for spec in orchestrator.specs() {
-                                eprintln!("🪝 [orchestrator] starting agent '{}'", spec.name);
+                            for (i, spec) in orchestrator.specs().iter().enumerate() {
+                                eprintln!(
+                                    "\n• Agent running\n  └ name: \"{}\"\n    status: running ({}/{})",
+                                    spec.name,
+                                    i + 1,
+                                    agent_count
+                                );
                                 let agent_start = std::time::Instant::now();
 
                                 let child_config = AgentConfig {
@@ -1049,10 +991,14 @@ impl AgentContext {
 
                                 match sub_result {
                                     Ok(answer) => {
+                                        // ── Codex-style: Agent complete with snapshot ──
+                                        let snapshot: String =
+                                            answer.chars().take(150).collect();
                                         eprintln!(
-                                            "🪝 [orchestrator] agent '{}' succeeded in {:.1}s",
+                                            "\n• Agent complete\n  └ name: \"{}\"\n    status: success\n    duration: {:.1}s, {} turns\n    snapshot: {snapshot}...",
                                             spec.name,
-                                            duration.as_secs_f64()
+                                            duration.as_secs_f64(),
+                                            child_ctx.turn,
                                         );
                                         results.push(SubAgentResult::success(
                                             spec.name.clone(),
@@ -1063,7 +1009,7 @@ impl AgentContext {
                                     }
                                     Err(e) => {
                                         eprintln!(
-                                            "🪝 [orchestrator] agent '{}' failed: {e}",
+                                            "\n• Agent failed\n  └ name: \"{}\"\n    status: error\n    error: {e}",
                                             spec.name
                                         );
                                         results.push(SubAgentResult::failure(
@@ -1154,14 +1100,42 @@ impl AgentContext {
                                 handles.push(handle);
                             }
 
+                            // ── Codex-style: wait + per-agent completion traces ──
+                            let total = handles.len();
+                            let mut completed = 0usize;
                             for handle in handles {
                                 match handle.await {
-                                    Ok(result) => results.push(result),
-                                    Err(e) => results.push(SubAgentResult::failure(
-                                        "unknown".to_string(),
-                                        format!("task join error: {e}"),
-                                        std::time::Duration::ZERO,
-                                    )),
+                                    Ok(result) => {
+                                        completed += 1;
+                                        let status = if result.success { "success" } else { "error" };
+                                        let snapshot: String = if result.success {
+                                            result.answer.chars().take(150).collect()
+                                        } else {
+                                            result
+                                                .error
+                                                .as_deref()
+                                                .unwrap_or("unknown")
+                                                .chars()
+                                                .take(150)
+                                                .collect()
+                                        };
+                                        eprintln!(
+                                            "\n• Wait complete\n  └ agents: {total} total · {completed} completed\n    {} {status}: {snapshot}...",
+                                            result.name,
+                                        );
+                                        results.push(result);
+                                    }
+                                    Err(e) => {
+                                        completed += 1;
+                                        eprintln!(
+                                            "\n• Wait complete\n  └ agents: {total} total · {completed} completed\n    unknown error: task join error: {e}"
+                                        );
+                                        results.push(SubAgentResult::failure(
+                                            "unknown".to_string(),
+                                            format!("task join error: {e}"),
+                                            std::time::Duration::ZERO,
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -1170,8 +1144,9 @@ impl AgentContext {
                     let duration = start.elapsed();
                     let success_count = results.iter().filter(|r| r.success).count();
 
+                    // ── Codex-style: final summary ──
                     eprintln!(
-                        "🪝 [orchestrator] done: {success_count}/{agent_count} succeeded in {:.1}s",
+                        "\n• Orchestration complete\n  └ {success_count}/{agent_count} agents succeeded in {:.1}s",
                         duration.as_secs_f64()
                     );
 
@@ -1366,6 +1341,8 @@ impl AgentContext {
                 &resolved_task,
                 None,
                 Some(&self.config.memory),
+                None,
+                vec![],
             );
 
             let step_result = match self.run(program).await {
@@ -1422,5 +1399,250 @@ impl AgentContext {
         );
 
         Ok(result)
+    }
+
+    // ── Extracted interpreter methods ─────────────────────────────
+
+    /// Interpret `Action::ModelInference` — call the LLM, record cost+evidence,
+    /// auto-insert the assistant response.
+    async fn interpret_model_inference(&mut self) -> Result<ActionOutput> {
+        debug!(model = %self.config.provider.model, "calling LLM");
+
+        // 🪝 Hook: BeforeLlmCall
+        let msg_count = self.history.messages().len();
+        if let Err(reason) = self.hooks.fire(&HookEvent::BeforeLlmCall {
+            turn: self.turn,
+            message_count: msg_count,
+        }) {
+            return Err(AgentError::Internal(format!("Hook abort: {reason}")));
+        }
+
+        // Budget check before LLM call
+        if let Err((spent, limit)) = self.cost_tracker.check_budget(self.config.max_cost_usd) {
+            return Err(AgentError::BudgetExceeded { spent, limit });
+        }
+
+        let llm_start = Instant::now();
+        let (response, usage) = self.provider.chat(&self.history, &self.trace_ctx).await?;
+        let llm_duration = llm_start.elapsed();
+        debug!(
+            len = response.len(),
+            duration_ms = llm_duration.as_millis(),
+            "LLM response received"
+        );
+
+        // 🪝 Hook: AfterLlmCall
+        let _ = self.hooks.fire(&HookEvent::AfterLlmCall {
+            turn: self.turn,
+            response_len: response.len(),
+            duration: llm_duration,
+        });
+
+        // Record cost (Tier 1.2)
+        let input_tokens = usage.input_tokens.unwrap_or(0) as u64;
+        let output_tokens = usage.output_tokens.unwrap_or(0) as u64;
+        let call_cost = self.cost_tracker.record(
+            &self.config.provider.model,
+            input_tokens,
+            output_tokens,
+        );
+        if call_cost > 0.0 {
+            eprintln!(
+                "💰 [cost] ${:.6} this call, ${:.6} cumulative",
+                call_cost, self.cost_tracker.total_cost_usd,
+            );
+        }
+
+        // Record evidence (Phase 1)
+        self.evidence.push(Evidence::from_inference(&response));
+
+        // Auto-insert the assistant response
+        self.history.push(HistoryMessage {
+            role: Role::Assistant,
+            content: std::borrow::Cow::Owned(response.clone()),
+            attachments: vec![],
+        });
+
+        Ok(ActionOutput::Value(response))
+    }
+
+    /// Interpret `Action::ExecuteCode` — validate safety, run in sandbox,
+    /// sanitize output, auto-load large results, fire hooks, record evidence.
+    async fn interpret_execute_code(&mut self, source: String) -> Result<ActionOutput> {
+        // Phase 12: safety validation
+        validate_code(&source, &self.config.safety)
+            .map_err(|v| AgentError::SafetyViolation(v.to_string()))?;
+
+        // Codex safety check (higher-level pattern detection)
+        if let crate::safety::SafetyCheck::Reject { reason } =
+            crate::safety::assess_code_safety(&source)
+        {
+            return Err(AgentError::SafetyViolation(reason));
+        }
+
+        // Phase 12: execution count limit
+        self.execution_count += 1;
+        if self.execution_count > self.config.safety.max_total_executions {
+            return Err(AgentError::SafetyViolation(format!(
+                "execution limit reached: {}/{}",
+                self.execution_count, self.config.safety.max_total_executions
+            )));
+        }
+
+        // 🪝 Hook: BeforeCodeExec
+        let code_preview = source.chars().take(200).collect::<String>();
+        if let Err(reason) = self.hooks.fire(&HookEvent::BeforeCodeExec {
+            turn: self.turn,
+            code_preview: code_preview.clone(),
+        }) {
+            return Err(AgentError::Internal(format!("Hook abort: {reason}")));
+        }
+
+        debug!(
+            len = source.len(),
+            exec_count = self.execution_count,
+            "executing code in persistent REPL"
+        );
+        let exec_start = Instant::now();
+        let result = self
+            .executor
+            .execute(&source)
+            .await
+            .map_err(|e| AgentError::Execution(e.to_string()))?;
+        let exec_duration = exec_start.elapsed();
+
+        // Phase 12: sanitize output
+        let mut feedback = sanitize_output(&result.to_feedback(), &self.config.safety);
+
+        // Phase 2: auto-load large results into isolated context
+        let threshold = self.config.safety.auto_load_threshold;
+        if threshold > 0 && feedback.len() > threshold {
+            let ctx_id = format!("auto_exec_{}", self.turn);
+            let meta = self.context_manager.load(&ctx_id, &feedback);
+            let preview_len = 600.min(feedback.len());
+            let preview = &feedback[..preview_len];
+            info!(
+                ctx_id = %ctx_id,
+                size = meta.size_bytes,
+                lines = meta.line_count,
+                "auto-loaded large output into context"
+            );
+            feedback = format!(
+                "{preview}\n...[Full output ({} chars, {} lines) in context '{ctx_id}'. \
+                 Use search_context/peek_context to explore.]",
+                meta.size_bytes, meta.line_count
+            );
+        }
+
+        // 🪝 Hook: AfterCodeExec
+        let exec_success = !result.is_error();
+        let _ = self.hooks.fire(&HookEvent::AfterCodeExec {
+            turn: self.turn,
+            success: exec_success,
+            duration: exec_duration,
+            output_preview: feedback.chars().take(200).collect(),
+        });
+
+        // Record evidence (Phase 1)
+        self.evidence.push(Evidence::from_code_exec(
+            &feedback,
+            if result.is_error() { Some(1) } else { Some(0) },
+        ));
+
+        self.history.push(HistoryMessage {
+            role: Role::Execution,
+            content: std::borrow::Cow::Owned(feedback.clone()),
+            attachments: vec![],
+        });
+
+        // If SUBMIT was called, return the structured result
+        if result.is_submitted() {
+            if let Some(ref return_val) = result.return_value {
+                return Ok(ActionOutput::Submitted(return_val.clone()));
+            }
+        }
+
+        Ok(ActionOutput::Value(feedback))
+    }
+
+    /// Interpret `Action::CompactContext` — normalize history, estimate tokens,
+    /// fast-path truncation, smart-path LLM summarization.
+    async fn interpret_compact_context(&mut self) -> Result<ActionOutput> {
+        // Normalize history before estimating tokens
+        super::normalize::normalize_history(self.history.messages_mut());
+
+        let max_tokens = self.config.max_context_tokens;
+        let estimated = self.history.estimate_tokens();
+        if estimated <= max_tokens {
+            return Ok(ActionOutput::Unit);
+        }
+
+        info!(
+            estimated_tokens = estimated,
+            max_tokens, "context over budget, compacting"
+        );
+
+        // Fast path: truncate large execution outputs in old messages
+        let keep_recent = 6;
+        self.history.truncate_old_content(keep_recent, 500);
+
+        if self.history.estimate_tokens() <= max_tokens {
+            info!("compaction: fast-path truncation was sufficient");
+            return Ok(ActionOutput::Value("compacted:truncated".into()));
+        }
+
+        // Smart path: split off old messages, summarize via LLM
+        let old = self.history.split_at(keep_recent);
+        if old.is_empty() {
+            return Ok(ActionOutput::Unit);
+        }
+
+        let old_text: String = old
+            .iter()
+            .map(|m| {
+                let preview_len = 300.min(m.content.len());
+                format!("[{}] {}", m.role, &m.content[..preview_len])
+            })
+            .collect::<Vec<_>>()
+            .join("\n---\n");
+
+        let summary_prompt = format!(
+            "Summarize the following conversation history into a concise paragraph. \
+             Focus on: key findings, decisions made, and current progress. \
+             Be brief but preserve important details.\n\n{old_text}"
+        );
+
+        match self.provider.complete(&summary_prompt).await {
+            Ok(summary) => {
+                info!(
+                    removed = old.len(),
+                    summary_len = summary.len(),
+                    "compaction: LLM summary generated"
+                );
+                self.history.prepend_summary(summary);
+                Ok(ActionOutput::Value("compacted:summarized".into()))
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "compaction: LLM summary failed, using truncated preview"
+                );
+                let fallback = format!(
+                    "[{} older messages removed. Key topics: {}]",
+                    old.len(),
+                    old.iter()
+                        .filter(|m| m.role == Role::Assistant)
+                        .take(3)
+                        .map(|m| {
+                            let p = 80.min(m.content.len());
+                            m.content[..p].to_string()
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                );
+                self.history.prepend_summary(fallback);
+                Ok(ActionOutput::Value("compacted:fallback".into()))
+            }
+        }
     }
 }
