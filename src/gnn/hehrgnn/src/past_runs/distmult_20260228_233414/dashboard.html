@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HEHRGNN Training Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Inter', 'Segoe UI', sans-serif;
+    background: #0f0f23;
+    color: #e0e0e0;
+    padding: 24px;
+  }
+  h1 {
+    text-align: center;
+    font-size: 2rem;
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 8px;
+  }
+  .subtitle {
+    text-align: center;
+    color: #888;
+    font-size: 0.9rem;
+    margin-bottom: 32px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+  .card {
+    background: #1a1a2e;
+    border-radius: 12px;
+    padding: 20px;
+    border: 1px solid #2a2a4a;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.3);
+  }
+  .card.full { grid-column: 1 / -1; }
+  .card h2 {
+    font-size: 1.1rem;
+    color: #a0a0d0;
+    margin-bottom: 16px;
+  }
+  canvas { width: 100% !important; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+  }
+  th, td {
+    padding: 8px 12px;
+    text-align: left;
+    border-bottom: 1px solid #2a2a4a;
+  }
+  th { color: #667eea; font-weight: 600; }
+  td { color: #ccc; }
+  .best { color: #4ade80; font-weight: bold; }
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+  .stat {
+    text-align: center;
+    padding: 16px;
+    background: #16213e;
+    border-radius: 8px;
+  }
+  .stat-value {
+    font-size: 1.8rem;
+    font-weight: 700;
+    background: linear-gradient(135deg, #4ade80, #22d3ee);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .stat-label {
+    font-size: 0.75rem;
+    color: #888;
+    margin-top: 4px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+</style>
+</head>
+<body>
+<h1>HEHRGNN Training Dashboard</h1>
+<p class="subtitle">Generated at training completion</p>
+
+<div class="grid">
+  <!-- Summary Stats -->
+  <div class="card full" id="summary-card">
+    <h2>Training Summary</h2>
+    <div class="stat-grid" id="stat-grid"></div>
+  </div>
+
+  <!-- Loss Chart -->
+  <div class="card">
+    <h2>Training Loss</h2>
+    <canvas id="lossChart"></canvas>
+  </div>
+
+  <!-- Link Prediction Metrics -->
+  <div class="card">
+    <h2>Link Prediction Metrics</h2>
+    <canvas id="metricsChart"></canvas>
+  </div>
+
+  <!-- Epoch Duration -->
+  <div class="card">
+    <h2>Epoch Duration (seconds)</h2>
+    <canvas id="durationChart"></canvas>
+  </div>
+
+  <!-- Mean Rank -->
+  <div class="card">
+    <h2>Mean Rank</h2>
+    <canvas id="rankChart"></canvas>
+  </div>
+
+  <!-- Epoch Details Table -->
+  <div class="card full">
+    <h2>Epoch Details</h2>
+    <div style="overflow-x: auto;">
+      <table id="epochTable">
+        <thead>
+          <tr>
+            <th>Epoch</th><th>Loss</th><th>LR</th>
+            <th>MRR</th><th>H@1</th><th>H@3</th><th>H@10</th>
+            <th>Mean Rank</th><th>Duration</th><th>Batches</th>
+          </tr>
+        </thead>
+        <tbody id="epochBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+const data = [{"epoch":0,"train_loss":211.43564442225866,"val_loss":211.43564442225866,"mrr":0.0194734963820423,"hits_at_1":0.01020408163265306,"hits_at_3":0.01020408163265306,"hits_at_10":0.04081632653061224,"mean_rank":275.8469387755102,"learning_rate":0.001,"epoch_duration_ms":12804,"num_batches":7,"avg_batch_loss":211.43564442225866},{"epoch":1,"train_loss":98.11025074550084,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":765,"num_batches":7,"avg_batch_loss":98.11025074550084},{"epoch":2,"train_loss":64.3484298161098,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":754,"num_batches":7,"avg_batch_loss":64.3484298161098},{"epoch":3,"train_loss":41.67416409083775,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":784,"num_batches":7,"avg_batch_loss":41.67416409083775},{"epoch":4,"train_loss":39.89235632760184,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":742,"num_batches":7,"avg_batch_loss":39.89235632760184},{"epoch":5,"train_loss":25.97756794520787,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":733,"num_batches":7,"avg_batch_loss":25.97756794520787},{"epoch":6,"train_loss":25.790097372872488,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":758,"num_batches":7,"avg_batch_loss":25.790097372872488},{"epoch":7,"train_loss":20.386022567749023,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":746,"num_batches":7,"avg_batch_loss":20.386022567749023},{"epoch":8,"train_loss":18.862812723432267,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":757,"num_batches":7,"avg_batch_loss":18.862812723432267},{"epoch":9,"train_loss":19.922194753374374,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":746,"num_batches":7,"avg_batch_loss":19.922194753374374},{"epoch":10,"train_loss":19.617935725620814,"val_loss":19.617935725620814,"mrr":0.01686858758849971,"hits_at_1":0.01020408163265306,"hits_at_3":0.01020408163265306,"hits_at_10":0.01020408163265306,"mean_rank":287.3265306122449,"learning_rate":0.001,"epoch_duration_ms":12796,"num_batches":7,"avg_batch_loss":19.617935725620814},{"epoch":11,"train_loss":18.326812471662247,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":770,"num_batches":7,"avg_batch_loss":18.326812471662247},{"epoch":12,"train_loss":15.78893392426627,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":760,"num_batches":7,"avg_batch_loss":15.78893392426627},{"epoch":13,"train_loss":15.040573528834752,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":752,"num_batches":7,"avg_batch_loss":15.040573528834752},{"epoch":14,"train_loss":14.967794827052526,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":755,"num_batches":7,"avg_batch_loss":14.967794827052526},{"epoch":15,"train_loss":14.826779229300362,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":754,"num_batches":7,"avg_batch_loss":14.826779229300362},{"epoch":16,"train_loss":13.37685911996024,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":748,"num_batches":7,"avg_batch_loss":13.37685911996024},{"epoch":17,"train_loss":13.631830624171666,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":750,"num_batches":7,"avg_batch_loss":13.631830624171666},{"epoch":18,"train_loss":12.48210975102016,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":750,"num_batches":7,"avg_batch_loss":12.48210975102016},{"epoch":19,"train_loss":11.336606434413365,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":753,"num_batches":7,"avg_batch_loss":11.336606434413365},{"epoch":20,"train_loss":11.750218527657646,"val_loss":11.750218527657646,"mrr":0.017032398417603827,"hits_at_1":0.01020408163265306,"hits_at_3":0.01020408163265306,"hits_at_10":0.01020408163265306,"mean_rank":284.85714285714283,"learning_rate":0.001,"epoch_duration_ms":12802,"num_batches":7,"avg_batch_loss":11.750218527657646},{"epoch":21,"train_loss":10.666604178292411,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":766,"num_batches":7,"avg_batch_loss":10.666604178292411},{"epoch":22,"train_loss":10.703741073608398,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":748,"num_batches":7,"avg_batch_loss":10.703741073608398},{"epoch":23,"train_loss":9.550927911485944,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":770,"num_batches":7,"avg_batch_loss":9.550927911485944},{"epoch":24,"train_loss":9.149718352726527,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":798,"num_batches":7,"avg_batch_loss":9.149718352726527},{"epoch":25,"train_loss":9.543319838387626,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":757,"num_batches":7,"avg_batch_loss":9.543319838387626},{"epoch":26,"train_loss":8.717180797031947,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":753,"num_batches":7,"avg_batch_loss":8.717180797031947},{"epoch":27,"train_loss":9.162323815482003,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":765,"num_batches":7,"avg_batch_loss":9.162323815482003},{"epoch":28,"train_loss":8.018505641392299,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":745,"num_batches":7,"avg_batch_loss":8.018505641392299},{"epoch":29,"train_loss":7.007712398256574,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":751,"num_batches":7,"avg_batch_loss":7.007712398256574},{"epoch":30,"train_loss":9.201074463980538,"val_loss":9.201074463980538,"mrr":0.01858797535513316,"hits_at_1":0.01020408163265306,"hits_at_3":0.01020408163265306,"hits_at_10":0.01020408163265306,"mean_rank":266.9795918367347,"learning_rate":0.001,"epoch_duration_ms":12829,"num_batches":7,"avg_batch_loss":9.201074463980538},{"epoch":31,"train_loss":7.846116270337786,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":761,"num_batches":7,"avg_batch_loss":7.846116270337786},{"epoch":32,"train_loss":7.747611795152936,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":754,"num_batches":7,"avg_batch_loss":7.747611795152936},{"epoch":33,"train_loss":7.181357264518738,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":726,"num_batches":7,"avg_batch_loss":7.181357264518738},{"epoch":34,"train_loss":6.933835029602051,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":734,"num_batches":7,"avg_batch_loss":6.933835029602051},{"epoch":35,"train_loss":6.208556175231934,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":743,"num_batches":7,"avg_batch_loss":6.208556175231934},{"epoch":36,"train_loss":5.570189714431763,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":792,"num_batches":7,"avg_batch_loss":5.570189714431763},{"epoch":37,"train_loss":6.704453911100115,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":753,"num_batches":7,"avg_batch_loss":6.704453911100115},{"epoch":38,"train_loss":6.120314734322684,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":751,"num_batches":7,"avg_batch_loss":6.120314734322684},{"epoch":39,"train_loss":5.813135964529855,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":755,"num_batches":7,"avg_batch_loss":5.813135964529855},{"epoch":40,"train_loss":5.462388549532209,"val_loss":5.462388549532209,"mrr":0.018759474895740445,"hits_at_1":0.01020408163265306,"hits_at_3":0.01020408163265306,"hits_at_10":0.01020408163265306,"mean_rank":273.59183673469386,"learning_rate":0.001,"epoch_duration_ms":12877,"num_batches":7,"avg_batch_loss":5.462388549532209},{"epoch":41,"train_loss":5.047105823244367,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":751,"num_batches":7,"avg_batch_loss":5.047105823244367},{"epoch":42,"train_loss":5.789771352495466,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":751,"num_batches":7,"avg_batch_loss":5.789771352495466},{"epoch":43,"train_loss":5.716294016156878,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":750,"num_batches":7,"avg_batch_loss":5.716294016156878},{"epoch":44,"train_loss":5.9168765885489325,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":746,"num_batches":7,"avg_batch_loss":5.9168765885489325},{"epoch":45,"train_loss":4.64451721736363,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":743,"num_batches":7,"avg_batch_loss":4.64451721736363},{"epoch":46,"train_loss":4.8023896898542136,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":767,"num_batches":7,"avg_batch_loss":4.8023896898542136},{"epoch":47,"train_loss":5.118302685873849,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":751,"num_batches":7,"avg_batch_loss":5.118302685873849},{"epoch":48,"train_loss":4.560131175177438,"val_loss":null,"mrr":null,"hits_at_1":null,"hits_at_3":null,"hits_at_10":null,"mean_rank":null,"learning_rate":0.001,"epoch_duration_ms":745,"num_batches":7,"avg_batch_loss":4.560131175177438},{"epoch":49,"train_loss":4.4721381323678155,"val_loss":4.4721381323678155,"mrr":0.020021054320294215,"hits_at_1":0.01020408163265306,"hits_at_3":0.01020408163265306,"hits_at_10":0.02040816326530612,"mean_rank":272.51020408163265,"learning_rate":0.001,"epoch_duration_ms":12859,"num_batches":7,"avg_batch_loss":4.4721381323678155}];
+
+// ---- Summary Stats ----
+const statGrid = document.getElementById('stat-grid');
+if (data.length > 0) {
+  const last = data[data.length - 1];
+  const bestMrr = data.filter(d => d.mrr != null).reduce((a, b) => (b.mrr > a.mrr ? b : a), {mrr: 0, epoch: 0});
+  const totalTime = data.reduce((s, d) => s + d.epoch_duration_ms, 0);
+  const stats = [
+    ['Total Epochs', data.length],
+    ['Final Loss', last.train_loss.toFixed(6)],
+    ['Best MRR', bestMrr.mrr != null ? bestMrr.mrr.toFixed(4) + ' (E' + bestMrr.epoch + ')' : 'N/A'],
+    ['Final H@10', last.hits_at_10 != null ? last.hits_at_10.toFixed(4) : 'N/A'],
+    ['Total Time', (totalTime / 1000).toFixed(1) + 's'],
+    ['Avg Epoch', (totalTime / data.length / 1000).toFixed(2) + 's'],
+  ];
+  stats.forEach(([label, value]) => {
+    statGrid.innerHTML += `<div class="stat"><div class="stat-value">${value}</div><div class="stat-label">${label}</div></div>`;
+  });
+}
+
+// ---- Chart Helpers ----
+const epochs = data.map(d => d.epoch);
+const chartOpts = (title) => ({
+  responsive: true,
+  plugins: { legend: { labels: { color: '#ccc' } }, title: { display: false } },
+  scales: {
+    x: { ticks: { color: '#888' }, grid: { color: '#1f1f3a' } },
+    y: { ticks: { color: '#888' }, grid: { color: '#1f1f3a' } }
+  }
+});
+
+// ---- Loss Chart ----
+new Chart(document.getElementById('lossChart'), {
+  type: 'line',
+  data: {
+    labels: epochs,
+    datasets: [{
+      label: 'Train Loss',
+      data: data.map(d => d.train_loss),
+      borderColor: '#f87171',
+      backgroundColor: 'rgba(248,113,113,0.1)',
+      fill: true,
+      tension: 0.3,
+      pointRadius: 2,
+    }]
+  },
+  options: chartOpts('Loss')
+});
+
+// ---- Metrics Chart ----
+const metricsData = data.filter(d => d.mrr != null);
+if (metricsData.length > 0) {
+  new Chart(document.getElementById('metricsChart'), {
+    type: 'line',
+    data: {
+      labels: metricsData.map(d => d.epoch),
+      datasets: [
+        { label: 'MRR', data: metricsData.map(d => d.mrr), borderColor: '#4ade80', tension: 0.3, pointRadius: 2 },
+        { label: 'Hits@1', data: metricsData.map(d => d.hits_at_1), borderColor: '#22d3ee', tension: 0.3, pointRadius: 2 },
+        { label: 'Hits@3', data: metricsData.map(d => d.hits_at_3), borderColor: '#a78bfa', tension: 0.3, pointRadius: 2 },
+        { label: 'Hits@10', data: metricsData.map(d => d.hits_at_10), borderColor: '#fbbf24', tension: 0.3, pointRadius: 2 },
+      ]
+    },
+    options: chartOpts('Link Prediction')
+  });
+}
+
+// ---- Duration Chart ----
+new Chart(document.getElementById('durationChart'), {
+  type: 'bar',
+  data: {
+    labels: epochs,
+    datasets: [{
+      label: 'Seconds',
+      data: data.map(d => d.epoch_duration_ms / 1000),
+      backgroundColor: 'rgba(102,126,234,0.6)',
+      borderColor: '#667eea',
+      borderWidth: 1,
+    }]
+  },
+  options: chartOpts('Duration')
+});
+
+// ---- Mean Rank Chart ----
+const rankData = data.filter(d => d.mean_rank != null);
+if (rankData.length > 0) {
+  new Chart(document.getElementById('rankChart'), {
+    type: 'line',
+    data: {
+      labels: rankData.map(d => d.epoch),
+      datasets: [{
+        label: 'Mean Rank',
+        data: rankData.map(d => d.mean_rank),
+        borderColor: '#fb923c',
+        backgroundColor: 'rgba(251,146,60,0.1)',
+        fill: true,
+        tension: 0.3,
+        pointRadius: 2,
+      }]
+    },
+    options: chartOpts('Mean Rank')
+  });
+}
+
+// ---- Epoch Table ----
+const tbody = document.getElementById('epochBody');
+data.forEach(d => {
+  const row = `<tr>
+    <td>${d.epoch}</td>
+    <td>${d.train_loss.toFixed(6)}</td>
+    <td>${d.learning_rate.toFixed(6)}</td>
+    <td>${d.mrr != null ? d.mrr.toFixed(4) : '-'}</td>
+    <td>${d.hits_at_1 != null ? d.hits_at_1.toFixed(4) : '-'}</td>
+    <td>${d.hits_at_3 != null ? d.hits_at_3.toFixed(4) : '-'}</td>
+    <td>${d.hits_at_10 != null ? d.hits_at_10.toFixed(4) : '-'}</td>
+    <td>${d.mean_rank != null ? d.mean_rank.toFixed(1) : '-'}</td>
+    <td>${(d.epoch_duration_ms / 1000).toFixed(2)}s</td>
+    <td>${d.num_batches}</td>
+  </tr>`;
+  tbody.innerHTML += row;
+});
+</script>
+</body>
+</html>

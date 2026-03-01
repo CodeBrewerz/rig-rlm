@@ -1,0 +1,47 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+#
+# Agentgateway config for proxying rig-rlm as an A2A agent.
+# Enhanced with: timeouts, retries, rate limiting, header modification,
+# access logging, and CORS.
+#
+# Usage:
+#   1. Start rig-rlm A2A server:  cargo run --bin a2a-server -- --port 9999
+#   2. Start agentgateway:        agentgateway -f agentgateway-a2a.yaml
+#   3. Fetch agent card:          curl http://localhost:3001/.well-known/agent.json
+#
+binds:
+- port: 3001
+  listeners:
+  - routes:
+    - policies:
+        cors:
+          allowOrigins:
+          - "*"
+          allowHeaders:
+          - content-type
+          - cache-control
+        # Mark this route as A2A traffic — agentgateway will handle
+        # agent card URL rewriting and A2A-specific telemetry.
+        a2a: {}
+        # -- Timeout: 120s for agent tasks (LLM calls can be slow)
+        timeout:
+          requestTimeout: 120s
+          backendRequestTimeout: 120s
+        # -- Rate limit: 10 req/min burst, refill 10 per minute
+        localRateLimit:
+        - maxTokens: 10
+          tokensPerFill: 10
+          fillInterval: 60s
+        # -- Headers: add gateway identification
+        requestHeaderModifier:
+          add:
+          - name: x-gateway
+            value: agentgateway
+          - name: x-forwarded-proto
+            value: http
+        responseHeaderModifier:
+          add:
+          - name: x-powered-by
+            value: rig-rlm/agentgateway
+      backends:
+      - host: localhost:9999

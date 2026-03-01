@@ -1,0 +1,23 @@
+[package]
+name = "hehrgnn"
+version = "0.1.0"
+edition = "2024"
+description = "Finverse GNN Platform: relational graph intelligence for finance, built on Burn"
+
+[[bin]]
+name = "hehrgnn"
+path = "src/main.rs"
+
+[[bin]]
+name = "hehrgnn-server"
+path = "src/server_main.rs"
+
+[dependencies]
+burn = { version = "0.20", features = ["wgpu", "autodiff", "train", "ndarray"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.9"
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors"] }
+chrono = "0.4"

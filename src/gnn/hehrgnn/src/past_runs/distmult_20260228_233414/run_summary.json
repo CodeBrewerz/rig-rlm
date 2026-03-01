@@ -1,0 +1,35 @@
+{
+  "config": {
+    "batch_size": 64,
+    "dropout": 0.1,
+    "epochs": 50,
+    "hidden_dim": 32,
+    "instances_per_type": 10,
+    "lr": 0.001,
+    "margin": 1.0,
+    "negatives_per_positive": 3,
+    "num_facts": 500,
+    "num_layers": 2
+  },
+  "data": {
+    "entities": 571,
+    "indexed_facts": 489,
+    "raw_facts": 489,
+    "relations": 302,
+    "schema": "src/gnn/SchemaFinverse.tql",
+    "test_facts": 98,
+    "train_facts": 391
+  },
+  "gnn_type": "hehrgnn",
+  "results": {
+    "final_hits_at_1": 0.01020408163265306,
+    "final_hits_at_10": 0.02040816326530612,
+    "final_hits_at_3": 0.01020408163265306,
+    "final_loss": 4.4721381323678155,
+    "final_mean_rank": 272.51020408163265,
+    "final_mrr": 0.020021054320294215
+  },
+  "run_name": "distmult_20260228_233414",
+  "scorer": "distmult",
+  "timestamp": "2026-02-28T23:34:14.272726991-08:00"
+}

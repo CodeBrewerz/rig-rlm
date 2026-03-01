@@ -1,0 +1,45 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+#
+# Agentgateway config for proxying rig-rlm as a single MCP server.
+# Enhanced with: timeouts, rate limiting, header modification, and CORS.
+#
+# Usage:
+#   1. Start agentgateway:  agentgateway -f agentgateway-mcp.yaml
+#   2. Connect MCP Inspector: npx @modelcontextprotocol/inspector
+#      → Streamable HTTP → URL: http://localhost:3001/mcp
+#
+binds:
+- port: 3001
+  listeners:
+  - routes:
+    - policies:
+        cors:
+          allowOrigins:
+          - "*"
+          allowHeaders:
+          - mcp-protocol-version
+          - content-type
+          - cache-control
+          exposeHeaders:
+          - "Mcp-Session-Id"
+        # -- Timeout: 60s for MCP tool calls
+        timeout:
+          requestTimeout: 60s
+          backendRequestTimeout: 60s
+        # -- Rate limit: 20 req/min
+        localRateLimit:
+        - maxTokens: 20
+          tokensPerFill: 20
+          fillInterval: 60s
+        # -- Headers
+        responseHeaderModifier:
+          add:
+          - name: x-powered-by
+            value: rig-rlm/agentgateway
+      backends:
+      - mcp:
+          targets:
+          - name: rig-rlm
+            stdio:
+              cmd: cargo
+              args: ["run", "--bin", "mcp-server"]

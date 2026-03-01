@@ -1,0 +1,2659 @@
+define
+
+attribute instance_guid,
+ value string;
+attribute attribute_type,
+ value string;
+attribute string_value,
+ value string;
+attribute double_value,
+ value double;
+attribute long_value,
+ value double;
+attribute integer_value,
+ value integer;
+attribute datetime_value,
+ value datetime;
+attribute boolean_value,
+ value boolean;
+attribute is_archived,
+ value boolean;
+attribute av_sysOpType,
+ value string;
+attribute av_sysCurrentVersion,
+ value integer;
+attribute av_sysVersionSha,
+ value integer;
+attribute av_sysCurrentSha,
+ value string;
+attribute av_sysPreviousSha,
+ value string;
+attribute av_sysCurrentWorkflowSha,
+ value string;
+attribute av_sysPreviousWorkflowSha,
+ value string;
+attribute av_sysCreatedAt,
+ value datetime;
+attribute av_sysUpdatedAt,
+ value datetime;
+attribute av_sysLakefsSyncTimestamp,
+ value datetime;
+entity AttributeValue,
+  owns attribute_type,
+  owns av_sysCreatedAt,
+  owns av_sysCurrentSha,
+  owns av_sysCurrentVersion,
+  owns av_sysCurrentWorkflowSha,
+  owns av_sysLakefsSyncTimestamp,
+  owns av_sysOpType,
+  owns av_sysPreviousSha,
+  owns av_sysPreviousWorkflowSha,
+  owns av_sysUpdatedAt,
+  owns av_sysVersionSha,
+  owns boolean_value,
+  owns datetime_value,
+  owns double_value,
+  owns instance_guid @key,
+  owns integer_value,
+  owns is_archived,
+  owns long_value,
+  owns string_value,
+  plays HasAttribute:attribute_value;
+entity account,
+  sub base-entity,
+  plays references-account:referenced-account;
+entity account-owner-identity,
+  sub base-entity,
+  plays instrument-has-owner:account-owner,
+  plays party-has-contact:party;
+entity asset,
+  sub base-entity,
+  plays asset-has-identifier:asset,
+  plays asset-has-valuation:asset,
+  plays asset-issued-by:asset,
+  plays asset-mapped-to-sub-ledger:asset,
+  plays asset-owned-by:asset,
+  plays asset-title-transfer:asset,
+  plays evidence-involves-asset:asset,
+  plays lien-on-asset:asset,
+  plays obligation-finances-asset:financed-asset,
+  plays provider-reports-portfolio-position:asset,
+  plays provider-reports-position:asset,
+  plays subject-attributed-to-asset:asset,
+  plays subject-has-external-reference:subject,
+  plays subject-has-tax-asset-treatment:subject;
+entity asset-identifier-record,
+  sub base-entity,
+  plays asset-has-identifier:identifier;
+entity asset-valuation,
+  sub base-entity,
+  plays asset-has-valuation:valuation;
+entity automation-action,
+  sub base-entity,
+  plays action-allocates-to:action,
+  plays automation-has-action:action;
+entity automation-definition,
+  sub base-entity,
+  plays automation-has-action:automation,
+  plays automation-has-condition-group:automation,
+  plays automation-has-trigger:automation,
+  plays automation-owned-by:automation,
+  plays execution-for-automation:automation;
+entity automation-execution,
+  sub base-entity,
+  plays execution-for-automation:execution,
+  plays execution-on-subject:execution,
+  plays execution-triggered-by:execution;
+entity automation-trigger,
+  sub base-entity,
+  plays automation-has-trigger:trigger,
+  plays execution-triggered-by:trigger;
+entity bank-statement,
+  sub base-entity,
+  plays bank-statement-in-tax-period:statement,
+  plays reconciliation-for-statement:statement,
+  plays statement-for-instrument:statement,
+  plays statement-has-evidence:statement,
+  plays subject-has-external-reference:subject;
+entity base-entity @abstract,
+  owns instance_guid @key,
+  owns is_archived,
+  plays HasAttribute:owner;
+entity base-journal-entry,
+  sub base-entity,
+  plays has-ledger-entry:journal-entry;
+entity base-sub-ledger,
+  sub ledger,
+  plays ledger-root-to-non-root:child-non-root,
+  plays linked-to-dst-ledger:dst-ledger,
+  plays linked-to-src-ledger:src-ledger,
+  plays linked-to-sub-account:sub-ledger,
+  plays linked-to-sys-sub-account:sub-ledger;
+entity base-transfer-pair,
+  sub base-entity,
+  plays has-credit-entry:transfer-pair,
+  plays has-debit-entry:transfer-pair;
+entity boost-period,
+  sub base-entity,
+  plays ends-on:time-bound-entity,
+  plays records-boost-period:boost-period,
+  plays starts-on:time-bound-entity;
+entity budget-estimation,
+  sub base-entity,
+  plays has-segment:segmented-entity,
+  plays records-budget-estimation:budget-estimation,
+  plays records-budget:recorder;
+entity chat-message,
+  sub base-entity,
+  plays message-has-attachment:message,
+  plays thread-has-message:message;
+entity clearing-account-check,
+  sub base-entity,
+  plays clearing-check-for-subledger:clearing-check;
+entity condition-group,
+  sub base-entity,
+  plays automation-has-condition-group:condition-group,
+  plays group-has-predicate:group;
+entity conversation-thread,
+  sub base-entity,
+  plays thread-about:thread,
+  plays thread-has-message:thread;
+entity day,
+  sub standard-period,
+  plays ends-on:end-day,
+  plays starts-on:start-day,
+  plays temporal-non-root-to-non-root:child-non-root;
+entity decade,
+  sub standard-period,
+  plays temporal-root-to-non-root:parent-root;
+entity email-address,
+  sub base-entity,
+  plays party-has-contact:contact;
+entity entry-info,
+  sub base-entity,
+  plays has-credit-entry:entry-info,
+  plays has-debit-entry:entry-info,
+  plays references-account:entry-info,
+  plays references-ledger:entry-info;
+entity evidence-line-item,
+  sub base-entity,
+  plays evidence-has-line-item:line-item,
+  plays evidence-line-item-maps-to-tax-line-item:evidence-line-item,
+  plays line-item-has-slice:source-item,
+  plays subject-has-user-tag:subject,
+  plays tax-audit-event-on-subject:subject,
+  plays tax-code-assigned-to-subject:subject,
+  plays tax-component-applies-to:subject;
+entity external-reference,
+  sub base-entity,
+  plays subject-has-external-reference:reference;
+entity feed-provider,
+  sub base-entity,
+  plays evidence-from-provider:provider,
+  plays instrument-linked-to-obligation:provider,
+  plays provider-has-instrument:provider,
+  plays provider-has-statement-document:provider,
+  plays provider-reported-balance:provider,
+  plays provider-reports-portfolio-position:provider,
+  plays provider-reports-position:provider,
+  plays subject-has-external-reference:subject,
+  plays user-has-feed-provider:provider,
+  plays user-has-provider-auth-session:provider;
+entity general-ledger,
+  sub ledger,
+  plays action-allocates-to:target-gl,
+  plays case-allocation:target-gl,
+  plays case-booked-in-gl:recon-gl,
+  plays general-ledger-records-goal:general-ledger,
+  plays group-has-ledger:general-ledger,
+  plays ledger-root-to-non-root:parent-root,
+  plays linked-to-root-account:ledger,
+  plays linked-to-sys-root-account:ledger,
+  plays recon-gl-due-ledger-map:participant-gl,
+  plays recon-gl-due-ledger-map:payer-gl,
+  plays records-budget:recorder,
+  plays share-allocation:target-gl,
+  plays subledger-has-role:general-ledger,
+  plays unit-linked-to-general:general-ledger;
+entity geo-boundary,
+  sub base-entity,
+  plays ends-on:time-bound-entity,
+  plays geo-boundary-maps-to-jurisdiction:boundary,
+  plays starts-on:time-bound-entity,
+  plays tax-location-resolved-by-boundary:boundary,
+  plays tax-rate-entry-scoped-to:boundary;
+entity goal,
+  sub base-entity,
+  plays ends-on:time-bound-entity,
+  plays general-ledger-records-goal:goal,
+  plays has-segment:segmented-entity,
+  plays job-funds-goal:goal,
+  plays starts-on:time-bound-entity,
+  plays subledger-holds-goal-funds:goal,
+  plays tax-sinking-fund-visualized-as-goal:goal;
+entity group,
+  sub membership-context,
+  plays group-has-ledger:group,
+  plays group-in-space:group,
+  plays membership:context;
+entity hierarchy-node,
+  sub base-entity;
+entity hierarchy-non-root-node,
+  sub hierarchy-node;
+entity hierarchy-root-node,
+  sub hierarchy-node;
+entity instrument,
+  sub base-entity,
+  plays case-funded-by-instrument:instrument,
+  plays evidence-from-instrument:instrument,
+  plays instrument-has-owner:instrument,
+  plays instrument-in-merge-group:instrument,
+  plays instrument-linked-to-obligation:instrument,
+  plays instrument-mapped-to-ledger:instrument,
+  plays instrument-mapped-to-overdraft-ledger:instrument,
+  plays instrument-mapped-to-secondary-ledger:instrument,
+  plays instrument-treatment-excludes-secondary-ledger:instrument,
+  plays provider-has-instrument:instrument,
+  plays provider-has-statement-document:instrument,
+  plays provider-reported-balance:instrument,
+  plays provider-reports-position:instrument,
+  plays reconciliation-for-instrument:instrument,
+  plays statement-for-instrument:instrument,
+  plays subject-has-external-reference:subject,
+  plays subject-has-tax-asset-treatment:subject,
+  plays tax-plan-type-wraps-subject:instrument,
+  plays tax-vault-for-jurisdiction:instrument,
+  plays user-has-instrument:instrument;
+entity instrument-balance-snapshot,
+  sub base-entity,
+  plays provider-reported-balance:snapshot;
+entity instrument-merge-group,
+  sub base-entity,
+  plays instrument-in-merge-group:group,
+  plays merge-group-owned-by:group;
+entity integration-profile,
+  sub base-entity,
+  plays party-has-contact:party,
+  plays user-has-integration-profile:profile;
+entity interest-rate-term,
+  sub base-entity,
+  plays obligation-has-interest-term:term;
+entity intermediary-compound-journal-entry,
+  sub base-journal-entry,
+  plays groups-transfer:compound-entry;
+entity intermediary-transfer-pair,
+  sub base-transfer-pair,
+  plays groups-transfer:transfer-pair,
+  plays has-intermediary-transfer-pair:transfer-pair;
+entity ledger,
+  sub hierarchy-node,
+  plays affects-ledger:affected-ledger,
+  plays cross-hierarchy-link:source-node,
+  plays cross-hierarchy-link:target-node,
+  plays references-ledger:referenced-ledger;
+entity ledger-entry,
+  sub base-entity,
+  plays affects-ledger:ledger-entry,
+  plays has-ledger-entry:ledger-entry,
+  plays subject-attributed-to-asset:subject,
+  plays subject-attributed-to-obligation:subject,
+  plays subject-attributed-to-party:subject,
+  plays tax-code-assigned-to-subject:subject,
+  plays tax-component-posted-to-ledger-entry:ledger-entry,
+  plays tax-reclassification-correction-entry:correction-entry,
+  plays tax-reclassification-reversal-entry:reversal-entry,
+  plays tax-remittance-posted-to-ledger-entry:ledger-entry;
+entity legal-document,
+  sub base-entity,
+  plays asset-issued-by:issuance-document,
+  plays asset-owned-by:evidence-document,
+  plays asset-title-transfer:transfer-document,
+  plays interest-applied-rate-term:evidence-document,
+  plays lien-on-asset:lien-document,
+  plays obligation-between-parties:agreement-document,
+  plays obligation-claim-owned-by:evidence-document,
+  plays obligation-has-interest-term:evidence-document,
+  plays obligation-refinanced-by:refinance-document,
+  plays obligation-rights-assigned:assignment-document,
+  plays obligation-serviced-by:servicing-document,
+  plays trust-has-role:trust-document;
+entity line-item-slice,
+  sub base-entity,
+  plays line-item-has-slice:slice,
+  plays slice-has-share:source-slice,
+  plays tax-component-applies-to:subject;
+entity main-account,
+  sub account,
+  plays links-to-main-account:main-account,
+  plays subject-has-tax-asset-treatment:subject,
+  plays tax-mapped-to-account:account,
+  plays tax-plan-type-wraps-subject:account,
+  plays tax-return-creates-payable:payable-account,
+  plays tax-sinking-fund-backed-by-account:account;
+entity master-budget,
+  sub base-entity,
+  plays ends-on:time-bound-entity,
+  plays records-budget:budget,
+  plays starts-on:time-bound-entity;
+entity membership-context,
+  sub base-entity;
+entity message-attachment,
+  sub base-entity,
+  plays message-has-attachment:attachment;
+entity month,
+  sub standard-period,
+  plays temporal-non-root-to-non-root:child-non-root,
+  plays temporal-non-root-to-non-root:parent-non-root;
+entity obligation,
+  sub base-entity,
+  plays instrument-linked-to-obligation:obligation,
+  plays interest-applied-rate-term:obligation,
+  plays lien-on-asset:securing-obligation,
+  plays obligation-between-parties:obligation,
+  plays obligation-claim-owned-by:obligation,
+  plays obligation-finances-asset:obligation,
+  plays obligation-has-interest-term:obligation,
+  plays obligation-mapped-to-sub-ledger:obligation,
+  plays obligation-refinanced-by:new-obligation,
+  plays obligation-refinanced-by:old-obligation,
+  plays obligation-rights-assigned:obligation,
+  plays obligation-serviced-by-pattern:obligation,
+  plays obligation-serviced-by:obligation,
+  plays subject-attributed-to-obligation:obligation,
+  plays subject-has-external-reference:subject;
+entity opposite-match-group,
+  sub base-entity,
+  plays case-in-opposite-match:match-group,
+  plays execution-on-subject:subject,
+  plays match-group-owned-by:match-group;
+entity payment-metadata,
+  sub base-entity,
+  plays evidence-has-payment-meta:meta;
+entity paystub,
+  sub base-entity,
+  plays ends-on:time-bound-entity,
+  plays paystub-has-line:paystub,
+  plays paystub-issued-by:paystub,
+  plays paystub-issued-to:paystub,
+  plays paystub-posted-as-journal-entry:paystub,
+  plays paystub-settled-by-case:paystub,
+  plays starts-on:time-bound-entity,
+  plays subject-has-user-tag:subject,
+  plays tax-audit-event-on-subject:subject;
+entity paystub-line,
+  sub base-entity,
+  plays paystub-has-line:line,
+  plays paystub-line-maps-to-tax-code:line,
+  plays paystub-line-maps-to-tax-type:line,
+  plays tax-code-assigned-to-subject:subject;
+entity peer-transaction-leg,
+  sub base-entity,
+  plays peer-leg-has-settlement:leg,
+  plays peer-leg-has-share:leg,
+  plays peer-leg-participant:leg,
+  plays peer-leg-receiver-case:leg,
+  plays peer-leg-sender-case:leg,
+  plays peer-transaction-has-leg:leg,
+  plays thread-about:topic;
+entity person-name,
+  sub base-entity,
+  plays party-has-contact:contact;
+entity phone-number,
+  sub base-entity,
+  plays party-has-contact:contact;
+entity postal-address,
+  sub base-entity,
+  plays party-has-contact:contact;
+entity posting-attempt,
+  sub base-entity,
+  plays case-has-posting-attempt:attempt,
+  plays execution-on-subject:subject;
+entity posting-user-journal-entry-cron-job,
+  sub base-entity,
+  plays ends-on:time-bound-entity,
+  plays job-funds-goal:job,
+  plays linked-to-dst-ledger:cron-job,
+  plays linked-to-src-ledger:cron-job,
+  plays posted-by-job:cron-job,
+  plays records-boost-period:recorder,
+  plays starts-on:time-bound-entity;
+entity predicate,
+  sub base-entity,
+  plays group-has-predicate:predicate;
+entity provider-auth-session,
+  sub base-entity,
+  plays subject-has-external-reference:subject,
+  plays user-has-provider-auth-session:session;
+entity provider-counterparty-record,
+  sub base-entity,
+  plays evidence-has-counterparty-record:counterparty;
+entity quarter,
+  sub standard-period,
+  plays temporal-non-root-to-non-root:child-non-root,
+  plays temporal-non-root-to-non-root:parent-non-root;
+entity rate-observation,
+  sub base-entity,
+  plays interest-applied-rate-term:term;
+entity reconciliation-case,
+  sub base-entity,
+  plays case-adjusts-case:adjustment-case,
+  plays case-adjusts-case:original-case,
+  plays case-allocation:case,
+  plays case-assigned-to-tax-period:case,
+  plays case-booked-as:booked-case,
+  plays case-booked-in-gl:case,
+  plays case-funded-by-instrument:case,
+  plays case-has-counterparty:case,
+  plays case-has-entry:case,
+  plays case-has-posting-attempt:case,
+  plays case-has-primary-evidence:primary-case,
+  plays case-has-supporting-evidence:supporting-case,
+  plays case-has-tax-determination:case,
+  plays case-in-opposite-match:case,
+  plays case-merged-into:canonical-case,
+  plays case-merged-into:merged-case,
+  plays case-mirrored-as:mirror-case,
+  plays case-mirrored-as:source-case,
+  plays case-owned-by:case,
+  plays case-voided-as:voided-case,
+  plays execution-on-subject:subject,
+  plays pattern-has-case:case,
+  plays paystub-settled-by-case:case,
+  plays peer-leg-receiver-case:receiver-case,
+  plays peer-leg-sender-case:sender-case,
+  plays peer-transaction:origin-case,
+  plays subject-attributed-to-asset:subject,
+  plays subject-attributed-to-obligation:subject,
+  plays subject-attributed-to-party:subject,
+  plays subject-has-user-tag:subject,
+  plays tax-audit-event-on-subject:subject,
+  plays tax-code-assigned-to-subject:subject,
+  plays tax-reclassification-of-case:original-case,
+  plays tax-remittance-settled-by-case:case,
+  plays tax-workpaper-covers-case:case,
+  plays thread-about:topic;
+entity reconciliation-session,
+  sub base-entity,
+  plays reconciliation-adjustment:session,
+  plays reconciliation-for-instrument:session,
+  plays reconciliation-for-statement:session,
+  plays reconciliation-session-in-tax-period:session;
+entity recurring-missing-alert,
+  sub base-entity,
+  plays pattern-has-recurring-alert:alert,
+  plays user-has-recurring-alert:alert;
+entity recurring-pattern,
+  sub base-entity,
+  plays obligation-serviced-by-pattern:recurring-pattern @card(0..),
+  plays pattern-has-case:pattern,
+  plays pattern-has-counterparty:pattern,
+  plays pattern-has-recurring-alert:pattern,
+  plays pattern-owned-by:pattern;
+entity root-account,
+  sub main-account,
+  plays linked-to-root-account:root-account;
+entity root-unit,
+  sub base-entity,
+  plays asset-issued-by:issuer,
+  plays asset-owned-by:owner,
+  plays asset-title-transfer:from-owner,
+  plays asset-title-transfer:to-owner,
+  plays evidence-involves-asset:owner,
+  plays instrument-has-owner:owner,
+  plays instrument-linked-to-obligation:owner,
+  plays lien-on-asset:lienholder,
+  plays linked-to-dst-ledger:dst-ledger,
+  plays linked-to-src-ledger:src-ledger,
+  plays obligation-between-parties:borrower,
+  plays obligation-between-parties:lender,
+  plays obligation-claim-owned-by:owner,
+  plays obligation-rights-assigned:assignee,
+  plays obligation-rights-assigned:assignor,
+  plays obligation-serviced-by:creditor-owner,
+  plays obligation-serviced-by:servicer,
+  plays paystub-issued-by:employer,
+  plays provider-has-statement-document:owner,
+  plays provider-reported-balance:owner,
+  plays provider-reports-portfolio-position:owner,
+  plays provider-reports-position:owner,
+  plays root-unit-linked-to-unit:root-unit,
+  plays root-unit-linked-to-user-bank-unit:root-unit,
+  plays root-unit-linked-to-user-merchant-unit:root-unit,
+  plays subject-attributed-to-party:party,
+  plays subject-has-external-reference:subject,
+  plays tax-party-has-exemption-certificate:party,
+  plays tax-party-has-tax-id:party,
+  plays trust-has-role:beneficiary,
+  plays trust-has-role:settlor,
+  plays trust-has-role:trustee,
+  plays user-has-integration-profile:owner,
+  plays user-has-provider-auth-session:owner;
+entity segment,
+  sub temporal-node,
+  plays balances-variance-from:balancing-segment,
+  plays ends-on:time-bound-entity,
+  plays has-segment:segment,
+  plays involved-in-positive-variance:segment,
+  plays rolled-variance:from-segment,
+  plays rolled-variance:to-segment,
+  plays splits-into:child-segment,
+  plays splits-into:parent-segment,
+  plays starts-on:time-bound-entity;
+entity settlement-event,
+  sub base-entity,
+  plays peer-leg-has-settlement:settlement,
+  plays settlement-for-shares:settlement,
+  plays settlement-has-evidence:settlement;
+entity slice-share,
+  sub base-entity,
+  plays peer-leg-has-share:share,
+  plays settlement-for-shares:share,
+  plays share-allocation:share,
+  plays share-owned-by:share,
+  plays share-paid-by:share,
+  plays slice-has-share:share,
+  plays tax-component-applies-to:subject;
+entity space,
+  sub membership-context,
+  plays agreement-for-space:space,
+  plays group-in-space:space,
+  plays membership:context,
+  plays space-has-unit:space;
+entity space-agreement,
+  sub base-entity,
+  plays agreement-approved-by:agreement,
+  plays agreement-for-space:agreement,
+  plays agreement-proposed-by:agreement,
+  plays agreement-targets-user:agreement;
+entity standard-period,
+  sub temporal-node,
+  plays occurred-on:temporal-period;
+entity statement-document,
+  sub base-entity,
+  plays provider-has-statement-document:document,
+  plays subject-has-external-reference:subject;
+entity sub-account,
+  sub main-account,
+  plays linked-to-sub-account:sub-account;
+entity sub-ledger,
+  sub base-sub-ledger,
+  plays action-allocates-to:target-ledger,
+  plays asset-mapped-to-sub-ledger:mapped-sub-ledger,
+  plays case-allocation:target-ledger,
+  plays clearing-check-for-subledger:sub-ledger,
+  plays contra-account-link:contra-ledger,
+  plays contra-account-link:primary-ledger,
+  plays instrument-mapped-to-ledger:staging-ledger,
+  plays instrument-mapped-to-overdraft-ledger:overdraft-ledger,
+  plays instrument-mapped-to-secondary-ledger:secondary-ledger,
+  plays instrument-treatment-excludes-secondary-ledger:secondary-ledger,
+  plays ledger-non-root-to-non-root:child-non-root,
+  plays ledger-non-root-to-non-root:parent-non-root,
+  plays obligation-mapped-to-sub-ledger:mapped-sub-ledger,
+  plays owns-subledger:subledger,
+  plays recon-gl-due-ledger-map:participant-due-to-ledger,
+  plays recon-gl-due-ledger-map:payer-due-from-ledger,
+  plays records-budget-estimation:recorder,
+  plays share-allocation:target-ledger,
+  plays subledger-has-role:sub-ledger,
+  plays subledger-holds-goal-funds:subledger,
+  plays tax-encumbrance-rule-sources-from:sub-ledger,
+  plays tax-return-backed-by-sub-ledger:sub-ledger,
+  plays tax-sinking-fund-backed-by-sub-ledger:sub-ledger,
+  plays tax-vault-for-jurisdiction:vault-ledger;
+entity sys-root-account,
+  sub system-account,
+  plays linked-to-sys-root-account:sys-root-account;
+entity sys-sub-account,
+  sub system-account,
+  plays linked-to-sys-sub-account:sys-sub-account;
+entity system-account,
+  sub account,
+  plays links-to-main-account:system-account;
+entity tax-adjustment,
+  sub tax-determination,
+  plays tax-adjustment-applied-to-return:adjustment;
+entity tax-advantaged-plan-type,
+  sub base-entity,
+  plays ends-on:time-bound-entity @card(0..),
+  plays starts-on:time-bound-entity @card(0..),
+  plays tax-plan-type-wraps-subject:plan-type,
+  plays tax-rule-targets:plan-type;
+entity tax-asset-treatment,
+  sub base-entity,
+  plays instrument-treatment-excludes-secondary-ledger:treatment,
+  plays subject-has-tax-asset-treatment:treatment,
+  plays tax-asset-treatment-tier-scope:treatment;
+entity tax-association,
+  sub base-entity,
+  plays tax-association-has-attempt:association,
+  plays tax-association-links-calculation:association;
+entity tax-audit-event,
+  sub base-entity,
+  plays tax-audit-event-on-period:event,
+  plays tax-audit-event-on-subject:event;
+entity tax-authority,
+  sub base-entity,
+  plays tax-authority-governs-jurisdiction:authority,
+  plays tax-liability-scoped-to:authority,
+  plays tax-remittance-settles-return:authority,
+  plays unit-has-tax-registration:authority;
+entity tax-authority-document,
+  sub base-entity,
+  plays ends-on:time-bound-entity,
+  plays starts-on:time-bound-entity,
+  plays tax-rule-cites-authority-document:document,
+  plays tax-workpaper-cites-authority-document:document;
+entity tax-authority-offset,
+  sub base-entity,
+  plays tax-offset-applied-to-remittance:offset,
+  plays tax-offset-from-return:offset,
+  plays tax-offset-to-liability:offset;
+entity tax-bracket-entry,
+  sub base-entity,
+  plays tax-bracket-schedule-has-entry:entry;
+entity tax-bracket-schedule,
+  sub base-entity,
+  plays ends-on:time-bound-entity,
+  plays starts-on:time-bound-entity,
+  plays tax-asset-treatment-tier-scope:schedule,
+  plays tax-bracket-schedule-has-entry:schedule,
+  plays tax-rule-set-uses-bracket-schedule:schedule;
+entity tax-calculation,
+  sub tax-determination,
+  plays tax-association-links-calculation:calculation,
+  plays tax-transaction-created-from-calculation:calculation;
+entity tax-category,
+  sub base-entity,
+  plays tax-category-parent-child:child,
+  plays tax-category-parent-child:parent,
+  plays tax-code-maps-to-category:tax-category,
+  plays tax-product-maps-to-category:tax-category,
+  plays tax-rate-entry-scoped-to:tax-category,
+  plays tax-rule-targets:tax-category,
+  plays taxability-matrix-entry-scoped-to:tax-category;
+entity tax-code,
+  sub base-entity,
+  plays paystub-line-maps-to-tax-code:tax-code,
+  plays tax-code-assigned-to-subject:tax-code,
+  plays tax-code-maps-to-category:tax-code,
+  plays tax-component-dimensioned-by:tax-code,
+  plays tax-encumbrance-rule-triggers-on-code:tax-code,
+  plays tax-product-uses-tax-code:tax-code,
+  plays tax-rate-entry-scoped-to:tax-code,
+  plays tax-rule-targets:tax-code,
+  plays taxability-matrix-entry-scoped-to:tax-code;
+entity tax-component,
+  sub base-entity,
+  plays tax-component-applies-to:component,
+  plays tax-component-dimensioned-by:component,
+  plays tax-component-posted-to-ledger-entry:component,
+  plays tax-component-used-rate-entry:component,
+  plays tax-determination-has-component:component,
+  plays tax-exception-about-component:component,
+  plays tax-return-includes-component:component;
+entity tax-contribution-rule,
+  sub tax-rule;
+entity tax-determination,
+  sub base-entity,
+  plays case-has-tax-determination:determination,
+  plays tax-determination-applied-rule:determination,
+  plays tax-determination-has-component:determination,
+  plays tax-determination-has-line-item:determination,
+  plays tax-determination-has-location:determination,
+  plays tax-determination-has-shipping-cost:determination,
+  plays tax-determination-used-rule-set:determination,
+  plays tax-determination-used-tax-id:determination,
+  plays tax-determination-uses-exemption-certificate:determination,
+  plays tax-determination-uses-registration:determination,
+  plays tax-exception-about-determination:determination,
+  plays tax-return-includes-determination:determination;
+entity tax-distribution-rule,
+  sub tax-rule;
+entity tax-due-event,
+  sub base-entity,
+  plays subject-has-user-tag:subject,
+  plays tax-due-event-settled-by-remittance:due-event,
+  plays tax-liability-has-due-event:due-event;
+entity tax-encumbrance-rule,
+  sub base-entity,
+  plays tax-encumbrance-rule-funds-to:rule,
+  plays tax-encumbrance-rule-sources-from:rule,
+  plays tax-encumbrance-rule-triggers-on-code:rule;
+entity tax-exception,
+  sub base-entity,
+  plays tax-exception-about-component:exception,
+  plays tax-exception-about-determination:exception;
+entity tax-exemption-certificate,
+  sub base-entity,
+  plays ends-on:time-bound-entity,
+  plays starts-on:time-bound-entity,
+  plays tax-determination-uses-exemption-certificate:certificate,
+  plays tax-exemption-certificate-applies-to-jurisdiction:certificate,
+  plays tax-party-has-exemption-certificate:certificate;
+entity tax-exemption-rule,
+  sub tax-rule;
+entity tax-form,
+  sub base-entity,
+  plays tax-form-issued-to-payee:tax-form,
+  plays unit-has-tax-form:tax-form;
+entity tax-form-payee,
+  sub base-entity,
+  plays tax-form-issued-to-payee:payee,
+  plays tax-form-payee-is-entity:payee;
+entity tax-id,
+  sub base-entity,
+  plays tax-determination-used-tax-id:tax-id,
+  plays tax-party-has-tax-id:tax-id;
+entity tax-jurisdiction,
+  sub base-entity,
+  plays geo-boundary-maps-to-jurisdiction:jurisdiction,
+  plays tax-authority-governs-jurisdiction:jurisdiction,
+  plays tax-component-dimensioned-by:jurisdiction,
+  plays tax-exemption-certificate-applies-to-jurisdiction:jurisdiction,
+  plays tax-jurisdiction-parent-child:child,
+  plays tax-jurisdiction-parent-child:parent,
+  plays tax-liability-scoped-to:jurisdiction,
+  plays tax-location-resolves-to-jurisdiction:jurisdiction,
+  plays tax-mapped-to-account:jurisdiction,
+  plays tax-plan-type-wraps-subject:jurisdiction,
+  plays tax-rate-entry-scoped-to:jurisdiction,
+  plays tax-return-for-registration:jurisdiction,
+  plays tax-rule-set-scoped-to:jurisdiction,
+  plays tax-rule-targets:jurisdiction,
+  plays tax-vault-for-jurisdiction:jurisdiction,
+  plays taxability-matrix-entry-scoped-to:jurisdiction,
+  plays unit-has-tax-obligation:jurisdiction,
+  plays unit-has-tax-period:jurisdiction,
+  plays unit-has-tax-registration:jurisdiction;
+entity tax-liability,
+  sub base-entity,
+  plays subject-has-user-tag:subject,
+  plays tax-audit-event-on-subject:subject,
+  plays tax-liability-has-due-event:liability,
+  plays tax-liability-scoped-to:liability,
+  plays tax-reclassification-creates-liability:liability,
+  plays tax-remittance-settles-liability:liability,
+  plays tax-sinking-fund-linked-liability:liability;
+entity tax-line-item,
+  sub base-entity,
+  plays evidence-line-item-maps-to-tax-line-item:tax-line-item,
+  plays tax-component-applies-to:subject,
+  plays tax-determination-has-line-item:line-item;
+entity tax-location,
+  sub base-entity,
+  plays tax-determination-has-location:location,
+  plays tax-location-resolved-by-boundary:location,
+  plays tax-location-resolves-to-jurisdiction:location,
+  plays tax-profile-has-head-office:location;
+entity tax-obligation,
+  sub base-entity,
+  plays obligation-has-registration:obligation,
+  plays subject-has-user-tag:subject,
+  plays tax-obligation-driven-by-threshold-rule:obligation,
+  plays tax-obligation-has-evaluation:obligation,
+  plays unit-has-tax-obligation:obligation;
+entity tax-obligation-evaluation,
+  sub base-entity,
+  plays tax-obligation-has-evaluation:evaluation;
+entity tax-period,
+  sub base-entity,
+  plays bank-statement-in-tax-period:tax-period,
+  plays case-assigned-to-tax-period:tax-period,
+  plays clearing-check-for-subledger:tax-period,
+  plays ends-on:time-bound-entity,
+  plays reconciliation-session-in-tax-period:tax-period,
+  plays starts-on:time-bound-entity,
+  plays tax-audit-event-on-period:tax-period,
+  plays tax-code-assigned-to-subject:tax-period,
+  plays tax-liability-scoped-to:tax-period,
+  plays tax-offset-to-liability:target-period,
+  plays tax-return-covers-tax-period:tax-period,
+  plays tax-scenario-for-period:tax-period,
+  plays tax-workpaper-for-period:tax-period,
+  plays unit-has-tax-period:tax-period;
+entity tax-policy-settings,
+  sub base-entity,
+  plays unit-has-tax-policy-settings:settings;
+entity tax-product,
+  sub base-entity,
+  plays tax-product-maps-to-category:tax-product,
+  plays tax-product-uses-tax-code:tax-product,
+  plays tax-rule-targets:tax-product,
+  plays taxability-matrix-entry-scoped-to:tax-product,
+  plays unit-has-tax-product:tax-product;
+entity tax-profile,
+  sub base-entity,
+  plays tax-profile-has-head-office:profile,
+  plays unit-has-tax-profile:profile;
+entity tax-rate-entry,
+  sub base-entity,
+  plays ends-on:time-bound-entity,
+  plays starts-on:time-bound-entity,
+  plays tax-component-used-rate-entry:rate-entry,
+  plays tax-rate-entry-scoped-to:rate-entry;
+entity tax-rate-rule,
+  sub tax-rule;
+entity tax-reclassification,
+  sub base-entity,
+  plays tax-reclassification-batch-contains:reclassification,
+  plays tax-reclassification-correction-entry:reclassification,
+  plays tax-reclassification-creates-liability:reclassification,
+  plays tax-reclassification-of-case:reclassification,
+  plays tax-reclassification-reversal-entry:reclassification;
+entity tax-reclassification-batch,
+  sub base-entity,
+  plays ends-on:time-bound-entity,
+  plays starts-on:time-bound-entity,
+  plays tax-reclassification-batch-contains:batch,
+  plays tax-reclassification-triggered-by-registration:batch;
+entity tax-registration,
+  sub base-entity,
+  plays ends-on:time-bound-entity,
+  plays obligation-has-registration:registration,
+  plays starts-on:time-bound-entity,
+  plays tax-determination-uses-registration:registration,
+  plays tax-reclassification-triggered-by-registration:registration,
+  plays tax-return-for-registration:registration,
+  plays unit-has-tax-registration:registration;
+entity tax-remittance,
+  sub base-entity,
+  plays tax-due-event-settled-by-remittance:remittance,
+  plays tax-offset-applied-to-remittance:remittance,
+  plays tax-remittance-posted-to-ledger-entry:remittance,
+  plays tax-remittance-settled-by-case:remittance,
+  plays tax-remittance-settles-liability:remittance,
+  plays tax-remittance-settles-return:remittance;
+entity tax-report-run,
+  sub base-entity,
+  plays ends-on:time-bound-entity,
+  plays starts-on:time-bound-entity,
+  plays unit-has-tax-report-run:report;
+entity tax-return,
+  sub base-entity,
+  plays ends-on:time-bound-entity,
+  plays starts-on:time-bound-entity,
+  plays subject-has-user-tag:subject,
+  plays tax-adjustment-applied-to-return:tax-return,
+  plays tax-audit-event-on-subject:subject,
+  plays tax-offset-from-return:source-return,
+  plays tax-offset-to-liability:target-return,
+  plays tax-remittance-settles-return:tax-return,
+  plays tax-return-backed-by-sub-ledger:tax-return,
+  plays tax-return-covers-tax-period:tax-return,
+  plays tax-return-creates-payable:tax-return,
+  plays tax-return-for-registration:tax-return,
+  plays tax-return-has-line:tax-return,
+  plays tax-return-includes-component:tax-return,
+  plays tax-return-includes-determination:tax-return;
+entity tax-return-line,
+  sub base-entity,
+  plays tax-return-has-line:line;
+entity tax-reverse-charge-rule,
+  sub tax-rule;
+entity tax-rollover-rule,
+  sub tax-rule;
+entity tax-rule,
+  sub base-entity,
+  plays ends-on:time-bound-entity,
+  plays starts-on:time-bound-entity,
+  plays tax-determination-applied-rule:rule,
+  plays tax-rule-cites-authority-document:rule,
+  plays tax-rule-set-has-rule:rule,
+  plays tax-rule-targets:rule;
+entity tax-rule-set,
+  sub base-entity,
+  plays ends-on:time-bound-entity,
+  plays starts-on:time-bound-entity,
+  plays tax-determination-used-rule-set:rule-set,
+  plays tax-rule-set-has-rule:rule-set,
+  plays tax-rule-set-scoped-to:rule-set,
+  plays tax-rule-set-uses-bracket-schedule:rule-set;
+entity tax-scenario,
+  sub base-entity,
+  plays tax-scenario-for-period:scenario,
+  plays tax-scenario-has-result:scenario,
+  plays tax-scenario-uses-assumption:scenario;
+entity tax-scenario-assumption,
+  sub base-entity,
+  plays tax-scenario-uses-assumption:assumption;
+entity tax-scenario-result,
+  sub base-entity,
+  plays tax-scenario-has-result:result;
+entity tax-shipping-cost,
+  sub base-entity,
+  plays tax-component-applies-to:subject,
+  plays tax-determination-has-shipping-cost:shipping;
+entity tax-sinking-fund,
+  sub base-entity,
+  plays tax-encumbrance-rule-funds-to:fund,
+  plays tax-sinking-fund-backed-by-account:fund,
+  plays tax-sinking-fund-backed-by-sub-ledger:fund,
+  plays tax-sinking-fund-linked-liability:fund,
+  plays tax-sinking-fund-visualized-as-goal:fund;
+entity tax-sourcing-rule,
+  sub tax-rule;
+entity tax-taxability-rule,
+  sub tax-rule;
+entity tax-threshold-rule,
+  sub tax-rule,
+  plays tax-obligation-driven-by-threshold-rule:rule;
+entity tax-transaction,
+  sub tax-determination,
+  plays tax-attempt-committed-transaction:transaction,
+  plays tax-transaction-created-from-calculation:transaction,
+  plays tax-transaction-reverses:original,
+  plays tax-transaction-reverses:reversal;
+entity tax-transaction-attempt,
+  sub base-entity,
+  plays tax-association-has-attempt:attempt,
+  plays tax-attempt-committed-transaction:attempt;
+entity tax-type,
+  sub base-entity,
+  plays paystub-line-maps-to-tax-type:tax-type,
+  plays tax-component-dimensioned-by:tax-type,
+  plays tax-liability-scoped-to:tax-type,
+  plays tax-mapped-to-account:tax-type,
+  plays tax-rate-entry-scoped-to:tax-type,
+  plays tax-return-for-registration:tax-type,
+  plays tax-rule-set-scoped-to:tax-type,
+  plays tax-rule-targets:tax-type,
+  plays tax-vault-for-jurisdiction:tax-type,
+  plays taxability-matrix-entry-scoped-to:tax-type,
+  plays unit-has-tax-obligation:tax-type,
+  plays unit-has-tax-period:tax-type,
+  plays unit-has-tax-registration:tax-type;
+entity tax-workpaper,
+  sub base-entity,
+  plays tax-workpaper-cites-authority-document:workpaper,
+  plays tax-workpaper-covers-case:workpaper,
+  plays tax-workpaper-for-period:workpaper;
+entity taxability-matrix-entry,
+  sub base-entity,
+  plays ends-on:time-bound-entity,
+  plays starts-on:time-bound-entity,
+  plays taxability-matrix-entry-scoped-to:entry;
+entity temporal-node,
+  sub hierarchy-node,
+  plays cross-hierarchy-link:source-node,
+  plays cross-hierarchy-link:target-node,
+  plays temporal-adjacency:following-period,
+  plays temporal-adjacency:preceding-period;
+entity transaction-category,
+  sub base-entity,
+  plays evidence-has-category:category;
+entity transaction-evidence,
+  sub base-entity,
+  plays case-has-evidence:evidence,
+  plays case-has-primary-evidence:primary-evidence,
+  plays case-has-supporting-evidence:supporting-evidence,
+  plays evidence-at-location:evidence,
+  plays evidence-duplicate-of:duplicate-evidence,
+  plays evidence-duplicate-of:original-evidence,
+  plays evidence-from-instrument:evidence,
+  plays evidence-from-provider:evidence,
+  plays evidence-has-category:evidence,
+  plays evidence-has-counterparty-record:evidence,
+  plays evidence-has-line-item:evidence,
+  plays evidence-has-payment-meta:evidence,
+  plays evidence-involves-asset:evidence,
+  plays evidence-mirrored-from:mirror-evidence,
+  plays evidence-mirrored-from:source-evidence,
+  plays evidence-owned-by:evidence,
+  plays evidence-settles-pending:pending-evidence,
+  plays evidence-settles-pending:posted-evidence,
+  plays execution-on-subject:subject,
+  plays settlement-has-evidence:evidence,
+  plays statement-has-evidence:evidence,
+  plays subject-has-external-reference:subject,
+  plays thread-about:topic;
+entity transaction-location,
+  sub base-entity,
+  plays evidence-at-location:location;
+entity trust,
+  sub unit,
+  plays subject-has-tax-asset-treatment:subject,
+  plays trust-has-role:trust;
+entity unallocated-sub-ledger,
+  sub base-sub-ledger,
+  plays ledger-non-root-to-non-root:child-non-root;
+entity unit,
+  sub base-entity,
+  plays asset-issued-by:issuer,
+  plays asset-owned-by:owner,
+  plays asset-title-transfer:from-owner,
+  plays asset-title-transfer:to-owner,
+  plays case-has-counterparty:counterparty,
+  plays evidence-involves-asset:owner,
+  plays instrument-has-owner:owner,
+  plays instrument-linked-to-obligation:owner,
+  plays lien-on-asset:lienholder,
+  plays obligation-between-parties:borrower,
+  plays obligation-between-parties:lender,
+  plays obligation-claim-owned-by:owner,
+  plays obligation-rights-assigned:assignee,
+  plays obligation-rights-assigned:assignor,
+  plays obligation-serviced-by:creditor-owner,
+  plays obligation-serviced-by:servicer,
+  plays paystub-issued-by:employer,
+  plays provider-has-statement-document:owner,
+  plays provider-reported-balance:owner,
+  plays provider-reports-portfolio-position:owner,
+  plays provider-reports-position:owner,
+  plays root-unit-linked-to-unit:unit,
+  plays space-has-unit:unit,
+  plays subject-attributed-to-party:party,
+  plays subject-has-external-reference:subject,
+  plays tax-form-payee-is-entity:party,
+  plays tax-liability-scoped-to:unit,
+  plays tax-party-has-exemption-certificate:party,
+  plays tax-party-has-tax-id:party,
+  plays tax-vault-for-jurisdiction:unit,
+  plays trust-has-role:beneficiary,
+  plays trust-has-role:settlor,
+  plays trust-has-role:trustee,
+  plays unit-has-tax-form:unit,
+  plays unit-has-tax-obligation:unit,
+  plays unit-has-tax-period:unit,
+  plays unit-has-tax-policy-settings:unit,
+  plays unit-has-tax-product:unit,
+  plays unit-has-tax-profile:unit,
+  plays unit-has-tax-registration:unit,
+  plays unit-has-tax-report-run:unit,
+  plays unit-linked-to-general:unit,
+  plays user-has-integration-profile:owner,
+  plays user-has-provider-auth-session:owner;
+entity user,
+  sub base-entity,
+  plays agreement-approved-by:approver,
+  plays agreement-proposed-by:proposer,
+  plays agreement-targets-user:target-user,
+  plays asset-issued-by:issuer,
+  plays asset-owned-by:owner,
+  plays asset-title-transfer:from-owner,
+  plays asset-title-transfer:to-owner,
+  plays automation-owned-by:owner,
+  plays case-funded-by-instrument:owner,
+  plays case-has-counterparty:counterparty,
+  plays case-merged-into:owner,
+  plays case-mirrored-as:owner,
+  plays case-owned-by:owner,
+  plays created-by-user:creator,
+  plays evidence-from-instrument:owner,
+  plays evidence-from-provider:owner,
+  plays evidence-involves-asset:owner,
+  plays evidence-owned-by:owner,
+  plays instrument-has-owner:owner,
+  plays instrument-in-merge-group:owner,
+  plays instrument-linked-to-obligation:owner,
+  plays lien-on-asset:lienholder,
+  plays match-group-owned-by:owner,
+  plays membership:member,
+  plays merge-group-owned-by:owner,
+  plays obligation-between-parties:borrower,
+  plays obligation-between-parties:lender,
+  plays obligation-claim-owned-by:owner,
+  plays obligation-rights-assigned:assignee,
+  plays obligation-rights-assigned:assignor,
+  plays obligation-serviced-by:creditor-owner,
+  plays obligation-serviced-by:servicer,
+  plays owns-subledger:owner,
+  plays party-has-contact:party,
+  plays pattern-owned-by:owner,
+  plays paystub-issued-to:employee,
+  plays peer-leg-participant:participant,
+  plays peer-transaction:payer,
+  plays provider-has-instrument:owner,
+  plays provider-has-statement-document:owner,
+  plays provider-reported-balance:owner,
+  plays provider-reports-portfolio-position:owner,
+  plays provider-reports-position:owner,
+  plays share-owned-by:owner,
+  plays share-paid-by:payer,
+  plays subject-attributed-to-party:party,
+  plays subject-has-external-reference:subject,
+  plays tax-form-payee-is-entity:party,
+  plays tax-party-has-exemption-certificate:party,
+  plays tax-party-has-tax-id:party,
+  plays thread-has-message:sender,
+  plays trust-has-role:beneficiary,
+  plays trust-has-role:settlor,
+  plays trust-has-role:trustee,
+  plays user-has-feed-provider:owner,
+  plays user-has-instrument:owner,
+  plays user-has-integration-profile:owner,
+  plays user-has-provider-auth-session:owner,
+  plays user-has-recurring-alert:owner;
+entity user-bank-unit,
+  sub base-entity,
+  plays asset-issued-by:issuer,
+  plays asset-owned-by:owner,
+  plays asset-title-transfer:from-owner,
+  plays asset-title-transfer:to-owner,
+  plays case-has-counterparty:counterparty,
+  plays case-owned-by:owner,
+  plays evidence-involves-asset:owner,
+  plays evidence-owned-by:owner,
+  plays instrument-has-owner:owner,
+  plays instrument-linked-to-obligation:owner,
+  plays lien-on-asset:lienholder,
+  plays match-group-owned-by:owner,
+  plays obligation-between-parties:lender,
+  plays obligation-claim-owned-by:owner,
+  plays obligation-rights-assigned:assignee,
+  plays obligation-rights-assigned:assignor,
+  plays obligation-serviced-by:creditor-owner,
+  plays obligation-serviced-by:servicer,
+  plays pattern-has-counterparty:counterparty,
+  plays provider-has-statement-document:owner,
+  plays provider-reported-balance:owner,
+  plays provider-reports-portfolio-position:owner,
+  plays provider-reports-position:owner,
+  plays root-unit-linked-to-user-bank-unit:user-bank-unit,
+  plays subject-attributed-to-party:party,
+  plays subject-has-external-reference:subject,
+  plays tax-party-has-tax-id:party,
+  plays trust-has-role:trustee,
+  plays unit-linked-to-general:unit,
+  plays user-has-integration-profile:owner,
+  plays user-has-provider-auth-session:owner;
+entity user-journal-entry,
+  sub base-journal-entry,
+  plays allocation-has-journal-entry:journal-entry,
+  plays balances-variance-from:user-journal-entry,
+  plays case-booked-as:booking-entry,
+  plays case-has-entry:journal-entry,
+  plays case-voided-as:void-entry,
+  plays created-by-user:journal-entry,
+  plays execution-on-subject:subject,
+  plays has-intermediary-transfer-pair:journal-entry,
+  plays has-user-transfer-pair:journal-entry,
+  plays involved-in-positive-variance:user-journal-entry,
+  plays links-to-posted-user-journal-entry:pending-user-journal-entry,
+  plays links-to-posted-user-journal-entry:posted-user-journal-entry,
+  plays occurred-on:journal-entry,
+  plays paystub-posted-as-journal-entry:journal-entry,
+  plays posted-by-job:journal-entry,
+  plays reconciliation-adjustment:adjustment-entry,
+  plays subject-attributed-to-asset:subject,
+  plays subject-attributed-to-obligation:subject,
+  plays subject-attributed-to-party:subject;
+entity user-merchant-unit,
+  sub base-entity,
+  plays asset-issued-by:issuer,
+  plays asset-owned-by:owner,
+  plays asset-title-transfer:from-owner,
+  plays asset-title-transfer:to-owner,
+  plays case-has-counterparty:counterparty,
+  plays case-owned-by:owner,
+  plays evidence-involves-asset:owner,
+  plays evidence-owned-by:owner,
+  plays instrument-has-owner:owner,
+  plays instrument-linked-to-obligation:owner,
+  plays lien-on-asset:lienholder,
+  plays match-group-owned-by:owner,
+  plays obligation-between-parties:lender,
+  plays obligation-claim-owned-by:owner,
+  plays obligation-rights-assigned:assignee,
+  plays obligation-rights-assigned:assignor,
+  plays obligation-serviced-by:creditor-owner,
+  plays obligation-serviced-by:servicer,
+  plays pattern-has-counterparty:counterparty,
+  plays paystub-issued-by:employer,
+  plays provider-has-statement-document:owner,
+  plays provider-reported-balance:owner,
+  plays provider-reports-portfolio-position:owner,
+  plays provider-reports-position:owner,
+  plays root-unit-linked-to-user-merchant-unit:user-merchant-unit,
+  plays subject-attributed-to-party:party,
+  plays subject-has-external-reference:subject,
+  plays tax-form-payee-is-entity:party,
+  plays tax-party-has-exemption-certificate:party,
+  plays tax-party-has-tax-id:party,
+  plays unit-linked-to-general:unit,
+  plays user-has-integration-profile:owner,
+  plays user-has-provider-auth-session:owner;
+entity user-tag,
+  sub base-entity,
+  plays subject-has-user-tag:tag;
+entity user-transfer-pair,
+  sub base-transfer-pair,
+  plays has-user-transfer-pair:transfer-pair;
+entity week,
+  sub standard-period,
+  plays temporal-non-root-to-non-root:child-non-root,
+  plays temporal-non-root-to-non-root:parent-non-root;
+entity weekday,
+  sub day;
+entity weekend-day,
+  sub day;
+entity year,
+  sub standard-period,
+  plays temporal-non-root-to-non-root:parent-non-root,
+  plays temporal-root-to-non-root:child-non-root;
+relation HasAttribute,
+  owns instance_guid,
+  owns is_archived,
+  relates attribute_value,
+  relates owner;
+relation action-allocates-to,
+  sub base-relation,
+  relates action @card(1..1),
+  relates target-gl @card(1..1),
+  relates target-ledger @card(1..1);
+relation affects-ledger,
+  sub base-relation,
+  relates affected-ledger @card(1..1),
+  relates ledger-entry @card(1..1);
+relation agreement-approved-by,
+  sub base-relation,
+  relates agreement @card(1..1),
+  relates approver @card(1..1);
+relation agreement-for-space,
+  sub base-relation,
+  relates agreement @card(1..1),
+  relates space @card(1..1);
+relation agreement-proposed-by,
+  sub base-relation,
+  relates agreement @card(1..1),
+  relates proposer @card(1..1);
+relation agreement-targets-user,
+  sub base-relation,
+  relates agreement @card(1..1),
+  relates target-user @card(1..1);
+relation allocation-has-journal-entry,
+  sub base-relation,
+  relates allocation @card(1..1),
+  relates journal-entry @card(1..1);
+relation asset-has-identifier,
+  sub base-relation,
+  relates asset @card(1..1),
+  relates identifier @card(1..1);
+relation asset-has-valuation,
+  sub base-relation,
+  relates asset @card(1..1),
+  relates valuation @card(1..1);
+relation asset-issued-by,
+  sub base-relation,
+  relates asset @card(1..1),
+  relates issuance-document @card(0..1),
+  relates issuer @card(1..1);
+relation asset-mapped-to-sub-ledger,
+  sub base-relation,
+  relates asset @card(1..1),
+  relates mapped-sub-ledger @card(1..1);
+relation asset-owned-by,
+  sub base-relation,
+  relates asset @card(1..1),
+  relates evidence-document @card(0..1),
+  relates owner @card(1..1);
+relation asset-title-transfer,
+  sub base-relation,
+  relates asset @card(1..1),
+  relates from-owner @card(1..1),
+  relates to-owner @card(1..1),
+  relates transfer-document @card(0..1);
+relation automation-has-action,
+  sub base-relation,
+  relates action @card(1..1),
+  relates automation @card(1..1);
+relation automation-has-condition-group,
+  sub base-relation,
+  relates automation @card(1..1),
+  relates condition-group @card(1..1);
+relation automation-has-trigger,
+  sub base-relation,
+  relates automation @card(1..1),
+  relates trigger @card(1..1);
+relation automation-owned-by,
+  sub base-relation,
+  relates automation @card(1..1),
+  relates owner @card(1..1);
+relation balances-variance-from,
+  sub base-relation,
+  relates balancing-segment @card(1..1),
+  relates user-journal-entry @card(1..1);
+relation bank-statement-in-tax-period,
+  sub base-relation,
+  relates statement @card(1..1),
+  relates tax-period @card(0..1);
+relation base-relation @abstract,
+  owns instance_guid @key,
+  owns is_archived,
+  plays HasAttribute:owner;
+relation case-adjusts-case,
+  sub base-relation,
+  relates adjustment-case @card(1..1),
+  relates original-case @card(1..1);
+relation case-allocation,
+  sub base-relation,
+  relates case @card(1..1),
+  relates target-gl @card(1..1),
+  relates target-ledger @card(1..1),
+  plays allocation-has-journal-entry:allocation,
+  plays execution-on-subject:subject;
+relation case-assigned-to-tax-period,
+  sub base-relation,
+  relates case @card(1..1),
+  relates tax-period @card(1..1);
+relation case-booked-as,
+  sub case-has-entry,
+  relates booked-case as case,
+  relates booking-entry as journal-entry;
+relation case-booked-in-gl,
+  sub base-relation,
+  relates case @card(1..1),
+  relates recon-gl @card(1..1);
+relation case-funded-by-instrument,
+  sub base-relation,
+  relates case @card(1..1),
+  relates instrument @card(1..1),
+  relates owner @card(1..1),
+  plays execution-on-subject:subject;
+relation case-has-counterparty,
+  sub base-relation,
+  relates case @card(1..1),
+  relates counterparty @card(1..1),
+  plays execution-on-subject:subject;
+relation case-has-entry,
+  sub base-relation,
+  relates case @card(1..1),
+  relates journal-entry @card(1..1);
+relation case-has-evidence,
+  sub base-relation,
+  relates case @card(1..1),
+  relates evidence @card(1..1),
+  plays execution-on-subject:subject;
+relation case-has-posting-attempt,
+  sub base-relation,
+  relates attempt @card(1..1),
+  relates case @card(1..1);
+relation case-has-primary-evidence,
+  sub case-has-evidence,
+  relates primary-case as case,
+  relates primary-evidence as evidence;
+relation case-has-supporting-evidence,
+  sub case-has-evidence,
+  relates supporting-case as case,
+  relates supporting-evidence as evidence;
+relation case-has-tax-determination,
+  sub base-relation,
+  relates case @card(1..1),
+  relates determination @card(0..);
+relation case-in-opposite-match,
+  sub base-relation,
+  relates case @card(1..1),
+  relates match-group @card(1..1),
+  plays execution-on-subject:subject;
+relation case-merged-into,
+  sub base-relation,
+  relates canonical-case @card(1..1),
+  relates merged-case @card(1..1),
+  relates owner @card(1..1),
+  plays execution-on-subject:subject;
+relation case-mirrored-as,
+  sub base-relation,
+  relates mirror-case @card(1..1),
+  relates owner @card(1..1),
+  relates source-case @card(1..1),
+  plays execution-on-subject:subject;
+relation case-owned-by,
+  sub base-relation,
+  relates case @card(1..1),
+  relates owner @card(1..1);
+relation case-voided-as,
+  sub case-has-entry,
+  relates void-entry as journal-entry,
+  relates voided-case as case;
+relation clearing-check-for-subledger,
+  sub base-relation,
+  relates clearing-check @card(1..1),
+  relates sub-ledger @card(1..1),
+  relates tax-period @card(0..1);
+relation contra-account-link,
+  sub base-relation,
+  relates contra-ledger @card(1..1),
+  relates primary-ledger @card(1..1);
+relation created-by-user,
+  sub base-relation,
+  relates creator @card(1..1),
+  relates journal-entry @card(1..1);
+relation cross-hierarchy-link,
+  sub base-relation,
+  relates source-node @card(1..1),
+  relates target-node @card(1..1);
+relation ends-on,
+  sub base-relation,
+  relates end-day @card(1..1),
+  relates time-bound-entity @card(1..1);
+relation evidence-at-location,
+  sub base-relation,
+  relates evidence @card(1..1),
+  relates location @card(1..1);
+relation evidence-duplicate-of,
+  sub base-relation,
+  relates duplicate-evidence @card(1..1),
+  relates original-evidence @card(1..1);
+relation evidence-from-instrument,
+  sub base-relation,
+  relates evidence @card(1..1),
+  relates instrument @card(1..1),
+  relates owner @card(1..1);
+relation evidence-from-provider,
+  sub base-relation,
+  relates evidence @card(1..1),
+  relates owner @card(1..1),
+  relates provider @card(1..1);
+relation evidence-has-category,
+  sub base-relation,
+  relates category @card(1..1),
+  relates evidence @card(1..1);
+relation evidence-has-counterparty-record,
+  sub base-relation,
+  relates counterparty @card(1..1),
+  relates evidence @card(1..1);
+relation evidence-has-line-item,
+  sub base-relation,
+  relates evidence @card(1..1),
+  relates line-item @card(1..1);
+relation evidence-has-payment-meta,
+  sub base-relation,
+  relates evidence @card(1..1),
+  relates meta @card(1..1);
+relation evidence-involves-asset,
+  sub base-relation,
+  relates asset @card(1..1),
+  relates evidence @card(1..1),
+  relates owner @card(1..1);
+relation evidence-line-item-maps-to-tax-line-item,
+  sub base-relation,
+  relates evidence-line-item @card(1..1),
+  relates tax-line-item @card(1..1);
+relation evidence-mirrored-from,
+  sub base-relation,
+  relates mirror-evidence @card(1..1),
+  relates source-evidence @card(1..1);
+relation evidence-owned-by,
+  sub base-relation,
+  relates evidence @card(1..1),
+  relates owner @card(1..1);
+relation evidence-settles-pending,
+  sub base-relation,
+  relates pending-evidence @card(1..1),
+  relates posted-evidence @card(1..1);
+relation execution-for-automation,
+  sub base-relation,
+  relates automation @card(1..1),
+  relates execution @card(1..1);
+relation execution-on-subject,
+  sub base-relation,
+  relates execution @card(1..1),
+  relates subject @card(1..1);
+relation execution-triggered-by,
+  sub base-relation,
+  relates execution @card(1..1),
+  relates trigger @card(1..1);
+relation general-ledger-records-goal,
+  sub base-relation,
+  relates general-ledger @card(1..1),
+  relates goal @card(1..1);
+relation geo-boundary-maps-to-jurisdiction,
+  sub base-relation,
+  relates boundary @card(1..1),
+  relates jurisdiction @card(1..1);
+relation group-has-ledger,
+  sub base-relation,
+  relates general-ledger @card(1..1),
+  relates group @card(1..1);
+relation group-has-predicate,
+  sub base-relation,
+  relates group @card(1..1),
+  relates predicate @card(1..1);
+relation group-in-space,
+  sub base-relation,
+  relates group @card(1..1),
+  relates space @card(1..1);
+relation groups-transfer,
+  sub base-relation,
+  relates compound-entry @card(1..1),
+  relates transfer-pair @card(0..);
+relation has-credit-entry,
+  sub base-relation,
+  relates entry-info @card(1..1),
+  relates transfer-pair @card(1..1);
+relation has-debit-entry,
+  sub base-relation,
+  relates entry-info @card(1..1),
+  relates transfer-pair @card(1..1);
+relation has-intermediary-transfer-pair,
+  sub base-relation,
+  relates journal-entry @card(1..1),
+  relates transfer-pair @card(1..1);
+relation has-ledger-entry,
+  sub base-relation,
+  relates journal-entry @card(1..1),
+  relates ledger-entry @card(1..1);
+relation has-segment,
+  sub base-relation,
+  relates segment,
+  relates segmented-entity;
+relation has-user-transfer-pair,
+  sub base-relation,
+  relates journal-entry @card(1..1),
+  relates transfer-pair @card(1..1);
+relation instrument-has-owner,
+  sub base-relation,
+  relates account-owner @card(1..1),
+  relates instrument @card(1..1),
+  relates owner @card(1..1);
+relation instrument-in-merge-group,
+  sub base-relation,
+  relates group @card(1..1),
+  relates instrument @card(1..1),
+  relates owner @card(1..1);
+relation instrument-linked-to-obligation,
+  sub base-relation,
+  relates instrument @card(1..1),
+  relates obligation @card(1..1),
+  relates owner @card(1..1),
+  relates provider @card(0..1);
+relation instrument-mapped-to-ledger,
+  sub base-relation,
+  relates instrument @card(1..1),
+  relates staging-ledger @card(1..1);
+relation instrument-mapped-to-overdraft-ledger,
+  sub base-relation,
+  relates instrument @card(1..1),
+  relates overdraft-ledger @card(1..1);
+relation instrument-mapped-to-secondary-ledger,
+  sub base-relation,
+  relates instrument @card(1..1),
+  relates secondary-ledger @card(1..1);
+relation instrument-treatment-excludes-secondary-ledger,
+  sub base-relation,
+  relates instrument @card(1..1),
+  relates secondary-ledger @card(1..1),
+  relates treatment @card(1..1);
+relation interest-applied-rate-term,
+  sub base-relation,
+  relates evidence-document @card(0..1),
+  relates obligation @card(1..1),
+  relates term @card(1..1);
+relation involved-in-positive-variance,
+  sub base-relation,
+  relates segment @card(1..1),
+  relates user-journal-entry @card(1..1);
+relation job-funds-goal,
+  sub base-relation,
+  relates goal @card(1..1),
+  relates job @card(1..1);
+relation ledger-non-root-to-non-root,
+  sub same-hierarchy-relation,
+  relates child-non-root as child,
+  relates parent-non-root as parent;
+relation ledger-root-to-non-root,
+  sub same-hierarchy-relation,
+  relates child-non-root as child,
+  relates parent-root as parent;
+relation lien-on-asset,
+  sub base-relation,
+  relates asset @card(1..1),
+  relates lien-document @card(0..1),
+  relates lienholder @card(1..1),
+  relates securing-obligation @card(0..1);
+relation line-item-has-slice,
+  sub base-relation,
+  relates slice @card(1..1),
+  relates source-item @card(1..1);
+relation linked-to-dst-ledger,
+  sub base-relation,
+  relates cron-job @card(1..1),
+  relates dst-ledger @card(1..1);
+relation linked-to-root-account,
+  sub base-relation,
+  relates ledger @card(1..1),
+  relates root-account @card(1..1);
+relation linked-to-src-ledger,
+  sub base-relation,
+  relates cron-job @card(1..1),
+  relates src-ledger @card(1..1);
+relation linked-to-sub-account,
+  sub base-relation,
+  relates sub-account @card(1..1),
+  relates sub-ledger @card(1..1);
+relation linked-to-sys-root-account,
+  sub base-relation,
+  relates ledger @card(1..1),
+  relates sys-root-account @card(1..1);
+relation linked-to-sys-sub-account,
+  sub base-relation,
+  relates sub-ledger @card(1..1),
+  relates sys-sub-account @card(1..1);
+relation links-to-main-account,
+  sub base-relation,
+  relates main-account @card(1..1),
+  relates system-account @card(1..1);
+relation links-to-posted-user-journal-entry,
+  sub base-relation,
+  relates pending-user-journal-entry @card(1..1),
+  relates posted-user-journal-entry @card(1..1);
+relation match-group-owned-by,
+  sub base-relation,
+  relates match-group @card(1..1),
+  relates owner @card(1..1);
+relation membership,
+  sub base-relation,
+  relates context @card(1..1),
+  relates member @card(1..1),
+  plays membership-requires:dependent-membership,
+  plays membership-requires:required-membership;
+relation membership-requires,
+  sub base-relation,
+  relates dependent-membership @card(1..1),
+  relates required-membership @card(1..1);
+relation merge-group-owned-by,
+  sub base-relation,
+  relates group @card(1..1),
+  relates owner @card(1..1);
+relation message-has-attachment,
+  sub base-relation,
+  relates attachment @card(1..1),
+  relates message @card(1..1);
+relation obligation-between-parties,
+  sub base-relation,
+  relates agreement-document @card(0..1),
+  relates borrower @card(1..1),
+  relates lender @card(1..1),
+  relates obligation @card(1..1);
+relation obligation-claim-owned-by,
+  sub base-relation,
+  relates evidence-document @card(0..1),
+  relates obligation @card(1..1),
+  relates owner @card(1..1);
+relation obligation-finances-asset,
+  sub base-relation,
+  relates financed-asset @card(1..1),
+  relates obligation @card(1..1);
+relation obligation-has-interest-term,
+  sub base-relation,
+  relates evidence-document @card(0..1),
+  relates obligation @card(1..1),
+  relates term @card(1..1);
+relation obligation-has-registration,
+  sub base-relation,
+  relates obligation @card(1..1),
+  relates registration @card(1..1);
+relation obligation-mapped-to-sub-ledger,
+  sub base-relation,
+  relates mapped-sub-ledger @card(1..1),
+  relates obligation @card(1..1);
+relation obligation-refinanced-by,
+  sub base-relation,
+  relates new-obligation @card(1..1),
+  relates old-obligation @card(1..1),
+  relates refinance-document @card(0..1);
+relation obligation-rights-assigned,
+  sub base-relation,
+  relates assignee @card(1..1),
+  relates assignment-document @card(0..1),
+  relates assignor @card(1..1),
+  relates obligation @card(1..1);
+relation obligation-serviced-by,
+  sub base-relation,
+  relates creditor-owner @card(0..1),
+  relates obligation @card(1..1),
+  relates servicer @card(1..1),
+  relates servicing-document @card(0..1);
+relation obligation-serviced-by-pattern,
+  sub base-relation,
+  relates obligation @card(1..1),
+  relates recurring-pattern @card(1..1);
+relation occurred-on,
+  sub base-relation,
+  relates journal-entry @card(1..1),
+  relates temporal-period @card(1..1);
+relation owns-subledger,
+  sub base-relation,
+  relates owner @card(1..1),
+  relates subledger @card(1..1);
+relation party-has-contact,
+  sub base-relation,
+  relates contact @card(1..1),
+  relates party @card(1..1);
+relation pattern-has-case,
+  sub base-relation,
+  relates case @card(1..1),
+  relates pattern @card(1..1);
+relation pattern-has-counterparty,
+  sub base-relation,
+  relates counterparty @card(1..1),
+  relates pattern @card(1..1);
+relation pattern-has-recurring-alert,
+  sub base-relation,
+  relates alert @card(1..1),
+  relates pattern @card(1..1);
+relation pattern-owned-by,
+  sub base-relation,
+  relates owner @card(1..1),
+  relates pattern @card(1..1);
+relation paystub-has-line,
+  sub base-relation,
+  relates line @card(0..),
+  relates paystub @card(1..1);
+relation paystub-issued-by,
+  sub base-relation,
+  relates employer @card(1..1),
+  relates paystub @card(1..1);
+relation paystub-issued-to,
+  sub base-relation,
+  relates employee @card(1..1),
+  relates paystub @card(1..1);
+relation paystub-line-maps-to-tax-code,
+  sub base-relation,
+  relates line @card(1..1),
+  relates tax-code @card(1..1);
+relation paystub-line-maps-to-tax-type,
+  sub base-relation,
+  relates line @card(1..1),
+  relates tax-type @card(1..1);
+relation paystub-posted-as-journal-entry,
+  sub base-relation,
+  relates journal-entry @card(1..1),
+  relates paystub @card(1..1);
+relation paystub-settled-by-case,
+  sub base-relation,
+  relates case @card(0..),
+  relates paystub @card(1..1);
+relation peer-leg-has-settlement,
+  sub base-relation,
+  relates leg @card(1..1),
+  relates settlement @card(1..1);
+relation peer-leg-has-share,
+  sub base-relation,
+  relates leg @card(1..1),
+  relates share @card(1..1);
+relation peer-leg-participant,
+  sub base-relation,
+  relates leg @card(1..1),
+  relates participant @card(1..1);
+relation peer-leg-receiver-case,
+  sub base-relation,
+  relates leg @card(1..1),
+  relates receiver-case @card(1..1);
+relation peer-leg-sender-case,
+  sub base-relation,
+  relates leg @card(1..1),
+  relates sender-case @card(1..1);
+relation peer-transaction,
+  sub base-relation,
+  relates origin-case @card(0..1),
+  relates payer @card(1..1),
+  plays peer-transaction-has-leg:peer-transaction,
+  plays thread-about:topic;
+relation peer-transaction-has-leg,
+  sub base-relation,
+  relates leg @card(1..1),
+  relates peer-transaction @card(1..1);
+relation posted-by-job,
+  sub base-relation,
+  relates cron-job @card(1..1),
+  relates journal-entry @card(1..1);
+relation provider-has-instrument,
+  sub base-relation,
+  relates instrument @card(1..1),
+  relates owner @card(1..1),
+  relates provider @card(1..1);
+relation provider-has-statement-document,
+  sub base-relation,
+  relates document @card(1..1),
+  relates instrument @card(1..1),
+  relates owner @card(1..1),
+  relates provider @card(1..1);
+relation provider-reported-balance,
+  sub base-relation,
+  relates instrument @card(1..1),
+  relates owner @card(1..1),
+  relates provider @card(1..1),
+  relates snapshot @card(1..1);
+relation provider-reports-portfolio-position,
+  sub base-relation,
+  relates asset @card(1..1),
+  relates owner @card(1..1),
+  relates provider @card(1..1);
+relation provider-reports-position,
+  sub base-relation,
+  relates asset @card(1..1),
+  relates instrument @card(1..1),
+  relates owner @card(1..1),
+  relates provider @card(1..1);
+relation recon-gl-due-ledger-map,
+  sub base-relation,
+  relates participant-due-to-ledger @card(1..1),
+  relates participant-gl @card(1..1),
+  relates payer-due-from-ledger @card(1..1),
+  relates payer-gl @card(1..1);
+relation reconciliation-adjustment,
+  sub base-relation,
+  relates adjustment-entry @card(1..1),
+  relates session @card(1..1);
+relation reconciliation-for-instrument,
+  sub base-relation,
+  relates instrument @card(1..1),
+  relates session @card(1..1);
+relation reconciliation-for-statement,
+  sub base-relation,
+  relates session @card(1..1),
+  relates statement @card(1..1);
+relation reconciliation-session-in-tax-period,
+  sub base-relation,
+  relates session @card(1..1),
+  relates tax-period @card(0..1);
+relation records-boost-period,
+  sub base-relation,
+  relates boost-period,
+  relates recorder @card(0..);
+relation records-budget,
+  sub base-relation,
+  relates budget @card(1..1),
+  relates recorder @card(1..1);
+relation records-budget-estimation,
+  sub base-relation,
+  relates budget-estimation @card(1..1),
+  relates recorder @card(1..1);
+relation references-account,
+  sub base-relation,
+  relates entry-info @card(1..1),
+  relates referenced-account @card(1..1);
+relation references-ledger,
+  sub base-relation,
+  relates entry-info @card(1..1),
+  relates referenced-ledger @card(1..1);
+relation rolled-variance,
+  sub base-relation,
+  relates from-segment @card(1..1),
+  relates to-segment @card(1..1);
+relation root-unit-linked-to-unit,
+  sub base-relation,
+  relates root-unit @card(1..1),
+  relates unit @card(1..1);
+relation root-unit-linked-to-user-bank-unit,
+  sub base-relation,
+  relates root-unit @card(1..1),
+  relates user-bank-unit @card(1..1);
+relation root-unit-linked-to-user-merchant-unit,
+  sub base-relation,
+  relates root-unit @card(1..1),
+  relates user-merchant-unit @card(1..1);
+relation same-hierarchy-relation,
+  sub base-relation,
+  relates child,
+  relates parent;
+relation segment-non-root-to-non-root,
+  sub same-hierarchy-relation,
+  relates child-non-root as child,
+  relates parent-non-root as parent;
+relation segment-root-to-non-root,
+  sub same-hierarchy-relation,
+  relates child-non-root as child,
+  relates parent-root as parent;
+relation settlement-for-shares,
+  sub base-relation,
+  relates settlement @card(1..1),
+  relates share @card(1..1);
+relation settlement-has-evidence,
+  sub base-relation,
+  relates evidence @card(1..1),
+  relates settlement @card(1..1);
+relation share-allocation,
+  sub base-relation,
+  relates share @card(1..1),
+  relates target-gl @card(1..1),
+  relates target-ledger @card(1..1);
+relation share-owned-by,
+  sub base-relation,
+  relates owner @card(1..1),
+  relates share @card(1..1);
+relation share-paid-by,
+  sub base-relation,
+  relates payer @card(1..1),
+  relates share @card(1..1);
+relation slice-has-share,
+  sub base-relation,
+  relates share @card(1..1),
+  relates source-slice @card(1..1);
+relation space-has-unit,
+  sub base-relation,
+  relates space @card(1..1),
+  relates unit @card(1..1);
+relation splits-into,
+  sub base-relation,
+  relates child-segment @card(1..1),
+  relates parent-segment @card(1..1);
+relation starts-on,
+  sub base-relation,
+  relates start-day @card(1..1),
+  relates time-bound-entity @card(1..1);
+relation statement-for-instrument,
+  sub base-relation,
+  relates instrument @card(1..1),
+  relates statement @card(1..1);
+relation statement-has-evidence,
+  sub base-relation,
+  relates evidence @card(1..1),
+  relates statement @card(1..1);
+relation subject-attributed-to-asset,
+  sub base-relation,
+  relates asset @card(1..1),
+  relates subject @card(1..1);
+relation subject-attributed-to-obligation,
+  sub base-relation,
+  relates obligation @card(1..1),
+  relates subject @card(1..1);
+relation subject-attributed-to-party,
+  sub base-relation,
+  relates party @card(1..1),
+  relates subject @card(1..1);
+relation subject-has-external-reference,
+  sub base-relation,
+  relates reference @card(1..1),
+  relates subject @card(1..1);
+relation subject-has-tax-asset-treatment,
+  sub base-relation,
+  relates subject @card(1..1),
+  relates treatment @card(1..1);
+relation subject-has-user-tag,
+  sub base-relation,
+  relates subject @card(1..1),
+  relates tag @card(1..1);
+relation subledger-has-role,
+  sub base-relation,
+  relates general-ledger @card(1..1),
+  relates sub-ledger @card(1..1);
+relation subledger-holds-goal-funds,
+  sub base-relation,
+  relates goal @card(1..1),
+  relates subledger @card(1..1);
+relation tax-adjustment-applied-to-return,
+  sub base-relation,
+  relates adjustment @card(1..1),
+  relates tax-return @card(1..1);
+relation tax-asset-treatment-tier-scope,
+  sub base-relation,
+  relates schedule @card(1..1),
+  relates treatment @card(1..1);
+relation tax-association-has-attempt,
+  sub base-relation,
+  relates association @card(1..1),
+  relates attempt @card(0..);
+relation tax-association-links-calculation,
+  sub base-relation,
+  relates association @card(1..1),
+  relates calculation @card(1..1);
+relation tax-attempt-committed-transaction,
+  sub base-relation,
+  relates attempt @card(1..1),
+  relates transaction @card(1..1);
+relation tax-audit-event-on-period,
+  sub base-relation,
+  relates event @card(1..1),
+  relates tax-period @card(1..1);
+relation tax-audit-event-on-subject,
+  sub base-relation,
+  relates event @card(1..1),
+  relates subject @card(1..1);
+relation tax-authority-governs-jurisdiction,
+  sub base-relation,
+  relates authority @card(1..1),
+  relates jurisdiction @card(1..1);
+relation tax-bracket-schedule-has-entry,
+  sub base-relation,
+  relates entry @card(0..),
+  relates schedule @card(1..1);
+relation tax-category-parent-child,
+  sub base-relation,
+  relates child @card(1..1),
+  relates parent @card(1..1);
+relation tax-code-assigned-to-subject,
+  sub base-relation,
+  relates subject @card(1..1),
+  relates tax-code @card(1..1),
+  relates tax-period @card(0..1);
+relation tax-code-maps-to-category,
+  sub base-relation,
+  relates tax-category @card(1..1),
+  relates tax-code @card(1..1);
+relation tax-component-applies-to,
+  sub base-relation,
+  relates component @card(1..1),
+  relates subject @card(1..1);
+relation tax-component-dimensioned-by,
+  sub base-relation,
+  relates component @card(1..1),
+  relates jurisdiction @card(1..1),
+  relates tax-code @card(0..1),
+  relates tax-type @card(0..1);
+relation tax-component-posted-to-ledger-entry,
+  sub base-relation,
+  relates component @card(1..1),
+  relates ledger-entry @card(1..1);
+relation tax-component-used-rate-entry,
+  sub base-relation,
+  relates component @card(1..1),
+  relates rate-entry @card(1..1);
+relation tax-determination-applied-rule,
+  sub base-relation,
+  relates determination @card(1..1),
+  relates rule @card(1..1);
+relation tax-determination-has-component,
+  sub base-relation,
+  relates component @card(0..),
+  relates determination @card(1..1);
+relation tax-determination-has-line-item,
+  sub base-relation,
+  relates determination @card(1..1),
+  relates line-item @card(0..);
+relation tax-determination-has-location,
+  sub base-relation,
+  relates determination @card(1..1),
+  relates location @card(1..1);
+relation tax-determination-has-shipping-cost,
+  sub base-relation,
+  relates determination @card(1..1),
+  relates shipping @card(1..1);
+relation tax-determination-used-rule-set,
+  sub base-relation,
+  relates determination @card(1..1),
+  relates rule-set @card(1..1);
+relation tax-determination-used-tax-id,
+  sub base-relation,
+  relates determination @card(1..1),
+  relates tax-id @card(0..);
+relation tax-determination-uses-exemption-certificate,
+  sub base-relation,
+  relates certificate @card(1..1),
+  relates determination @card(1..1);
+relation tax-determination-uses-registration,
+  sub base-relation,
+  relates determination @card(1..1),
+  relates registration @card(1..1);
+relation tax-due-event-settled-by-remittance,
+  sub base-relation,
+  relates due-event @card(1..1),
+  relates remittance @card(1..1);
+relation tax-encumbrance-rule-funds-to,
+  sub base-relation,
+  relates fund @card(1..1),
+  relates rule @card(1..1);
+relation tax-encumbrance-rule-sources-from,
+  sub base-relation,
+  relates rule @card(1..1),
+  relates sub-ledger @card(1..1);
+relation tax-encumbrance-rule-triggers-on-code,
+  sub base-relation,
+  relates rule @card(1..1),
+  relates tax-code @card(1..1);
+relation tax-exception-about-component,
+  sub base-relation,
+  relates component @card(1..1),
+  relates exception @card(1..1);
+relation tax-exception-about-determination,
+  sub base-relation,
+  relates determination @card(1..1),
+  relates exception @card(1..1);
+relation tax-exemption-certificate-applies-to-jurisdiction,
+  sub base-relation,
+  relates certificate @card(1..1),
+  relates jurisdiction @card(0..);
+relation tax-form-issued-to-payee,
+  sub base-relation,
+  relates payee @card(1..1),
+  relates tax-form @card(1..1);
+relation tax-form-payee-is-entity,
+  sub base-relation,
+  relates party @card(1..1),
+  relates payee @card(1..1);
+relation tax-jurisdiction-parent-child,
+  sub base-relation,
+  relates child @card(1..1),
+  relates parent @card(1..1);
+relation tax-liability-has-due-event,
+  sub base-relation,
+  relates due-event @card(0..),
+  relates liability @card(1..1);
+relation tax-liability-scoped-to,
+  sub base-relation,
+  relates authority @card(0..1),
+  relates jurisdiction @card(0..1),
+  relates liability @card(1..1),
+  relates tax-period @card(1..1),
+  relates tax-type @card(0..1),
+  relates unit @card(1..1);
+relation tax-location-resolved-by-boundary,
+  sub base-relation,
+  relates boundary @card(1..1),
+  relates location @card(1..1);
+relation tax-location-resolves-to-jurisdiction,
+  sub base-relation,
+  relates jurisdiction @card(0..),
+  relates location @card(1..1);
+relation tax-mapped-to-account,
+  sub base-relation,
+  relates account @card(1..1),
+  relates jurisdiction @card(0..1),
+  relates tax-type @card(0..1);
+relation tax-obligation-driven-by-threshold-rule,
+  sub base-relation,
+  relates obligation @card(1..1),
+  relates rule @card(1..1);
+relation tax-obligation-has-evaluation,
+  sub base-relation,
+  relates evaluation @card(0..),
+  relates obligation @card(1..1);
+relation tax-offset-applied-to-remittance,
+  sub base-relation,
+  relates offset @card(1..1),
+  relates remittance @card(1..1);
+relation tax-offset-from-return,
+  sub base-relation,
+  relates offset @card(1..1),
+  relates source-return @card(1..1);
+relation tax-offset-to-liability,
+  sub base-relation,
+  relates offset @card(1..1),
+  relates target-period @card(0..1),
+  relates target-return @card(0..1);
+relation tax-party-has-exemption-certificate,
+  sub base-relation,
+  relates certificate @card(0..),
+  relates party @card(1..1);
+relation tax-party-has-tax-id,
+  sub base-relation,
+  relates party @card(1..1),
+  relates tax-id @card(0..);
+relation tax-plan-type-wraps-subject,
+  sub base-relation,
+  relates account @card(0..1),
+  relates instrument @card(0..1),
+  relates jurisdiction @card(0..1),
+  relates plan-type @card(1..1);
+relation tax-product-maps-to-category,
+  sub base-relation,
+  relates tax-category @card(1..1),
+  relates tax-product @card(1..1);
+relation tax-product-uses-tax-code,
+  sub base-relation,
+  relates tax-code @card(1..1),
+  relates tax-product @card(1..1);
+relation tax-profile-has-head-office,
+  sub base-relation,
+  relates location @card(1..1),
+  relates profile @card(1..1);
+relation tax-rate-entry-scoped-to,
+  sub base-relation,
+  relates boundary @card(0..1),
+  relates jurisdiction @card(1..1),
+  relates rate-entry @card(1..1),
+  relates tax-category @card(0..1),
+  relates tax-code @card(0..1),
+  relates tax-type @card(0..1);
+relation tax-reclassification-batch-contains,
+  sub base-relation,
+  relates batch @card(1..1),
+  relates reclassification @card(0..);
+relation tax-reclassification-correction-entry,
+  sub base-relation,
+  relates correction-entry @card(1..1),
+  relates reclassification @card(1..1);
+relation tax-reclassification-creates-liability,
+  sub base-relation,
+  relates liability @card(1..1),
+  relates reclassification @card(1..1);
+relation tax-reclassification-of-case,
+  sub base-relation,
+  relates original-case @card(1..1),
+  relates reclassification @card(1..1);
+relation tax-reclassification-reversal-entry,
+  sub base-relation,
+  relates reclassification @card(1..1),
+  relates reversal-entry @card(1..1);
+relation tax-reclassification-triggered-by-registration,
+  sub base-relation,
+  relates batch @card(1..1),
+  relates registration @card(1..1);
+relation tax-remittance-posted-to-ledger-entry,
+  sub base-relation,
+  relates ledger-entry @card(1..1),
+  relates remittance @card(1..1);
+relation tax-remittance-settled-by-case,
+  sub base-relation,
+  relates case @card(0..),
+  relates remittance @card(1..1);
+relation tax-remittance-settles-liability,
+  sub base-relation,
+  relates liability @card(1..1),
+  relates remittance @card(1..1);
+relation tax-remittance-settles-return,
+  sub base-relation,
+  relates authority @card(0..1),
+  relates remittance @card(1..1),
+  relates tax-return @card(1..1);
+relation tax-return-backed-by-sub-ledger,
+  sub base-relation,
+  relates sub-ledger @card(1..1),
+  relates tax-return @card(1..1);
+relation tax-return-covers-tax-period,
+  sub base-relation,
+  relates tax-period @card(1..1),
+  relates tax-return @card(1..1);
+relation tax-return-creates-payable,
+  sub base-relation,
+  relates payable-account @card(1..1),
+  relates tax-return @card(1..1);
+relation tax-return-for-registration,
+  sub base-relation,
+  relates jurisdiction @card(1..1),
+  relates registration @card(1..1),
+  relates tax-return @card(1..1),
+  relates tax-type @card(0..1);
+relation tax-return-has-line,
+  sub base-relation,
+  relates line @card(0..),
+  relates tax-return @card(1..1);
+relation tax-return-includes-component,
+  sub base-relation,
+  relates component @card(0..),
+  relates tax-return @card(1..1);
+relation tax-return-includes-determination,
+  sub base-relation,
+  relates determination @card(0..),
+  relates tax-return @card(1..1);
+relation tax-rule-cites-authority-document,
+  sub base-relation,
+  relates document @card(0..),
+  relates rule @card(1..1);
+relation tax-rule-set-has-rule,
+  sub base-relation,
+  relates rule @card(1..1),
+  relates rule-set @card(1..1);
+relation tax-rule-set-scoped-to,
+  sub base-relation,
+  relates jurisdiction @card(1..1),
+  relates rule-set @card(1..1),
+  relates tax-type @card(0..1);
+relation tax-rule-set-uses-bracket-schedule,
+  sub base-relation,
+  relates rule-set @card(1..1),
+  relates schedule @card(1..1);
+relation tax-rule-targets,
+  sub base-relation,
+  relates jurisdiction @card(1..1),
+  relates plan-type @card(0..1),
+  relates rule @card(1..1),
+  relates tax-category @card(0..1),
+  relates tax-code @card(0..1),
+  relates tax-product @card(0..1),
+  relates tax-type @card(0..1);
+relation tax-scenario-for-period,
+  sub base-relation,
+  relates scenario @card(1..1),
+  relates tax-period @card(1..1);
+relation tax-scenario-has-result,
+  sub base-relation,
+  relates result @card(0..),
+  relates scenario @card(1..1);
+relation tax-scenario-uses-assumption,
+  sub base-relation,
+  relates assumption @card(0..),
+  relates scenario @card(1..1);
+relation tax-sinking-fund-backed-by-account,
+  sub base-relation,
+  relates account @card(1..1),
+  relates fund @card(1..1);
+relation tax-sinking-fund-backed-by-sub-ledger,
+  sub base-relation,
+  relates fund @card(1..1),
+  relates sub-ledger @card(1..1);
+relation tax-sinking-fund-linked-liability,
+  sub base-relation,
+  relates fund @card(1..1),
+  relates liability @card(1..1);
+relation tax-sinking-fund-visualized-as-goal,
+  sub base-relation,
+  relates fund @card(1..1),
+  relates goal @card(1..1);
+relation tax-transaction-created-from-calculation,
+  sub base-relation,
+  relates calculation @card(1..1),
+  relates transaction @card(1..1);
+relation tax-transaction-reverses,
+  sub base-relation,
+  relates original @card(1..1),
+  relates reversal @card(1..1);
+relation tax-vault-for-jurisdiction,
+  sub base-relation,
+  relates instrument @card(0..1),
+  relates jurisdiction @card(0..1),
+  relates tax-type @card(0..1),
+  relates unit @card(1..1),
+  relates vault-ledger @card(0..1);
+relation tax-workpaper-cites-authority-document,
+  sub base-relation,
+  relates document @card(1..1),
+  relates workpaper @card(1..1);
+relation tax-workpaper-covers-case,
+  sub base-relation,
+  relates case @card(0..),
+  relates workpaper @card(1..1);
+relation tax-workpaper-for-period,
+  sub base-relation,
+  relates tax-period @card(1..1),
+  relates workpaper @card(1..1);
+relation taxability-matrix-entry-scoped-to,
+  sub base-relation,
+  relates entry @card(1..1),
+  relates jurisdiction @card(1..1),
+  relates tax-category @card(0..1),
+  relates tax-code @card(0..1),
+  relates tax-product @card(0..1),
+  relates tax-type @card(0..1);
+relation temporal-adjacency,
+  sub base-relation,
+  relates following-period @card(1..1),
+  relates preceding-period @card(1..1);
+relation temporal-non-root-to-non-root,
+  sub same-hierarchy-relation,
+  relates child-non-root as child,
+  relates parent-non-root as parent;
+relation temporal-root-to-non-root,
+  sub same-hierarchy-relation,
+  relates child-non-root as child,
+  relates parent-root as parent;
+relation thread-about,
+  sub base-relation,
+  relates thread @card(1..1),
+  relates topic @card(1..1);
+relation thread-has-message,
+  sub base-relation,
+  relates message @card(1..1),
+  relates sender @card(1..1),
+  relates thread @card(1..1);
+relation trust-has-role,
+  sub base-relation,
+  relates beneficiary @card(0..),
+  relates settlor @card(0..1),
+  relates trust @card(1..1),
+  relates trust-document @card(0..1),
+  relates trustee @card(0..);
+relation unit-has-tax-form,
+  sub base-relation,
+  relates tax-form @card(0..),
+  relates unit @card(1..1);
+relation unit-has-tax-obligation,
+  sub base-relation,
+  relates jurisdiction @card(1..1),
+  relates obligation @card(1..1),
+  relates tax-type @card(0..1),
+  relates unit @card(1..1);
+relation unit-has-tax-period,
+  sub base-relation,
+  relates jurisdiction @card(0..1),
+  relates tax-period @card(1..1),
+  relates tax-type @card(0..1),
+  relates unit @card(1..1);
+relation unit-has-tax-policy-settings,
+  sub base-relation,
+  relates settings @card(1..1),
+  relates unit @card(1..1);
+relation unit-has-tax-product,
+  sub base-relation,
+  relates tax-product @card(1..1),
+  relates unit @card(1..1);
+relation unit-has-tax-profile,
+  sub base-relation,
+  relates profile @card(1..1),
+  relates unit @card(1..1);
+relation unit-has-tax-registration,
+  sub base-relation,
+  relates authority @card(0..1),
+  relates jurisdiction @card(1..1),
+  relates registration @card(1..1),
+  relates tax-type @card(0..1),
+  relates unit @card(1..1);
+relation unit-has-tax-report-run,
+  sub base-relation,
+  relates report @card(0..),
+  relates unit @card(1..1);
+relation unit-linked-to-general,
+  sub base-relation,
+  relates general-ledger @card(1..1),
+  relates unit @card(1..1);
+relation user-has-feed-provider,
+  sub base-relation,
+  relates owner @card(1..1),
+  relates provider @card(1..1);
+relation user-has-instrument,
+  sub base-relation,
+  relates instrument @card(1..1),
+  relates owner @card(1..1);
+relation user-has-integration-profile,
+  sub base-relation,
+  relates owner @card(1..1),
+  relates profile @card(1..1);
+relation user-has-provider-auth-session,
+  sub base-relation,
+  relates owner @card(1..1),
+  relates provider @card(0..1),
+  relates session @card(1..1);
+relation user-has-recurring-alert,
+  sub base-relation,
+  relates alert @card(1..1),
+  relates owner @card(1..1);
+relation tax-category-parent-child,
+  sub base-relation,
+  relates child @card(1..1),
+  relates parent @card(1..1);
+relation instrument-mapped-to-secondary-ledger,
+  sub base-relation,
+  relates instrument @card(1..1),
+  relates secondary-ledger @card(1..1);
+relation tax-encumbrance-rule-sources-from,
+  sub base-relation,
+  relates rule @card(1..1),
+  relates sub-ledger @card(1..1);
+relation instrument-treatment-excludes-secondary-ledger,
+  sub base-relation,
+  relates instrument @card(1..1),
+  relates secondary-ledger @card(1..1),
+  relates treatment @card(1..1);
+relation tax-asset-treatment-tier-scope,
+  sub base-relation,
+  relates schedule @card(1..1),
+  relates treatment @card(1..1);
+relation asset-has-identifier,
+  sub base-relation,
+  relates asset @card(1..1),
+  relates identifier @card(1..1);
+relation asset-has-valuation,
+  sub base-relation,
+  relates asset @card(1..1),
+  relates valuation @card(1..1);
+relation asset-issued-by,
+  sub base-relation,
+  relates asset @card(1..1),
+  relates issuance-document @card(0..1),
+  relates issuer @card(1..1);
+relation asset-mapped-to-sub-ledger,
+  sub base-relation,
+  relates asset @card(1..1),
+  relates mapped-sub-ledger @card(1..1);
+relation asset-owned-by,
+  sub base-relation,
+  relates asset @card(1..1),
+  relates evidence-document @card(0..1),
+  relates owner @card(1..1);
+relation asset-title-transfer,
+  sub base-relation,
+  relates asset @card(1..1),
+  relates from-owner @card(1..1),
+  relates to-owner @card(1..1),
+  relates transfer-document @card(0..1);
+relation lien-on-asset,
+  sub base-relation,
+  relates asset @card(1..1),
+  relates lien-document @card(0..1),
+  relates lienholder @card(1..1),
+  relates securing-obligation @card(0..1);
+relation obligation-between-parties,
+  sub base-relation,
+  relates agreement-document @card(0..1),
+  relates borrower @card(1..1),
+  relates lender @card(1..1),
+  relates obligation @card(1..1);
+relation obligation-finances-asset,
+  sub base-relation,
+  relates financed-asset @card(1..1),
+  relates obligation @card(1..1);
+relation obligation-mapped-to-sub-ledger,
+  sub base-relation,
+  relates mapped-sub-ledger @card(1..1),
+  relates obligation @card(1..1);
+relation obligation-rights-assigned,
+  sub base-relation,
+  relates assignee @card(1..1),
+  relates assignment-document @card(0..1),
+  relates assignor @card(1..1),
+  relates obligation @card(1..1);
+relation subject-attributed-to-asset,
+  sub base-relation,
+  relates asset @card(1..1),
+  relates subject @card(1..1);
+relation subject-attributed-to-obligation,
+  sub base-relation,
+  relates obligation @card(1..1),
+  relates subject @card(1..1);
+relation subject-attributed-to-party,
+  sub base-relation,
+  relates party @card(1..1),
+  relates subject @card(1..1);
+relation trust-has-role,
+  sub base-relation,
+  relates beneficiary @card(0..),
+  relates settlor @card(0..1),
+  relates trust @card(1..1),
+  relates trust-document @card(0..1),
+  relates trustee @card(0..);
+relation obligation-serviced-by-pattern,
+  sub base-relation,
+  relates obligation @card(1..1),
+  relates recurring-pattern @card(1..1);
+relation interest-applied-rate-term,
+  sub base-relation,
+  relates evidence-document @card(0..1),
+  relates obligation @card(1..1),
+  relates term @card(1..1);
+relation obligation-claim-owned-by,
+  sub base-relation,
+  relates evidence-document @card(0..1),
+  relates obligation @card(1..1),
+  relates owner @card(1..1);
+relation obligation-has-interest-term,
+  sub base-relation,
+  relates evidence-document @card(0..1),
+  relates obligation @card(1..1),
+  relates term @card(1..1);
+relation obligation-refinanced-by,
+  sub base-relation,
+  relates new-obligation @card(1..1),
+  relates old-obligation @card(1..1),
+  relates refinance-document @card(0..1);
+relation obligation-serviced-by,
+  sub base-relation,
+  relates creditor-owner @card(0..1),
+  relates obligation @card(1..1),
+  relates servicer @card(1..1),
+  relates servicing-document @card(0..1);
+relation tax-plan-type-wraps-subject,
+  sub base-relation,
+  relates account @card(0..1),
+  relates instrument @card(0..1),
+  relates jurisdiction @card(0..1),
+  relates plan-type @card(1..1);
+fun getJurisdictionChainFromLeaf($leaf: tax-jurisdiction) -> { tax-jurisdiction, integer }:
+  match
+    $leaf has instance_guid $leaf_guid;
+    {
+      $node isa tax-jurisdiction, has instance_guid $leaf_guid, has is_archived false;
+      let $depth = 0;
+    } or {
+      $rel isa tax-jurisdiction-parent-child, links (parent: $parent, child: $leaf), has is_archived false;
+      $parent has instance_guid $parent_guid, has is_archived false;
+      let $parent_node, $parent_depth in getJurisdictionChainFromLeaf($parent);
+      $parent_node has instance_guid $node_guid, has is_archived false;
+      $node isa tax-jurisdiction, has instance_guid $node_guid, has is_archived false;
+      let $depth = $parent_depth + 1;
+    };
+  return { $node, $depth };
+fun GetLedgerStringAttribute($owner: base-sub-ledger, $attrType: string) -> { string }:
+  match
+    $rel isa HasAttribute, links (owner: $owner, attribute_value: $val);
+    $val has attribute_type $attrTypeL, has string_value $val_str;
+    $attrTypeL == $attrType;
+    let $res = $val_str;
+  return { $res };
+fun GetSubAccountStringAttribute($owner: sub-account, $attrType: string) -> { string }:
+  match
+    $rel isa HasAttribute, links (owner: $owner, attribute_value: $val);
+    $val has attribute_type $attrTypeL, has string_value $val_str;
+    $attrTypeL == $attrType;
+    let $res = $val_str;
+  return { $res };
+fun GetRootLedgerStringAttribute($owner: general-ledger, $attrType: string) -> { string }:
+  match
+    $rel isa HasAttribute, links (owner: $owner, attribute_value: $val);
+    $val has attribute_type $attrTypeL, has string_value $val_str;
+    $attrTypeL == $attrType;
+    let $res = $val_str;
+  return { $res };
+fun getTaxLedgerNamePathAndTypeTree($subledger: sub-ledger) -> { string, string, string }:
+  match
+  {
+    (sub-ledger: $subledger, sub-account: $sub_account) isa linked-to-sub-account;
+
+    let $sub_ledger_name = GetLedgerStringAttribute($subledger, "name");
+    let $sub_ledger_abs_path = GetLedgerStringAttribute($subledger, "absolute-key-path-uid");
+    let $sub_account_type = GetSubAccountStringAttribute($sub_account, "account-type");
+    let $result_ledger_name = $sub_ledger_name;
+    let $result_ledger_abs_path = $sub_ledger_abs_path;
+    let $result_account_type = $sub_account_type;
+  } or {
+    (parent-non-root: $subledger, child-non-root: $nested_child_ledger) isa ledger-non-root-to-non-root;
+    let $nested_ledger_name, $nested_ledger_abs_path, $nested_account_type
+     in getTaxLedgerNamePathAndTypeTree($nested_child_ledger);
+
+    let $result_ledger_name = $nested_ledger_name;
+    let $result_ledger_abs_path = $nested_ledger_abs_path;
+    let $result_account_type = $nested_account_type;
+  };
+
+  return { $result_ledger_name, $result_ledger_abs_path, $result_account_type };
+fun getLedgerNamePathAndTypeFromRoot($root_ledger: general-ledger) -> { string, string, string }:
+  match
+    $root_ledger has instance_guid $root_ledger_guid, has is_archived false;
+    {
+      let $root_ledger_name = GetRootLedgerStringAttribute($root_ledger, "name");
+      let $root_ledger_abs_path = GetRootLedgerStringAttribute($root_ledger, "absolute-key-path-uid");
+
+      let $result_ledger_name = $root_ledger_name;
+      let $result_ledger_abs_path = $root_ledger_abs_path;
+      let $result_account_type = "";
+    } or {
+      (parent-root: $root_ledger, child-non-root: $child_ledger) isa ledger-root-to-non-root;
+
+      let $child_ledger_name, $child_ledger_abs_path, $child_account_type
+      in getTaxLedgerNamePathAndTypeTree($child_ledger);
+
+      let $result_ledger_name = $child_ledger_name;
+      let $result_ledger_abs_path = $child_ledger_abs_path;
+      let $result_account_type = $child_account_type;
+    };
+  return { $result_ledger_name, $result_ledger_abs_path, $result_account_type };

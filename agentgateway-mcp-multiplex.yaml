@@ -1,0 +1,76 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+#
+# Agentgateway config for MCP multiplexing with enterprise-grade policies.
+# Federates rig-rlm + @modelcontextprotocol/server-everything behind
+# a single gateway endpoint with:
+#   - MCP OAuth Authentication (issuer/JWKS validation)
+#   - Timeouts (60s per MCP request)
+#   - Rate limiting (20 req/min)
+#   - Header modification (gateway identification)
+#   - CORS for MCP Inspector/IDE access
+#
+# Usage:
+#   1. Start agentgateway:  agentgateway -f agentgateway-mcp-multiplex.yaml
+#   2. Connect MCP Inspector: npx @modelcontextprotocol/inspector
+#      → Transport: Streamable HTTP → URL: http://localhost:3001/mcp
+#
+# NOTE: MCP Authentication is commented out by default. To enable:
+#   1. Set up an OAuth provider (Keycloak, Auth0, etc.)
+#   2. Uncomment the mcpAuthentication block
+#   3. Update issuer/audiences/jwks to match your provider
+#
+binds:
+- port: 3001
+  listeners:
+  - routes:
+    - policies:
+        cors:
+          allowOrigins:
+          - "*"
+          allowHeaders:
+          - mcp-protocol-version
+          - content-type
+          - cache-control
+          - authorization
+          exposeHeaders:
+          - "Mcp-Session-Id"
+        ## --- MCP OAuth Authentication ---
+        ## Uncomment to require OAuth tokens on MCP requests.
+        ## Clients must send: Authorization: Bearer <token>
+        ## The token is validated against the JWKS endpoint.
+        # mcpAuthentication:
+        #   issuer: https://your-idp.example.com
+        #   audiences:
+        #   - rig-rlm-mcp
+        #   jwks:
+        #     remote: https://your-idp.example.com/.well-known/jwks.json
+        #   mode: required
+        # -- Timeout: 60s for MCP tool calls
+        timeout:
+          requestTimeout: 60s
+          backendRequestTimeout: 60s
+        # -- Rate limit: 20 req/min burst, refill 20 per minute
+        localRateLimit:
+        - maxTokens: 20
+          tokensPerFill: 20
+          fillInterval: 60s
+        # -- Headers: add gateway metadata
+        requestHeaderModifier:
+          add:
+          - name: x-gateway
+            value: agentgateway
+        responseHeaderModifier:
+          add:
+          - name: x-powered-by
+            value: rig-rlm/agentgateway
+      backends:
+      - mcp:
+          targets:
+          - name: rig-rlm
+            stdio:
+              cmd: cargo
+              args: ["run", "--bin", "mcp-server"]
+          - name: everything
+            stdio:
+              cmd: npx
+              args: ["-y", "@modelcontextprotocol/server-everything"]
