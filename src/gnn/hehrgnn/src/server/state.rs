@@ -25,8 +25,8 @@ pub struct PlainEmbeddings {
 }
 
 impl PlainEmbeddings {
-    /// Extract from Burn NodeEmbeddings.
-    pub fn from_burn(emb: &crate::model::backbone::NodeEmbeddings<B>) -> Self {
+    /// Extract from Burn NodeEmbeddings (generic over any backend).
+    pub fn from_burn<BK: Backend>(emb: &crate::model::backbone::NodeEmbeddings<BK>) -> Self {
         let mut data = HashMap::new();
         let mut hidden_dim = 0;
 

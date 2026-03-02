@@ -166,14 +166,19 @@ impl<B: Backend> HeteroGraph<B> {
     }
 
     /// Extract edges of a given type as (source_indices, dest_indices) Vec pairs.
-    pub fn edges_as_vecs(&self, edge_type: &EdgeType) -> Option<(Vec<i64>, Vec<i64>)> {
+    /// Works with both i32 (Wgpu) and i64 (NdArray) integer backends.
+    pub fn edges_as_vecs(&self, edge_type: &EdgeType) -> Option<(Vec<i32>, Vec<i32>)> {
         self.edge_index.get(edge_type).map(|idx| {
             let data = idx.clone().into_data();
-            let flat: Vec<i64> = data
-                .as_slice::<i64>()
-                .expect("Failed to read edge index")
-                .to_vec();
             let num_edges = idx.dims()[1];
+            // Try i32 first (Wgpu), fall back to i64 (NdArray)
+            let flat: Vec<i32> = if let Ok(slice) = data.as_slice::<i32>() {
+                slice.to_vec()
+            } else if let Ok(slice) = data.as_slice::<i64>() {
+                slice.iter().map(|&v| v as i32).collect()
+            } else {
+                panic!("Edge index tensor has unsupported integer type");
+            };
             let src = flat[..num_edges].to_vec();
             let dst = flat[num_edges..].to_vec();
             (src, dst)

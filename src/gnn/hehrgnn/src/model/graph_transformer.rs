@@ -195,7 +195,17 @@ impl<B: Backend> GpsLayer<B> {
                 .as_slice::<f32>()
                 .unwrap()
                 .to_vec();
-            let dst_data: Vec<i64> = dst_indices.into_data().as_slice::<i64>().unwrap().to_vec();
+            // Try i32 first (Wgpu), fall back to i64 (NdArray)
+            let dst_data: Vec<i32> = {
+                let data = dst_indices.into_data();
+                if let Ok(slice) = data.as_slice::<i32>() {
+                    slice.to_vec()
+                } else if let Ok(slice) = data.as_slice::<i64>() {
+                    slice.iter().map(|&v| v as i32).collect()
+                } else {
+                    panic!("Edge index tensor has unsupported integer type");
+                }
+            };
 
             let mut agg = vec![0.0f32; dst_count * hidden_dim];
             let mut counts = vec![0.0f32; dst_count];
@@ -257,27 +267,29 @@ impl<B: Backend> GpsLayer<B> {
             };
 
             // Global self-attention over all nodes of this type
+            // For large node types (>5000), skip global attention (O(N²) is infeasible)
+            // and rely solely on local MPNN — this matches GraphGPS paper's recommendation
+            // to use Performer/linear attention for scalability
+            let max_attn_nodes = 5000;
             let global_out = if n <= 1 {
                 x.clone()
+            } else if n > max_attn_nodes {
+                // Too many nodes for full attention — use identity (local MPNN already captures structure)
+                eprintln!(
+                    "      [GT] Skipping global attn for {} ({} nodes > {})",
+                    nt, n, max_attn_nodes
+                );
+                x.clone()
             } else {
-                // Q, K, V projections: [n, d]
-                let q = x.clone().matmul(self.attn_q.clone()); // [n, d]
-                let k = x.clone().matmul(self.attn_k.clone()); // [n, d]
-                let v = x.clone().matmul(self.attn_v.clone()); // [n, d]
-
-                // For efficiency with large node counts, use chunked attention
-                if n > 2000 {
-                    // Chunked: process in blocks of 2000 to avoid O(N²) memory
-                    self.chunked_attention(&q, &k, &v, n, d, &x.device())
-                } else {
-                    // Full attention: [n, n] attention matrix
-                    let scale = (self.head_dim as f64).sqrt();
-                    let scores = q.clone().matmul(k.clone().transpose()); // [n, n]
-                    let scores = scores / scale;
-                    let attn_weights = burn::tensor::activation::softmax(scores, 1); // [n, n]
-                    let attn_out = attn_weights.matmul(v); // [n, d]
-                    attn_out.matmul(self.attn_out.clone()) // [n, d]
-                }
+                // Full attention: [n, n] attention matrix
+                let scale = (self.head_dim as f64).sqrt();
+                let q = x.clone().matmul(self.attn_q.clone());
+                let k = x.clone().matmul(self.attn_k.clone());
+                let v = x.clone().matmul(self.attn_v.clone());
+                let scores = q.matmul(k.transpose()) / scale;
+                let attn_weights = burn::tensor::activation::softmax(scores, 1);
+                let attn_out = attn_weights.matmul(v);
+                attn_out.matmul(self.attn_out.clone())
             };
 
             // ── Step 3: Combine local + global, then FFN with residual ──

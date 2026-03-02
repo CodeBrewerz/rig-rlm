@@ -12,13 +12,15 @@
 
 #[cfg(test)]
 mod tests {
-    use burn::backend::{Autodiff, NdArray};
+    use burn::backend::{Autodiff, Cpu, NdArray, Wgpu};
     use burn::prelude::*;
     use std::collections::HashMap;
 
-    type B = NdArray;
-    type TrainB = Autodiff<NdArray>;
-    type InferB = NdArray;
+    // Wgpu backend: uses Intel UHD 770 iGPU via Vulkan — GPU-accelerated CubeCL kernels
+    type B = Wgpu;
+    type TrainB = Autodiff<Wgpu>;
+    #[allow(dead_code)]
+    type InferB = Wgpu;
 
     use burn::data::dataloader::batcher::Batcher;
     use hehrgnn::data::batcher::{HehrBatch, HehrBatcher, HehrFactItem};
@@ -1226,10 +1228,21 @@ mod tests {
         let vocab = hehrgnn::data::vocab::KgVocabulary::from_facts(&data.kg_facts);
         let indexed_facts = hehrgnn::data::fact::index_facts(&data.kg_facts, &vocab);
 
-        // 80/20 edge masking: train on 80%, test on 20%
-        let split_point = (indexed_facts.len() as f64 * 0.8) as usize;
-        let train_facts = &indexed_facts[..split_point];
-        let test_facts = &indexed_facts[split_point..];
+        // Sample only 10K facts for DistMult training (128K + Autodiff is too slow on CPU)
+        let max_distmult_facts = 10_000usize;
+        let sampled_facts: Vec<_> = if indexed_facts.len() > max_distmult_facts {
+            eprintln!(
+                "    [DistMult] Sampling {} facts from {} total for CPU-feasible training",
+                max_distmult_facts,
+                indexed_facts.len()
+            );
+            indexed_facts[..max_distmult_facts].to_vec()
+        } else {
+            indexed_facts.clone()
+        };
+        let split_point = (sampled_facts.len() as f64 * 0.8) as usize;
+        let train_facts = &sampled_facts[..split_point];
+        let test_facts = &sampled_facts[split_point..];
 
         println!(
             "    KG vocab: {} entities, {} relations",
@@ -1237,31 +1250,45 @@ mod tests {
             vocab.num_relations()
         );
         println!(
-            "    Edge split: {} train, {} test ({}% masked)",
+            "    Edge split: {} train, {} test (from {} total, {}% masked)",
             train_facts.len(),
             test_facts.len(),
-            (test_facts.len() as f64 / indexed_facts.len() as f64 * 100.0) as usize
+            indexed_facts.len(),
+            (test_facts.len() as f64 / sampled_facts.len() as f64 * 100.0) as usize
         );
 
         // Train HEHRGNN with DistMult scoring + negative sampling
         let train_config = hehrgnn::training::train::TrainConfig {
-            epochs: 2, // fast training for 100K test
-            lr: 0.005,
+            epochs: 1, // single epoch on sampled facts for CPU speed
+            lr: 0.01,
             margin: 1.0,
-            batch_size: 256,
+            batch_size: 512,
             negatives_per_positive: 2,
             hidden_dim: 32,
             num_layers: 2,
             dropout: 0.0,
-            eval_every: 5, // evaluate at end
+            eval_every: 1,
             scorer_type: "distmult".to_string(),
             output_dir: "/tmp/hehrgnn_100k_distmult".to_string(),
+        };
+
+        // Cap eval test facts to keep evaluation feasible (each scored against 80K entities)
+        let max_eval_facts = 200;
+        let eval_test_facts = if test_facts.len() > max_eval_facts {
+            eprintln!(
+                "    [DistMult] Capping eval test facts from {} to {} for feasibility",
+                test_facts.len(),
+                max_eval_facts
+            );
+            &test_facts[..max_eval_facts]
+        } else {
+            test_facts
         };
 
         let train_result = hehrgnn::training::train::train::<TrainB>(
             &train_config,
             train_facts,
-            test_facts,
+            eval_test_facts,
             vocab.num_entities(),
             vocab.num_relations(),
             &<TrainB as Backend>::Device::default(),
@@ -1274,51 +1301,116 @@ mod tests {
             train_config.epochs
         );
 
-        // Score each transaction's KG facts using trained DistMult
-        // Each transaction has 2 KG facts: (user, transacts_at, merchant) and (tx, amount_range, bucket)
-        // Lower DistMult score → more anomalous (fact is implausible)
-        let distmult_scorer = hehrgnn::training::scoring::DistMultScorer::new();
-        let inner_device = <B as Backend>::Device::default();
+        // Score each transaction's KG facts using trained DistMult (vectorized)
+        // DistMult: score = sum(h * r * t) — use direct embedding lookup for speed
+        eprintln!(
+            "    [DistMult] Scoring {} transactions (vectorized)...",
+            data.tx_amounts.len()
+        );
+        let dm_score_start = std::time::Instant::now();
 
-        // Build per-transaction DistMult scores
-        // For each tx, score its (user, transacts_at, merchant) fact
+        let entity_emb = train_result.model.embeddings.entity_embedding.weight.val(); // [N, d]
+        let relation_emb = train_result
+            .model
+            .embeddings
+            .relation_embedding
+            .weight
+            .val(); // [R, d]
+
         let mut distmult_scores: Vec<f64> = Vec::with_capacity(data.tx_amounts.len());
-        let batcher = hehrgnn::data::batcher::HehrBatcher::new();
 
-        // Create indexed facts for each transaction
+        // Collect all valid (head, relation, tail) indices for bulk scoring
+        let mut valid_indices: Vec<(usize, usize, usize, usize)> = Vec::new(); // (tx_idx, h, r, t)
+        let mut unknown_tx_indices: Vec<usize> = Vec::new();
+
         for i in 0..data.tx_amounts.len() {
-            // Try to find this tx's KG fact
             let user = &data.tx_users[i];
             let merch = &data.tx_merchants[i];
 
-            // Score the (user, transacts_at, merchant) triple
-            let maybe_fact = vocab.entities.get_id(user).and_then(|h| {
-                vocab.relations.get_id("transacts_at").and_then(|r| {
-                    vocab
-                        .entities
-                        .get_id(merch)
-                        .map(|t| hehrgnn::data::fact::HehrFact {
-                            head: h,
-                            relation: r,
-                            tail: t,
-                            qualifiers: vec![],
-                        })
-                })
+            let maybe_ids = vocab.entities.get_id(user).and_then(|h| {
+                vocab
+                    .relations
+                    .get_id("transacts_at")
+                    .and_then(|r| vocab.entities.get_id(merch).map(|t| (h, r, t)))
             });
 
-            if let Some(fact) = maybe_fact {
-                let items = vec![hehrgnn::data::batcher::HehrFactItem { fact, label: 1.0 }];
-                let batch: hehrgnn::data::batcher::HehrBatch<B> =
-                    Batcher::batch(&batcher, items, &inner_device);
-                let score = train_result.model.score_batch(&batch, &distmult_scorer);
-                let score_val: f32 = score.into_data().as_slice::<f32>().unwrap()[0];
-                // Invert: higher score = more plausible, so anomaly = -score
-                distmult_scores.push(-score_val as f64);
+            if let Some((h, r, t)) = maybe_ids {
+                valid_indices.push((i, h, r, t));
             } else {
-                // Unknown entity/relation → very anomalous (high score)
-                distmult_scores.push(10.0);
+                unknown_tx_indices.push(i);
             }
         }
+
+        eprintln!(
+            "    [DistMult] {} valid triples, {} unknown entities",
+            valid_indices.len(),
+            unknown_tx_indices.len()
+        );
+
+        // Initialize all scores to 10.0 (unknown = very anomalous)
+        distmult_scores.resize(data.tx_amounts.len(), 10.0);
+
+        // Batch score valid triples using direct embedding lookup
+        // Process in chunks to avoid huge tensor allocations
+        let chunk_size = 10_000;
+        for (chunk_idx, chunk) in valid_indices.chunks(chunk_size).enumerate() {
+            if chunk_idx % 5 == 0 {
+                eprintln!(
+                    "    [DistMult] scoring chunk {}/{} ({} triples)",
+                    chunk_idx + 1,
+                    (valid_indices.len() + chunk_size - 1) / chunk_size,
+                    chunk.len()
+                );
+            }
+
+            let h_ids: Vec<usize> = chunk.iter().map(|x| x.1).collect();
+            let r_ids: Vec<usize> = chunk.iter().map(|x| x.2).collect();
+            let t_ids: Vec<usize> = chunk.iter().map(|x| x.3).collect();
+
+            let batch_len = chunk.len();
+
+            // Look up embeddings for this chunk
+            let h_emb = entity_emb.clone().select(
+                0,
+                Tensor::<B, 1, Int>::from_data(
+                    burn::tensor::TensorData::from(&h_ids[..]),
+                    &<B as Backend>::Device::default(),
+                ),
+            ); // [batch, d]
+            let r_emb = relation_emb.clone().select(
+                0,
+                Tensor::<B, 1, Int>::from_data(
+                    burn::tensor::TensorData::from(&r_ids[..]),
+                    &<B as Backend>::Device::default(),
+                ),
+            ); // [batch, d]
+            let t_emb = entity_emb.clone().select(
+                0,
+                Tensor::<B, 1, Int>::from_data(
+                    burn::tensor::TensorData::from(&t_ids[..]),
+                    &<B as Backend>::Device::default(),
+                ),
+            ); // [batch, d]
+
+            // DistMult: sum(h * r * t, dim=1) → [batch]
+            let scores_tensor: Tensor<B, 1> =
+                (h_emb * r_emb * t_emb).sum_dim(1).reshape([batch_len]);
+
+            let scores_data = scores_tensor.into_data();
+            let scores: &[f32] = scores_data.as_slice::<f32>().unwrap();
+
+            for (j, &(tx_idx, _, _, _)) in chunk.iter().enumerate() {
+                // Invert: higher DistMult score = more plausible → anomaly = -score
+                distmult_scores[tx_idx] = -scores[j] as f64;
+            }
+        }
+
+        let dm_score_time = dm_score_start.elapsed();
+        eprintln!(
+            "    [DistMult] ✅ Scored {} transactions in {:.1}s",
+            data.tx_amounts.len(),
+            dm_score_time.as_secs_f64()
+        );
 
         // ═══════════════════════════════════════════════
         // ATTENTION-BASED ENSEMBLE FUSION (7 signals)

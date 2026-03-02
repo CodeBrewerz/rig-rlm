@@ -242,6 +242,11 @@ pub fn train<B: AutodiffBackend>(
         let eval_metrics = if config.eval_every > 0
             && (epoch % config.eval_every == 0 || epoch == config.epochs - 1)
         {
+            eprintln!(
+                "      [Train] Starting evaluation ({} test facts vs {} entities)...",
+                test_facts.len(),
+                num_entities
+            );
             // Convert model to inner backend for evaluation (no autodiff)
             let inner_model = model.valid();
             let inner_device = inner_model
@@ -259,6 +264,7 @@ pub fn train<B: AutodiffBackend>(
                 num_entities,
                 &inner_device,
             );
+            eprintln!("      [Train] Evaluation done: MRR={:.4}", metrics.mrr);
             Some(metrics)
         } else {
             None

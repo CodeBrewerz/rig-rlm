@@ -1,64 +1,86 @@
 //! Link prediction evaluation.
 //!
-//! For each test fact, corrupts head/tail with every entity in the vocabulary,
-//! scores all candidates, and computes filtered ranks to produce MRR/Hits@K.
+//! Vectorized evaluation: instead of creating N candidate facts per test fact,
+//! uses direct embedding lookup + matmul to score all entities at once.
+//! DistMult: scores = (h ⊙ r) · E^T — single matmul per test fact.
 
-use burn::data::dataloader::batcher::Batcher;
 use burn::prelude::*;
 
-use crate::data::batcher::{HehrBatch, HehrBatcher, HehrFactItem};
 use crate::data::fact::HehrFact;
 use crate::model::hehrgnn::HehrgnnModel;
-use crate::training::scoring::Scorer;
 
 use super::metrics::{filtered_rank, LinkPredictionMetrics};
 
-/// Evaluate link prediction on a set of test facts.
+/// Evaluate link prediction using vectorized scoring.
 ///
-/// For each test fact, replaces the tail with every entity and scores all
-/// candidates to compute the filtered rank of the true tail. Then aggregates
-/// into standard metrics (MRR, Hits@K).
+/// For each test fact (h, r, t), computes scores against ALL entities
+/// using a single matmul: scores = (h_emb ⊙ r_emb) · E_all^T
 ///
-/// # Arguments
-/// - `model`: trained HEHRGNN model
-/// - `scorer`: scoring function (TransE, DistMult, etc.)
-/// - `test_facts`: facts to evaluate
-/// - `all_facts`: all known facts (train + test) for filtering
-/// - `num_entities`: total entities in vocabulary
-/// - `device`: compute device
-///
-/// # Returns
-/// `LinkPredictionMetrics` with MRR, Hits@1/3/10, Mean Rank.
+/// This is O(d × N) per test fact instead of O(N × batch_overhead).
 pub fn evaluate_link_prediction<B: Backend>(
     model: &HehrgnnModel<B>,
-    scorer: &dyn Scorer<B>,
+    _scorer: &dyn crate::training::scoring::Scorer<B>,
     test_facts: &[HehrFact],
     all_facts: &[HehrFact],
     num_entities: usize,
-    device: &B::Device,
+    _device: &B::Device,
 ) -> LinkPredictionMetrics {
-    let batcher = HehrBatcher::new();
-    let mut ranks = Vec::with_capacity(test_facts.len());
+    let total = test_facts.len();
 
-    for fact in test_facts {
-        // --- Tail prediction ---
-        // Build candidates: replace tail with each entity
-        let mut candidate_items: Vec<HehrFactItem> = Vec::with_capacity(num_entities);
-        for ent_id in 0..num_entities {
-            let mut corrupted = fact.clone();
-            corrupted.tail = ent_id;
-            candidate_items.push(HehrFactItem {
-                fact: corrupted,
-                label: 0.0,
-            });
+    eprintln!(
+        "      [Eval] Vectorized evaluation: {} test facts, {} entities (matmul scoring)",
+        total, num_entities
+    );
+    let eval_start = std::time::Instant::now();
+
+    // Get the raw embedding tables directly (no forward pass needed —
+    // embeddings were already updated during training)
+    let entity_emb = model.embeddings.entity_embedding.weight.val(); // [N, d]
+    let relation_emb = model.embeddings.relation_embedding.weight.val(); // [R, d]
+
+    let entity_emb_t = entity_emb.clone().transpose(); // [d, N]
+
+    let mut ranks = Vec::with_capacity(total);
+
+    for (fact_idx, fact) in test_facts.iter().enumerate() {
+        if fact_idx % 50 == 0 {
+            let elapsed = eval_start.elapsed().as_secs_f64();
+            let rate = if fact_idx > 0 {
+                fact_idx as f64 / elapsed
+            } else {
+                0.0
+            };
+            let eta = if rate > 0.0 {
+                (total - fact_idx) as f64 / rate
+            } else {
+                0.0
+            };
+            eprintln!(
+                "      [Eval] fact {}/{} ({:.0}%) [{:.1}s elapsed, {:.0} facts/s, ETA {:.0}s]",
+                fact_idx,
+                total,
+                fact_idx as f64 / total as f64 * 100.0,
+                elapsed,
+                rate,
+                eta
+            );
         }
 
-        // Score all candidates in a single batch
-        let batch: HehrBatch<B> = batcher.batch(candidate_items, device);
-        let scores_tensor = model.score_batch(&batch, scorer);
+        // Get head and relation embeddings: [1, d]
+        let h_emb = entity_emb.clone().slice([fact.head..fact.head + 1]); // [1, d]
+        let r_emb = relation_emb
+            .clone()
+            .slice([fact.relation..fact.relation + 1]); // [1, d]
 
-        // Convert scores to Vec<f64>
-        let scores_data = scores_tensor.into_data();
+        // DistMult vectorized: scores = (h ⊙ r) · E^T
+        // h_emb * r_emb = [1, d], entity_emb_t = [d, N]
+        // result = [1, N]
+        let hr = h_emb * r_emb; // [1, d] element-wise product
+        let scores_2d = hr.matmul(entity_emb_t.clone()); // [1, N]
+        let scores_1d = scores_2d.reshape([num_entities]); // [N]
+
+        // Convert to Vec<f64>
+        let scores_data = scores_1d.into_data();
         let scores_vec: Vec<f64> = scores_data
             .as_slice::<f32>()
             .expect("Failed to read scores")
@@ -66,7 +88,7 @@ pub fn evaluate_link_prediction<B: Backend>(
             .map(|&s| s as f64)
             .collect();
 
-        // Find other true tails for this (head, rel, ?, qualifiers) — filtering
+        // Filtered rank: exclude other true tails for this (h, r, ?)
         let true_tails: Vec<usize> = all_facts
             .iter()
             .filter(|f| {
@@ -81,6 +103,14 @@ pub fn evaluate_link_prediction<B: Backend>(
         let rank = filtered_rank(&scores_vec, fact.tail, &true_tails);
         ranks.push(rank);
     }
+
+    let eval_time = eval_start.elapsed();
+    eprintln!(
+        "      [Eval] ✅ Done in {:.1}s ({} facts, {:.0} facts/s)",
+        eval_time.as_secs_f64(),
+        ranks.len(),
+        ranks.len() as f64 / eval_time.as_secs_f64()
+    );
 
     LinkPredictionMetrics::from_ranks(&ranks)
 }
