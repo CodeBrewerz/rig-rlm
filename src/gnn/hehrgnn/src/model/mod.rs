@@ -9,6 +9,7 @@ pub mod hehrgnn;
 pub mod jepa;
 pub mod lora;
 pub mod mhc;
+pub mod pc;
 pub mod probe;
 pub mod rgcn;
 pub mod trainer;

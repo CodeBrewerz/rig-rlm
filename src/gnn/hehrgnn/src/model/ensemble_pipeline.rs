@@ -68,6 +68,8 @@ pub struct PipelineReport {
     pub post_train_auc: f32,
     pub models_saved: Vec<String>,
     pub scorer_saved: bool,
+    /// GEPA auto-tune report (if tuning ran this cycle).
+    pub gepa_auto_tune: Option<crate::optimizer::gepa::AutoTuneReport>,
 }
 
 /// Plain embeddings for serialization/cross-model use.
@@ -116,6 +118,7 @@ pub fn run_pipeline(
         post_train_auc: 0.0,
         models_saved: Vec::new(),
         scorer_saved: false,
+        gepa_auto_tune: None,
     };
 
     let mut all_embeddings: HashMap<String, PlainEmbeddings> = HashMap::new();
@@ -200,15 +203,38 @@ pub fn run_pipeline(
 
     // ── 2. RGCN + mHC + JEPA (best combo: +4.2% AUC) ──
     // Use mHC-enhanced RGCN with 8 layers + 4 streams for depth without over-smoothing
-    let mhc_rgcn_model = MhcRgcnConfig {
-        in_dim: config.hidden_dim,
-        hidden_dim: config.hidden_dim,
-        num_layers: 8,
-        num_bases: 4,
-        n_streams: 4,
-        dropout: 0.0,
-    }
-    .init::<B>(&node_types, &edge_types, &device);
+    let mhc_rgcn_model = {
+        let fresh = MhcRgcnConfig {
+            in_dim: config.hidden_dim,
+            hidden_dim: config.hidden_dim,
+            num_layers: 8,
+            num_bases: 4,
+            n_streams: 4,
+            dropout: 0.0,
+        }
+        .init::<B>(&node_types, &edge_types, &device);
+
+        if let Some((loaded, _)) = load_model(
+            MhcRgcnConfig {
+                in_dim: config.hidden_dim,
+                hidden_dim: config.hidden_dim,
+                num_layers: 8,
+                num_bases: 4,
+                n_streams: 4,
+                dropout: 0.0,
+            }
+            .init::<B>(&node_types, &edge_types, &device),
+            "rgcn_mhc",
+            gh,
+            &device,
+        ) {
+            report.models_loaded_from_checkpoint.push("rgcn_mhc".into());
+            eprintln!("  [pipeline] Loaded RGCN mHC checkpoint");
+            loaded
+        } else {
+            fresh
+        }
+    };
 
     // Train with JEPA (InfoNCE + uniformity)
     let rgcn_fwd = |g: &HeteroGraph<B>| -> NodeEmbeddings<B> { mhc_rgcn_model.forward(g) };
@@ -444,6 +470,227 @@ pub fn run_pipeline(
         },
     );
     report.models_saved.push("hehrgnn".into());
+
+    // ── 6. GEPA Auto-Tune: self-improve fiduciary weights on every run ──
+    // Uses real SAGE embeddings + anomaly scores from this pipeline run.
+    // Runs a few quick NumericMutator evals (~50ms each), no LLM needed.
+    {
+        use crate::eval::fiduciary::*;
+        use crate::optimizer::gepa;
+
+        let weights_path = gepa::GEPA_WEIGHTS_PATH;
+
+        // Use SAGE embeddings (primary model) for fiduciary evaluation
+        if let Some(sage_embs) = all_embeddings.get("graphsage") {
+            // Build anomaly scores from SAGE embeddings (use embedding norms as proxy)
+            let mut anomaly_map: HashMap<String, Vec<f32>> = HashMap::new();
+            for (node_type, vecs) in &sage_embs.data {
+                let scores: Vec<f32> = vecs
+                    .iter()
+                    .map(|v| {
+                        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        // Normalize to [0, 1] — higher norm → more anomalous
+                        (norm / (config.hidden_dim as f32).sqrt()).clamp(0.0, 1.0)
+                    })
+                    .collect();
+                anomaly_map.insert(node_type.clone(), scores);
+            }
+            let mut anomaly_scores_map: HashMap<String, HashMap<String, Vec<f32>>> = HashMap::new();
+            anomaly_scores_map.insert("SAGE".to_string(), anomaly_map.clone());
+
+            // Build node names/counts from embeddings
+            let mut emb_data: HashMap<String, Vec<Vec<f32>>> = HashMap::new();
+            let mut node_names_map: HashMap<String, Vec<String>> = HashMap::new();
+            let mut node_counts_map: HashMap<String, usize> = HashMap::new();
+
+            for (node_type, vecs) in &sage_embs.data {
+                emb_data.insert(node_type.clone(), vecs.clone());
+                let type_names: Vec<String> = (0..vecs.len())
+                    .map(|i| format!("{}_{}", node_type, i))
+                    .collect();
+                node_counts_map.insert(node_type.clone(), vecs.len());
+                node_names_map.insert(node_type.clone(), type_names);
+            }
+
+            // Build edges from facts
+            let mut edge_map: HashMap<(String, String, String), Vec<(usize, usize)>> =
+                HashMap::new();
+            let mut fact_name_to_id: HashMap<(String, String), usize> = HashMap::new();
+
+            for fact in facts {
+                let src_key = (fact.src.0.clone(), fact.src.1.clone());
+                let src_id = {
+                    let names = node_names_map
+                        .entry(fact.src.0.clone())
+                        .or_insert_with(Vec::new);
+                    *fact_name_to_id.entry(src_key).or_insert_with(|| {
+                        let id = names.len();
+                        names.push(fact.src.1.clone());
+                        id
+                    })
+                };
+                let dst_key = (fact.dst.0.clone(), fact.dst.1.clone());
+                let dst_id = {
+                    let names = node_names_map
+                        .entry(fact.dst.0.clone())
+                        .or_insert_with(Vec::new);
+                    *fact_name_to_id.entry(dst_key).or_insert_with(|| {
+                        let id = names.len();
+                        names.push(fact.dst.1.clone());
+                        id
+                    })
+                };
+                edge_map
+                    .entry((
+                        fact.src.0.clone(),
+                        fact.relation.clone(),
+                        fact.dst.0.clone(),
+                    ))
+                    .or_insert_with(Vec::new)
+                    .push((src_id, dst_id));
+            }
+
+            // Update node counts from the fact-based name map
+            for (nt, names) in &node_names_map {
+                node_counts_map.insert(nt.clone(), names.len());
+            }
+
+            // Find user type and create evaluator
+            let user_type = if node_names_map.contains_key("user") {
+                "user"
+            } else if node_names_map.contains_key("persona") {
+                "persona"
+            } else {
+                "" // Will skip auto-tune if no user type found
+            };
+
+            if !user_type.is_empty() && emb_data.contains_key(user_type) {
+                let user_count = emb_data.get(user_type).map(|v| v.len()).unwrap_or(0);
+
+                if user_count > 0 {
+                    // Create a ranking evaluator: for each user, run recommend()
+                    // and score by how well anomalous entities rank above safe ones
+                    struct PipelineEvaluator {
+                        emb_data: HashMap<String, Vec<Vec<f32>>>,
+                        anomaly_scores: HashMap<String, HashMap<String, Vec<f32>>>,
+                        edge_map: HashMap<(String, String, String), Vec<(usize, usize)>>,
+                        node_names: HashMap<String, Vec<String>>,
+                        node_counts: HashMap<String, usize>,
+                        user_type: String,
+                        user_count: usize,
+                        hidden_dim: usize,
+                    }
+
+                    impl gepa::Evaluator for PipelineEvaluator {
+                        fn evaluate(&self, candidate: &gepa::Candidate) -> gepa::EvalResult {
+                            let weights = [
+                                candidate.get_f32("cost_weight", 0.25),
+                                candidate.get_f32("risk_weight", 0.25),
+                                candidate.get_f32("goal_weight", 0.15),
+                                candidate.get_f32("urgency_weight", 0.15),
+                                0.10, // conflict
+                                0.10, // reversibility
+                            ];
+
+                            let mut total_score = 0.0f64;
+                            let mut user_eval_count = 0;
+
+                            for uid in 0..self.user_count.min(5) {
+                                let user_emb = self
+                                    .emb_data
+                                    .get(&self.user_type)
+                                    .and_then(|v| v.get(uid))
+                                    .cloned()
+                                    .unwrap_or(vec![0.0; self.hidden_dim]);
+
+                                let ctx = FiduciaryContext {
+                                    user_emb: &user_emb,
+                                    embeddings: &self.emb_data,
+                                    anomaly_scores: &self.anomaly_scores,
+                                    edges: &self.edge_map,
+                                    node_names: &self.node_names,
+                                    node_counts: &self.node_counts,
+                                    user_type: self.user_type.clone(),
+                                    user_id: uid,
+                                    hidden_dim: self.hidden_dim,
+                                };
+
+                                let resp = recommend(&ctx, None);
+                                if resp.recommendations.is_empty() {
+                                    continue;
+                                }
+
+                                // Score: do high-score recs correspond to high-anomaly targets?
+                                let recs = &resp.recommendations;
+                                let rec_count = recs.len();
+                                let top_third = rec_count / 3;
+
+                                // Metric 1: Top-third recommendations should have higher scores
+                                let top_avg: f64 = recs[..top_third.max(1)]
+                                    .iter()
+                                    .map(|r| r.fiduciary_score as f64)
+                                    .sum::<f64>()
+                                    / top_third.max(1) as f64;
+
+                                // Metric 2: Score separation between recommendable and non-recommendable
+                                let rec_scores: Vec<f64> = recs
+                                    .iter()
+                                    .filter(|r| r.is_recommended)
+                                    .map(|r| r.fiduciary_score as f64)
+                                    .collect();
+                                let non_rec_scores: Vec<f64> = recs
+                                    .iter()
+                                    .filter(|r| !r.is_recommended)
+                                    .map(|r| r.fiduciary_score as f64)
+                                    .collect();
+
+                                let separation =
+                                    if !rec_scores.is_empty() && !non_rec_scores.is_empty() {
+                                        let avg_rec = rec_scores.iter().sum::<f64>()
+                                            / rec_scores.len() as f64;
+                                        let avg_non = non_rec_scores.iter().sum::<f64>()
+                                            / non_rec_scores.len() as f64;
+                                        (avg_rec - avg_non).max(0.0)
+                                    } else {
+                                        0.0
+                                    };
+
+                                total_score += top_avg * 0.6 + separation * 0.4;
+                                user_eval_count += 1;
+                            }
+
+                            let score = if user_eval_count > 0 {
+                                total_score / user_eval_count as f64
+                            } else {
+                                0.0
+                            };
+
+                            let mut si = gepa::SideInfo::new();
+                            si.score("users_evaluated", user_eval_count as f64);
+                            gepa::EvalResult {
+                                score,
+                                side_info: si,
+                            }
+                        }
+                    }
+
+                    let evaluator = PipelineEvaluator {
+                        emb_data,
+                        anomaly_scores: anomaly_scores_map,
+                        edge_map,
+                        node_names: node_names_map,
+                        node_counts: node_counts_map,
+                        user_type: user_type.to_string(),
+                        user_count,
+                        hidden_dim: config.hidden_dim,
+                    };
+
+                    let tune_report = gepa::auto_tune_weights(&evaluator, weights_path, 5);
+                    report.gepa_auto_tune = Some(tune_report);
+                }
+            }
+        }
+    }
 
     (report, all_embeddings)
 }

@@ -291,7 +291,7 @@ fn test_multimillionaire_gets_prudent_not_reckless_advice() {
         hidden_dim: 8,
     };
 
-    let response = recommend(&ctx);
+    let response = recommend(&ctx, None);
     let recommended: Vec<&FiduciaryRecommendation> = response
         .recommendations
         .iter()
@@ -398,7 +398,7 @@ fn test_lottery_winner_gets_protective_not_spend_all_advice() {
         hidden_dim: 8,
     };
 
-    let response = recommend(&ctx);
+    let response = recommend(&ctx, None);
     let recommended: Vec<&FiduciaryRecommendation> = response
         .recommendations
         .iter()
@@ -484,7 +484,7 @@ fn test_retiree_aggressive_risk_gets_conservative_fiduciary() {
         hidden_dim: 8,
     };
 
-    let response = recommend(&ctx);
+    let response = recommend(&ctx, None);
     let recommended: Vec<&FiduciaryRecommendation> = response
         .recommendations
         .iter()
@@ -616,7 +616,7 @@ fn test_wealthy_with_anomalous_activity_gets_investigation() {
         hidden_dim: dim,
     };
 
-    let response = recommend(&ctx);
+    let response = recommend(&ctx, None);
     let recommended: Vec<&FiduciaryRecommendation> = response
         .recommendations
         .iter()
@@ -702,7 +702,7 @@ fn test_financially_complete_user_still_gets_maintenance_advice() {
         hidden_dim: 8,
     };
 
-    let response = recommend(&ctx);
+    let response = recommend(&ctx, None);
     let recommended: Vec<&FiduciaryRecommendation> = response
         .recommendations
         .iter()

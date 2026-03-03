@@ -146,7 +146,7 @@ pub fn run_scenario(scenario: &BenchmarkScenario) -> ScenarioResult {
         hidden_dim: scenario.context.hidden_dim,
     };
 
-    let response = recommend(&ctx);
+    let response = recommend(&ctx, None);
     let recs = &response.recommendations;
 
     let mut violations = Vec::new();

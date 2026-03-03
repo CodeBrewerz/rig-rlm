@@ -253,9 +253,14 @@ pub struct FiduciaryAxes {
 }
 
 impl FiduciaryAxes {
-    /// Weighted fiduciary score.
+    /// Weighted fiduciary score using default weights.
     pub fn score(&self) -> f32 {
-        let weights = [0.25, 0.25, 0.15, 0.15, 0.10, 0.10];
+        self.score_with_weights(&DEFAULT_AXES_WEIGHTS)
+    }
+
+    /// Weighted fiduciary score using GEPA-optimized weights.
+    /// Weight order: [cost, risk, goal, urgency, conflict, reversibility].
+    pub fn score_with_weights(&self, weights: &[f32; 6]) -> f32 {
         let values = [
             self.cost_reduction,
             self.risk_reduction,
@@ -265,6 +270,38 @@ impl FiduciaryAxes {
             self.reversibility,
         ];
         weights.iter().zip(values.iter()).map(|(w, v)| w * v).sum()
+    }
+}
+
+/// Default fiduciary axes weights (used when no GEPA-optimized weights are available).
+pub const DEFAULT_AXES_WEIGHTS: [f32; 6] = [0.25, 0.25, 0.15, 0.15, 0.10, 0.10];
+
+/// Default GNN/PC blend weights.
+pub const DEFAULT_GNN_WEIGHT: f32 = 0.7;
+pub const DEFAULT_PC_WEIGHT: f32 = 0.3;
+
+/// Path where GEPA saves optimized weights.
+pub const GEPA_WEIGHTS_PATH: &str = "gepa_weights.json";
+
+/// Load GNN/PC blend weights from GEPA-optimized config, or use defaults.
+pub fn load_blend_weights() -> (f32, f32) {
+    use crate::optimizer::gepa::OptimizedWeights;
+    let w = OptimizedWeights::load_or_default(GEPA_WEIGHTS_PATH);
+    if w.total_evals > 0 {
+        (w.gnn_weight, w.pc_weight)
+    } else {
+        (DEFAULT_GNN_WEIGHT, DEFAULT_PC_WEIGHT)
+    }
+}
+
+/// Load fiduciary axes weights from GEPA-optimized config, or use defaults.
+pub fn load_axes_weights() -> [f32; 6] {
+    use crate::optimizer::gepa::OptimizedWeights;
+    let w = OptimizedWeights::load_or_default(GEPA_WEIGHTS_PATH);
+    if w.total_evals > 0 {
+        w.axes_weights()
+    } else {
+        DEFAULT_AXES_WEIGHTS
     }
 }
 
@@ -293,6 +330,10 @@ pub struct FiduciaryRecommendation {
     pub reasoning: String,
     /// Is this action recommended or just informational?
     pub is_recommended: bool,
+    /// PC circuit analysis: calibrated risk, lift factors, counterfactuals.
+    /// `None` if PC training data is insufficient.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pc_analysis: Option<crate::model::pc::fiduciary_pc::PcAnalysis>,
 }
 
 /// Full fiduciary response.
@@ -314,6 +355,11 @@ pub struct FiduciaryResponse {
     /// SAE interpretability explanation (if SAE is trained).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sae_explanation: Option<crate::eval::sae::SaeExplanation>,
+    /// Whether the PC circuit was trained and used for this response.
+    pub pc_trained: bool,
+    /// PC EM log-likelihood (higher = better fit to data).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pc_em_ll: Option<f64>,
 }
 
 /// Context needed for fiduciary scoring.
@@ -337,42 +383,116 @@ pub struct FiduciaryContext<'a> {
     pub hidden_dim: usize,
 }
 
+/// Persistent PC circuit state for self-learning across recommend() calls.
+///
+/// The caller owns this and passes `&mut PcState` to `recommend()` across
+/// multiple calls. The circuit accumulates learning — each call runs a few
+/// incremental EM epochs on the existing circuit rather than rebuilding.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PcState {
+    /// The trained circuit (None = needs initial build).
+    pub circuit: Option<crate::model::pc::circuit::CompiledCircuit>,
+    /// Total EM epochs trained so far.
+    pub total_epochs: usize,
+    /// Log-likelihood history across calls.
+    pub ll_history: Vec<f64>,
+}
+
+impl PcState {
+    /// Create a new empty PcState (circuit will be built on first recommend() call).
+    pub fn new() -> Self {
+        Self {
+            circuit: None,
+            total_epochs: 0,
+            ll_history: Vec::new(),
+        }
+    }
+
+    /// Whether the circuit has been trained.
+    pub fn is_trained(&self) -> bool {
+        self.circuit.is_some()
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Action Candidate Generation — driven by TQL ontology relations
 // ═══════════════════════════════════════════════════════════════
 
-/// Generate candidate actions by scanning the user's graph neighborhood.
+/// Generate candidate actions by BFS-traversing the user's graph neighborhood.
+///
+/// Uses generic breadth-first search up to `MAX_DEPTH` hops from the user node.
+/// This automatically discovers all reachable entities regardless of the TQL schema
+/// topology — no need to manually specify hop counts per entity type.
+///
+/// Typical traversal paths:
+/// - depth 1: user → account, goal, budget, tax-obligation, asset, recurring
+/// - depth 2: account → obligation, merchant, transaction, reconciliation
+/// - depth 3: obligation → rate (refinance), obligation → asset (lien)
 pub fn generate_candidates(ctx: &FiduciaryContext) -> Vec<(FiduciaryActionType, String, usize)> {
-    let mut candidates = Vec::new();
+    /// Maximum BFS depth from user node.
+    /// 3 covers: user→account→obligation→rate (the deepest common chain).
+    /// Increase if schema has deeper fiduciary-relevant chains.
+    const MAX_DEPTH: usize = 3;
 
-    // Find all entities connected to this user
-    for ((src_type, relation, dst_type), edge_list) in ctx.edges {
-        // User as source
-        if src_type == &ctx.user_type {
-            for &(src_id, dst_id) in edge_list {
-                if src_id == ctx.user_id {
-                    // Skip dead nodes (zeroed embeddings = soft-deleted entities)
-                    if is_dead_node(ctx, dst_type, dst_id) {
-                        continue;
-                    }
-                    let actions = infer_actions(relation, dst_type, ctx, dst_id);
-                    for action in actions {
-                        candidates.push((action, dst_type.clone(), dst_id));
+    let mut candidates = Vec::new();
+    let mut visited: std::collections::HashSet<(String, usize)> = std::collections::HashSet::new();
+
+    // BFS frontier: (node_type, node_id, current_depth)
+    let mut frontier: std::collections::VecDeque<(String, usize, usize)> =
+        std::collections::VecDeque::new();
+
+    // Seed with user
+    visited.insert((ctx.user_type.clone(), ctx.user_id));
+    frontier.push_back((ctx.user_type.clone(), ctx.user_id, 0));
+
+    while let Some((cur_type, cur_id, depth)) = frontier.pop_front() {
+        if depth >= MAX_DEPTH {
+            continue;
+        }
+
+        // Scan all edges where current node is src or dst
+        for ((src_type, relation, dst_type), edge_list) in ctx.edges {
+            // Current node as source
+            if src_type == &cur_type {
+                for &(src_id, dst_id) in edge_list {
+                    if src_id == cur_id {
+                        let neighbor_key = (dst_type.clone(), dst_id);
+                        if visited.contains(&neighbor_key) {
+                            continue;
+                        }
+                        if is_dead_node(ctx, dst_type, dst_id) {
+                            continue;
+                        }
+                        visited.insert(neighbor_key);
+                        frontier.push_back((dst_type.clone(), dst_id, depth + 1));
+
+                        // Infer actions on the discovered entity
+                        let actions = infer_actions(relation, dst_type, ctx, dst_id);
+                        for action in actions {
+                            candidates.push((action, dst_type.clone(), dst_id));
+                        }
                     }
                 }
             }
-        }
-        // User as destination
-        if dst_type == &ctx.user_type {
-            for &(src_id, dst_id) in edge_list {
-                if dst_id == ctx.user_id {
-                    // Skip dead nodes
-                    if is_dead_node(ctx, src_type, src_id) {
-                        continue;
-                    }
-                    let actions = infer_actions(relation, src_type, ctx, src_id);
-                    for action in actions {
-                        candidates.push((action, src_type.clone(), src_id));
+            // Current node as destination
+            if dst_type == &cur_type {
+                for &(src_id, dst_id) in edge_list {
+                    if dst_id == cur_id {
+                        let neighbor_key = (src_type.clone(), src_id);
+                        if visited.contains(&neighbor_key) {
+                            continue;
+                        }
+                        if is_dead_node(ctx, src_type, src_id) {
+                            continue;
+                        }
+                        visited.insert(neighbor_key);
+                        frontier.push_back((src_type.clone(), src_id, depth + 1));
+
+                        // Infer actions on the discovered entity
+                        let actions = infer_actions(relation, src_type, ctx, src_id);
+                        for action in actions {
+                            candidates.push((action, src_type.clone(), src_id));
+                        }
                     }
                 }
             }
@@ -784,7 +904,11 @@ pub fn score_action(
 // ═══════════════════════════════════════════════════════════════
 
 /// Build the full fiduciary recommendation set for a user.
-pub fn recommend(ctx: &FiduciaryContext) -> FiduciaryResponse {
+///
+/// Pass `Some(&mut pc_state)` for self-learning: the circuit will resume
+/// EM training from its previous state rather than rebuilding from scratch.
+/// Pass `None` for one-shot mode (fresh circuit each time).
+pub fn recommend(ctx: &FiduciaryContext, mut pc_state: Option<&mut PcState>) -> FiduciaryResponse {
     let candidates = generate_candidates(ctx);
 
     let user_name = ctx
@@ -840,12 +964,98 @@ pub fn recommend(ctx: &FiduciaryContext) -> FiduciaryResponse {
                 target_anomaly_score,
                 reasoning,
                 is_recommended: fiduciary_score >= 0.3,
+                pc_analysis: None,
             }
         })
         .collect();
 
     // Sort by fiduciary score (highest first)
     recommendations.sort_by(|a, b| b.fiduciary_score.partial_cmp(&a.fiduciary_score).unwrap());
+
+    // ── PC Circuit: train/resume from graph features and enrich recommendations ──
+    use crate::model::pc::{
+        bridge,
+        em::{train_em, EmConfig},
+        fiduciary_pc,
+    };
+    let training_data = bridge::generate_training_data(
+        ctx.anomaly_scores,
+        ctx.embeddings,
+        ctx.edges,
+        &ctx.node_counts,
+        ctx.user_emb,
+    );
+    let (pc_trained, pc_em_ll) = if training_data.len() >= 5 {
+        // Convert to evidence format for EM
+        let evidence: Vec<Vec<Option<usize>>> = training_data
+            .iter()
+            .map(|obs| obs.iter().map(|&v| Some(v)).collect())
+            .collect();
+
+        // Try to extract existing circuit from PcState for resume
+        let existing_circuit = pc_state.as_mut().and_then(|s| s.circuit.take());
+
+        let (mut circuit, final_ll, epochs_this_call) = if let Some(mut prev) = existing_circuit {
+            // Resume: continue EM on existing circuit (5 incremental epochs)
+            let em_config = EmConfig {
+                step_size: 0.05, // smaller step for fine-tuning
+                pseudocount: 0.01,
+                epochs: 5,
+            };
+            let report = train_em(&mut prev, &evidence, &em_config);
+            (prev, report.final_ll, 5usize)
+        } else {
+            // Fresh build: full HCLT + 30 EM epochs
+            let (c, report) = bridge::build_fiduciary_pc(&training_data, 30);
+            (c, report.final_ll, 30usize)
+        };
+
+        // Run PC analysis per recommendation
+        for rec in &mut recommendations {
+            let degree =
+                bridge::count_node_edges(ctx.edges, &rec.target_node_type, rec.target_node_id);
+            let analysis = fiduciary_pc::analyze(
+                &mut circuit,
+                rec.target_anomaly_score,
+                rec.embedding_affinity,
+                degree,
+                rec.fiduciary_score,
+            );
+            rec.pc_analysis = Some(analysis);
+        }
+
+        // Write back to PcState for persistence
+        if let Some(state) = pc_state {
+            state.total_epochs += epochs_this_call;
+            state.ll_history.push(final_ll);
+            state.circuit = Some(circuit);
+        }
+
+        (true, Some(final_ll))
+    } else {
+        (false, None)
+    };
+
+    // ── PC Risk Blending: merge calibrated PC risk into fiduciary score ──
+    // Formula: final = α × gnn_score + (1-α) × pc_risk_adjusted
+    // pc_risk is P(risky) ∈ [0,1]; we scale it to match GNN score range.
+    // Higher PC risk → higher final score (action is more urgent).
+    if pc_trained {
+        let (alpha, beta) = load_blend_weights();
+        for rec in &mut recommendations {
+            if let Some(ref analysis) = rec.pc_analysis {
+                let pc_risk = analysis.risk_probability as f32;
+                // Scale PC risk to GNN score range: pc_risk ∈ [0,1], gnn ∈ [0,~1]
+                // Blend: keep GNN base but boost/penalize based on PC calibrated risk
+                let gnn_score = rec.fiduciary_score;
+                let blended = alpha * gnn_score + beta * pc_risk;
+                rec.fiduciary_score = blended;
+                rec.is_recommended = blended >= 0.3;
+            }
+        }
+        // Re-sort after blending (PC risk may change relative order)
+        recommendations.sort_by(|a, b| b.fiduciary_score.partial_cmp(&a.fiduciary_score).unwrap());
+    }
 
     // ── Fiduciary conflict suppression ──
     // Principle: "Don't invest while you're on fire."
@@ -937,6 +1147,8 @@ pub fn recommend(ctx: &FiduciaryContext) -> FiduciaryResponse {
             "Graph Transformer".into(),
         ],
         sae_explanation: None,
+        pc_trained,
+        pc_em_ll,
     }
 }
 
@@ -944,7 +1156,7 @@ pub fn recommend(ctx: &FiduciaryContext) -> FiduciaryResponse {
 // Helper functions
 // ═══════════════════════════════════════════════════════════════
 
-fn get_anomaly_score(ctx: &FiduciaryContext, target_type: &str, target_id: usize) -> f32 {
+pub fn get_anomaly_score(ctx: &FiduciaryContext, target_type: &str, target_id: usize) -> f32 {
     ctx.anomaly_scores
         .values()
         .next()
@@ -954,7 +1166,7 @@ fn get_anomaly_score(ctx: &FiduciaryContext, target_type: &str, target_id: usize
         .unwrap_or(0.0)
 }
 
-fn get_embedding_affinity(ctx: &FiduciaryContext, target_type: &str, target_id: usize) -> f32 {
+pub fn get_embedding_affinity(ctx: &FiduciaryContext, target_type: &str, target_id: usize) -> f32 {
     ctx.embeddings
         .get(target_type)
         .and_then(|vecs| vecs.get(target_id))

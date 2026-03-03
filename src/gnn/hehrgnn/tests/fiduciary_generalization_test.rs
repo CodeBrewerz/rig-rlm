@@ -479,7 +479,7 @@ fn generate_and_evaluate(archetype: UserArchetype, user_id: usize, dim: usize) -
         hidden_dim: dim,
     };
 
-    let response = recommend(&ctx);
+    let response = recommend(&ctx, None);
 
     // Compute financial freedom metrics
     let recommended_types: Vec<String> = response

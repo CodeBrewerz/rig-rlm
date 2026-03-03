@@ -494,7 +494,7 @@ fn test_full_recommendation_pipeline() {
         hidden_dim: 8,
     };
 
-    let response = recommend(&ctx);
+    let response = recommend(&ctx, None);
 
     println!("\n  ── FIDUCIARY RECOMMENDATIONS ──\n");
     println!(

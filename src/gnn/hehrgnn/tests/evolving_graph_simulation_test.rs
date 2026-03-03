@@ -743,7 +743,7 @@ fn test_100_iteration_evolving_graph() {
 
         // Run fiduciary recommender on current graph state
         let ctx = graph.fiduciary_context();
-        let response = recommend(&ctx);
+        let response = recommend(&ctx, None);
 
         let rec_types: Vec<String> = response
             .recommendations

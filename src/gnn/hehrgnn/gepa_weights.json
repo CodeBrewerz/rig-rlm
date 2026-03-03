@@ -1,0 +1,13 @@
+{
+  "gnn_weight": 0.7,
+  "pc_weight": 0.3,
+  "cost_weight": 0.25,
+  "risk_weight": 0.25,
+  "goal_weight": 0.15,
+  "urgency_weight": 0.15,
+  "conflict_weight": 0.1,
+  "reversibility_weight": 0.1,
+  "score": 0.0,
+  "optimized_at": "",
+  "total_evals": 75
+}

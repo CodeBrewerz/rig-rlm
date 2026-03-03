@@ -1,245 +1,446 @@
-# Finverse GNN Platform (`hehrgnn`)
+# HEHRGNN — Heterogeneous Entity-Hyper-Relational Graph Neural Network
 
-A relational Graph Neural Network platform for finance graph intelligence, built in Rust with [Burn 0.20](https://burn.dev).
+> Finverse GNN Platform: relational graph intelligence for finance, built on [Burn](https://burn.dev/).
 
-## Architecture
+## Quick Start
+
+```bash
+# All commands run from the repo root
+cd rig-rlm
+
+# Run all unit + integration tests (skips LLM tests)
+cargo test -p hehrgnn
+
+# Run a specific test
+cargo test -p hehrgnn --test ensemble_pipeline_test -- --nocapture
+
+# Run the full ensemble pipeline (4 GNN models + GEPA auto-tune)
+cargo test -p hehrgnn --test ensemble_100k_test -- --nocapture
+
+# Start the HTTP server (MCP/A2A)
+cargo run -p hehrgnn --bin hehrgnn-server
+```
+
+## Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     Data Layer                              │
-│  TQL Schema → HeteroGraph → Neighbor Sampler → Mini-Batch  │
-├─────────────────────────────────────────────────────────────┤
-│                   GNN Backbones                             │
-│        GraphSAGE  │  RGCN  │  HEHRGNN (hyperedge)          │
-├─────────────────────────────────────────────────────────────┤
-│                    Task Heads                               │
-│  LinkPredictor │ NodeClassifier │ AnomalyScorer             │
-├─────────────────────────────────────────────────────────────┤
-│              Ingest + Feedback + API                        │
-│  JSON Loader │ FeedbackStore │ axum HTTP Server             │
-└─────────────────────────────────────────────────────────────┘
+GraphFacts (TQL triples)
+    │
+    ▼
+┌─────────────────────────────────────────┐
+│  Graph Builder (data/)                  │
+│  TQL → HeteroGraph<B> with node feats   │
+└─────────────────┬───────────────────────┘
+                  │
+    ┌─────────────┼─────────────┬──────────────┐
+    ▼             ▼             ▼              ▼
+┌────────┐  ┌──────────┐  ┌────────┐    ┌──────────┐
+│GraphSAGE│  │RGCN (mHC)│  │  GAT   │    │GPS Trans.│
+│+ DoRA   │  │8L×4 str. │  │4-head  │    │4-head FFN│
+└────┬───┘  └────┬─────┘  └───┬────┘    └────┬─────┘
+     └────────┬──┴────────────┴───────────────┘
+              ▼
+     Ensemble Embeddings (per node type)
+              │
+     ┌────────┼──────────────┐
+     ▼        ▼              ▼
+┌─────────┐ ┌──────────┐ ┌──────────────┐
+│Anomaly  │ │Fiduciary │ │Probabilistic │
+│Detection│ │Engine    │ │Circuit (PC)  │
+│(SAGE)   │ │18 actions│ │risk calibrate│
+└─────────┘ └────┬─────┘ └──────┬───────┘
+                 └───────┬──────┘
+                         ▼
+              Fiduciary Recommendations
+              (ranked, PC-calibrated)
+                         │
+                         ▼
+              ┌─────────────────────┐
+              │ GEPA Auto-Tune      │
+              │ Self-improves every  │
+              │ pipeline run         │
+              └─────────────────────┘
 ```
 
-## Modules
+## Project Structure
 
-### `data/` — Graph Data Layer
+```
+src/gnn/hehrgnn/
+├── Cargo.toml
+├── src/
+│   ├── main.rs                    # CLI binary
+│   ├── server_main.rs             # HTTP server binary (MCP/A2A)
+│   ├── lib.rs                     # Library root
+│   │
+│   ├── data/                      # Graph data layer
+│   │   ├── graph_builder.rs       # TQL facts → HeteroGraph<B>
+│   │   ├── hetero_graph.rs        # Core heterogeneous graph struct
+│   │   ├── fact.rs                # HehrFact triple representation
+│   │   ├── batcher.rs             # Burn DataLoader batching
+│   │   ├── negative_sampling.rs   # Negative edge sampling for training
+│   │   ├── neighbor_sampler.rs    # Mini-batch neighbor sampling
+│   │   ├── synthetic.rs           # Procedural test graph generation
+│   │   └── vocab.rs               # Entity/relation vocabularies
+│   │
+│   ├── model/                     # GNN architectures + training
+│   │   ├── graphsage.rs           # GraphSAGE (mean aggregation)
+│   │   ├── rgcn.rs                # Relational GCN (basis decomposition)
+│   │   ├── mhc.rs                 # Multi-Hop Convolution RGCN (8 layers, 4 streams)
+│   │   ├── gat.rs                 # Graph Attention Network (multi-head)
+│   │   ├── graph_transformer.rs   # GPS Transformer (global+local attention)
+│   │   ├── hehrgnn.rs             # HEHRGNN entity embedding model
+│   │   ├── gnn_layer.rs           # Shared GNN layer primitives
+│   │   ├── backbone.rs            # NodeEmbeddings output type
+│   │   ├── embedding.rs           # Embedding initialization
+│   │   ├── lora.rs                # LoRA / DoRA adapter (HeteroDoRA)
+│   │   ├── jepa.rs                # JEPA training (InfoNCE + uniformity)
+│   │   ├── trainer.rs             # Training loop: link-pred AUC, early stopping
+│   │   ├── probe.rs               # Linear probing for interpretability
+│   │   ├── weights.rs             # Model checkpoint save/load
+│   │   ├── ensemble_pipeline.rs   # Full pipeline: 5 models + GEPA auto-tune
+│   │   └── pc/                    # Probabilistic Circuit
+│   │       ├── circuit.rs         # CompiledCircuit (sum-product network)
+│   │       ├── node.rs            # Sum/Product/Leaf nodes
+│   │       ├── structure.rs       # Structure learning (CLTree + independence)
+│   │       ├── distribution.rs    # Categorical distributions
+│   │       ├── em.rs              # EM parameter learning
+│   │       ├── query.rs           # Exact inference: marginal, conditional, lift
+│   │       ├── bridge.rs          # GNN embeddings → PC training data
+│   │       └── fiduciary_pc.rs    # PC analysis: risk, lift, counterfactuals
+│   │
+│   ├── eval/                      # Evaluation & scoring
+│   │   ├── fiduciary.rs           # 18 fiduciary action types, recommend()
+│   │   ├── learnable_scorer.rs    # Thompson sampling scorer
+│   │   ├── bench.rs               # Alignment benchmark framework
+│   │   ├── metrics.rs             # AUC, Kendall τ, NDCG
+│   │   ├── probing.rs             # Feature probing (anomaly, type)
+│   │   ├── sae.rs                 # Sparse Autoencoder for interpretability
+│   │   ├── explanation.rs         # Natural language explanations
+│   │   └── evaluate.rs            # Graph-level evaluation
+│   │
+│   ├── optimizer/                 # Self-improvement
+│   │   └── gepa.rs                # GEPA optimizer: Pareto-evolutionary search
+│   │                              #   NumericMutator, LlmMutator (Trinity),
+│   │                              #   auto_tune_weights(), OptimizedWeights
+│   │
+│   ├── feedback/                  # Online learning
+│   │   ├── collector.rs           # Feedback signal collection
+│   │   └── retrainer.rs           # Incremental retraining
+│   │
+│   ├── server/                    # HTTP API
+│   │   ├── state.rs               # Server state (graph, models, pipeline)
+│   │   └── handlers.rs            # MCP/A2A request handlers
+│   │
+│   ├── ingest/                    # Data ingestion
+│   ├── training/                  # Training utilities
+│   ├── tasks/                     # Task definitions
+│   └── past_runs/                 # Run history
+│
+└── tests/                         # 47 integration tests (see below)
+```
 
-| File | Description |
-|------|-------------|
-| `hetero_graph.rs` | `HeteroGraph<B>` — typed nodes + typed edges, neighbor queries, device transfer. Burn equivalent of PyG's `HeteroData`. |
-| `graph_builder.rs` | Builds `HeteroGraph` from facts or TQL schema. Implements **transaction-as-node** pattern. |
-| `neighbor_sampler.rs` | Layer-wise typed neighbor sampling for mini-batch GNN training. |
-| `synthetic.rs` | Parses `SchemaFinverse.tql` and generates synthetic facts. |
-| `vocab.rs` | String↔ID bidirectional vocabulary mapping. |
-| `fact.rs` | `RawFact`, `HehrFact`, `Qualifier` types. |
-| `batcher.rs` | Burn `Batcher` for padded tensor batches. |
-| `negative_sampling.rs` | Contrastive corruption (head/tail/qualifier replacement). |
+## Key Concepts
 
-### `model/` — GNN Architectures
+### Graph Facts (TQL Triples)
 
-| File | Description |
-|------|-------------|
-| `backbone.rs` | `NodeEmbeddings` — unified output struct for all GNN architectures. |
-| `graphsage.rs` | **GraphSAGE** — per-edge-type message transforms → mean aggregate → concat → ReLU. |
-| `rgcn.rs` | **RGCN** — per-relation weight matrices for typed message passing. |
-| `hehrgnn.rs` | **HEHRGNN** — 3-step hyperedge message passing (Gather/Apply/Scatter). |
-| `gnn_layer.rs` | Single HEHRGNN message-passing layer. |
-| `embedding.rs` | `KgEmbedding` — entity + relation embedding tables. |
+Everything starts with `GraphFact` — a `(src_type, src_name, relation, dst_type, dst_name)` triple:
 
-### `tasks/` — Task Heads
+```rust
+GraphFact {
+    src: ("user", "alice"),
+    relation: "owns",
+    dst: ("account", "checking"),
+}
+```
 
-| File | Description |
-|------|-------------|
-| `link_predictor.rs` | MLP match scoring + BPR loss + `rank_candidates()`. |
-| `node_classifier.rs` | MLP → class logits + softmax confidence. |
-| `anomaly_scorer.rs` | Autoencoder reconstruction error for anomaly detection. |
+These get built into a `HeteroGraph<B>` with typed node features and edge indices.
 
-### `training/` — Training Pipeline
+### 4 GNN Models (Ensemble)
 
-| File | Description |
-|------|-------------|
-| `train.rs` | Mini-batch contrastive training with Adam, negative sampling, periodic eval. |
-| `scoring.rs` | TransE and DistMult scorer functions. |
-| `loss.rs` | Margin ranking loss. |
-| `observe.rs` | `MetricsLogger` (JSONL) + `generate_dashboard()` (HTML/Chart.js). |
+| Model | Key Feature | Best Config |
+|-------|-------------|-------------|
+| **GraphSAGE** | Mean aggregation + DoRA adapter | +7.9% AUC with JEPA |
+| **RGCN mHC** | 8-layer multi-hop, 4 streams | +4.2% AUC with JEPA |
+| **GAT** | 4-head attention | +9.9% AUC with JEPA |
+| **GPS Transformer** | Global + local attention | +3.8% AUC with JEPA |
 
-### `eval/` — Evaluation
+All models train with **JEPA** (InfoNCE + uniformity regularization), not standard link prediction.
 
-| File | Description |
-|------|-------------|
-| `evaluate.rs` | Link prediction: corrupt → score → filtered ranking. |
-| `metrics.rs` | MRR, Hits@K, filtered rank computation. |
+### Fiduciary Engine (18 Action Types)
 
-### `ingest/` — Real Data Ingestion
+The system generates financial recommendations across 18 action types:
 
-| File | Description |
-|------|-------------|
-| `json_loader.rs` | Load entities/relations from JSON `DataExport` format → `HeteroGraph`. |
-| `feature_engineer.rs` | Extract numeric attributes → Z-score normalize → inject as node features. |
+| Domain | Actions |
+|--------|---------|
+| **Core** | `should_investigate`, `should_avoid`, `should_pay` |
+| **Debt** | `should_refinance`, `should_pay_down_lien`, `should_dispute` |
+| **Subscriptions** | `should_cancel`, `should_review_recurring` |
+| **Goals** | `should_fund_goal`, `should_adjust_budget` |
+| **Accounts** | `should_transfer`, `should_consolidate` |
+| **Assets** | `should_revalue_asset` |
+| **Tax** | `should_prepare_tax`, `should_claim_exemption`, `should_run_tax_scenario`, `should_fund_tax_sinking` |
+| **Reconciliation** | `should_reconcile` |
 
-### `feedback/` — Feedback Loop
+### Probabilistic Circuit (PC)
 
-| File | Description |
-|------|-------------|
-| `collector.rs` | `FeedbackStore` — accepted/rejected/corrected verdicts, JSONL persistence. |
-| `retrainer.rs` | Feedback → weighted training signals, `should_retrain()` decision. |
+A sum-product network that provides:
+- **Calibrated risk probability** P(risky | features)
+- **Lift factors** (which variable drives risk)
+- **Counterfactuals** ("if anomaly drops to low, risk drops by X%")
+- **Exact inference** (no approximate sampling)
+
+### GEPA Optimizer (Self-Improvement)
+
+Genetic-Pareto optimizer that tunes parameters automatically:
+
+| Target | What It Tunes | Persistence |
+|--------|---------------|-------------|
+| **Fiduciary weights** | GNN/PC blend α/β, axes weights | `gepa_weights.json` |
+| **Training hyperparams** | lr, weight_decay, neg_ratio, perturb_frac | `/tmp/gepa_train_config.json` |
+| **Prediction thresholds** | recommend, anomaly, urgency cutoffs | `/tmp/gepa_prediction_config.json` |
+| **Auto-tune (pipeline)** | Runs 5 evals every `run_pipeline()` call | `gepa_weights.json` |
 
 ---
 
-## Reproduce All Results
+## Commands Reference
 
-### Step 1: Compile (0 errors, 0 warnings)
-
-```bash
-cargo check -p hehrgnn
-```
-
-### Step 2: Run Unit Tests (51 tests)
+### Build & Test
 
 ```bash
-cargo test -p hehrgnn 2>&1
-# Expected: 44 passed; 0 failed
+# Build the library
+cargo build -p hehrgnn
+
+# Run all tests (fast — skips LLM tests)
+cargo test -p hehrgnn
+
+# Run all tests with output
+cargo test -p hehrgnn -- --nocapture
+
+# Run a specific test file
+cargo test -p hehrgnn --test <test_name> -- --nocapture
+
+# Run a specific test function
+cargo test -p hehrgnn --test <test_file> <test_fn> -- --nocapture
+
+# Run ignored tests (LLM tests that call Trinity)
+cargo test -p hehrgnn --test <test_file> <test_fn> -- --ignored --nocapture
 ```
 
-### Step 3: Run E2E Integration Tests (7 tests with ground truth)
+### Binaries
 
 ```bash
-cargo test -p hehrgnn --test e2e_test -- --nocapture 2>&1
+# Run main CLI
+cargo run -p hehrgnn --bin hehrgnn
+
+# Run HTTP server (MCP/A2A endpoints)
+cargo run -p hehrgnn --bin hehrgnn-server
 ```
 
-Expected output:
-
-```
-  Match Ranking Results:
-    Hit@1: 2/10 (20%)
-    Hit@3: 6/10 (60%)          ← GNN ranks ground-truth matches in top 3
-
-  Anomaly Detection Results:
-    Normal tx avg L2: 0.0337
-    Outlier tx L2:    0.0612
-    Outlier / Normal: 1.82x    ← outlier detected
-
-  Multi-Model Comparison:
-    account:  GraphSAGE vs RGCN cosine = 0.21
-    tx:       GraphSAGE vs RGCN cosine = 0.25
-    ✅ Both models produce valid but different embeddings
-
-  Feedback → signals → retrain decision pipeline works ✅
-  Full ingest → graph → GNN → embeddings pipeline works ✅
-
-  test result: ok. 7 passed; 0 failed
-```
-
-### Step 4: Run HEHRGNN Training Pipeline
+### Environment Variables
 
 ```bash
-cargo run -p hehrgnn -- \
-  --schema src/gnn/SchemaFinverse.tql \
-  --epochs 5 \
-  --num-facts 200 \
-  --instances-per-type 3 \
-  --batch-size 32 \
-  --hidden-dim 16 \
-  --output /tmp/hehrgnn_run
-```
-
-Expected: loss decreases over epochs, MRR and Hits@K improve. Dashboard at `/tmp/hehrgnn_run/dashboard.html`.
-
-### Step 5: Start Prediction Server
-
-```bash
-cargo run -p hehrgnn --bin hehrgnn-server -- \
-  --port 3030 \
-  --hidden-dim 32 \
-  --num-facts 200
-```
-
-### Step 6: Test All API Endpoints
-
-```bash
-# Health check
-curl -s http://localhost:3030/health | jq
-# → {status: "ok", total_nodes: 95, total_edges: 395, node_types: [...]}
-
-# Graph info
-curl -s http://localhost:3030/graph/info | jq
-# → detailed node/edge type breakdown
-
-# Get embedding vector
-curl -s -X POST http://localhost:3030/embeddings \
-  -H 'Content-Type: application/json' \
-  -d '{"node_type": "user", "node_id": 0}' | jq
-# → {embedding: [0.17, 0.35, ...], dim: 32}
-
-# Match ranking (link prediction)
-curl -s -X POST http://localhost:3030/match/rank \
-  -H 'Content-Type: application/json' \
-  -d '{"src_type": "transaction", "src_id": 0, "dst_type": "account", "top_k": 5}' | jq
-# → {matches: [{node_id: 0, score: 0.254, rank: 1}, ...]}
-
-# Similarity search (kNN)
-curl -s -X POST http://localhost:3030/similarity/search \
-  -H 'Content-Type: application/json' \
-  -d '{"node_type": "transaction", "node_id": 0, "top_k": 5}' | jq
-# → {similar: [{node_id: 67, score: 0.999, rank: 1}, ...]}
-
-# Anomaly detection
-curl -s -X POST http://localhost:3030/anomaly/score \
-  -H 'Content-Type: application/json' \
-  -d '{"node_type": "transaction", "node_ids": [0, 1, 2, 3, 4]}' | jq
-# → {scores: [{anomaly_score: 0.05, is_anomalous: false}, ...], threshold: 0.12}
-
-# Node classification
-curl -s -X POST http://localhost:3030/classify \
-  -H 'Content-Type: application/json' \
-  -d '{"node_type": "transaction", "node_ids": [0, 1, 2]}' | jq
-# → {predictions: [{predicted_class: 4, confidence: 0.21}, ...]}
-```
-
-### Step 7: Test with Custom Schema
-
-```bash
-cargo run -p hehrgnn --bin hehrgnn-server -- \
-  --schema src/gnn/SchemaFinverse.tql \
-  --port 3030 \
-  --hidden-dim 64 \
-  --num-facts 500 \
-  --instances-per-type 10
+# Required for LLM-guided GEPA tests (Trinity via OpenRouter)
+OPENAI_API_KEY=sk-or-v1-...    # in .env file at repo root
 ```
 
 ---
 
-## Finance Use Cases
+## Test Catalog
 
-| Capability | GNN Architecture | Task Head | Example |
-|------------|-----------------|-----------|---------|
-| **Recon matching** | GraphSAGE/RGCN | LinkPredictor | `rank_matches(statement_line) → top-k cases` |
-| **Tx categorization** | GraphSAGE | NodeClassifier | `predict_category(tx) → category + confidence` |
-| **Tax code prediction** | RGCN | NodeClassifier | `predict_tax_code(case) → tax_code + confidence` |
-| **Anomaly detection** | GraphSAGE/RGCN | AnomalyScorer | `anomaly_score(tx) → score` |
-| **Receipt linking** | GraphSAGE | LinkPredictor | `rank_receipt_links(receipt) → top-k transactions` |
-| **GL allocation** | RGCN | LinkPredictor | `predict_allocation(case) → GL accounts + splits` |
+### Core Pipeline Tests
 
-## Verified Results
+| Test | Command | What It Verifies | Time |
+|------|---------|------------------|------|
+| **Ensemble Pipeline** | `--test ensemble_pipeline_test` | 3 sequential `run_pipeline()` runs prove models checkpoint, reload, and continue learning. GEPA auto-tune fires each run. | ~64s |
+| **Ensemble 100K** | `--test ensemble_100k_test` | 500 users × 47 merchants, full anomaly detection, novelty signals, HEHRGNN KG scoring. | ~24s |
 
-| Test | Result | Evidence |
-|------|--------|----------|
-| Compilation | ✅ | 0 errors, 0 warnings |
-| Unit tests | ✅ | 51 passed |
-| E2E tests | ✅ | 7 passed |
-| Match ranking | ✅ | Hit@3 = 60% (random = 20%) |
-| Anomaly detection | ✅ | Outlier 1.82× normal score |
-| Multi-model | ✅ | GraphSAGE ≠ RGCN (cosine 0.2–0.5) |
-| JSON ingest | ✅ | JSON → Graph → GNN → embeddings |
-| Feedback loop | ✅ | 3 entries → 3 signals → retrain=YES |
-| API server | ✅ | All 7 endpoints respond correctly |
+### GNN Model Tests
+
+| Test | Command | What It Verifies |
+|------|---------|------------------|
+| **GNN Training** | `--test gnn_training_test` | GraphSAGE trains, AUC improves, checkpoint save/load |
+| **JEPA Training** | `--test jepa_test` | InfoNCE + uniformity training on all 4 models |
+| **HEHRGNN JEPA** | `--test hehrgnn_jepa_test` | HEHRGNN entity embedding JEPA training |
+| **LoRA/DoRA** | `--test lora_test` | HeteroDoRA adapter training and AUC improvement |
+| **mHC RGCN** | `--test mhc_test` | Multi-hop convolution with 8 layers |
+| **Combo Features** | `--test combo_features_test` | Best model+feature combos (DoRA, JEPA, mHC) |
+| **Per-Model Sweep** | `--test per_model_sweep_test` | Hyperparameter sweep across all 4 models |
+| **Tuning** | `--test tuning_test` | Learning rate, layer count, dropout tuning |
+| **Progressive Learning** | `--test progressive_learning_test` | Multi-stage curriculum learning |
+
+### Fiduciary Tests
+
+| Test | Command | What It Verifies |
+|------|---------|------------------|
+| **Alignment Bench** | `--test fiduciary_alignment_bench_test` | 10 scenarios, ground truth, precision@K, NDCG, misalignment rate |
+| **Fiduciary Actions** | `--test fiduciary_actions_test` | All 18 action types trigger correctly |
+| **Fiduciary Scenarios** | `--test fiduciary_scenarios_test` | Complex financial scenarios produce correct recommendations |
+| **Negative Tests** | `--test fiduciary_negative_test` | System does NOT recommend harmful actions |
+| **Schema Validation** | `--test fiduciary_schema_validation_test` | Output schema correctness |
+| **Generalization** | `--test fiduciary_generalization_test` | Works across varied graph topologies |
+| **Model Comparison** | `--test fiduciary_model_comparison_test` | Compare fiduciary quality across GNN models |
+| **Recommendations** | `--test scenario_recommendations_test` | End-to-end recommendation pipeline |
+
+### Probabilistic Circuit Tests
+
+| Test | Command | What It Verifies |
+|------|---------|------------------|
+| **PC Fiduciary** | `--test pc_fiduciary_test` | PC analysis on all 18 action types, lift, counterfactuals, 10 checks |
+| **Large Graph PC** | `--test large_graph_pc_test` | 130+ entities, 5 risk profiles, PC risk differentiation |
+| **Rich PC Comparison** | `--test rich_pc_comparison_test` | PC vs naive anomaly scoring comparison |
+| **Circuit Self-Learning** | `--test circuit_self_learning_test` | PC EM training improves with more data |
+
+### GEPA Optimizer Tests
+
+| Test | Command | What It Verifies |
+|------|---------|------------------|
+| **Fiduciary Weights** | `--test gepa_optimizer_test` | Optimize GNN/PC blend and axes weights (NumericMutator, 30 evals) |
+| **Training Hyperparams** | `--test gepa_training_test` | Optimize lr/weight_decay/neg_ratio/perturb_frac (NumericMutator) |
+| **Prediction Quality** | `--test gepa_prediction_test` | Optimize threshold params for end-to-end prediction quality |
+
+#### Live LLM Tests (require `OPENAI_API_KEY`)
+
+These call Trinity via OpenRouter. Each run builds on the previous one's saved weights:
+
+```bash
+# Fiduciary weights (saves to /tmp/gepa_weights.json)
+cargo test -p hehrgnn --test gepa_optimizer_test test_gepa_llm -- --ignored --nocapture
+
+# Training hyperparams (saves to /tmp/gepa_train_config.json)
+cargo test -p hehrgnn --test gepa_training_test test_gepa_llm_training -- --ignored --nocapture
+
+# Prediction thresholds (saves to /tmp/gepa_prediction_config.json)
+cargo test -p hehrgnn --test gepa_prediction_test test_gepa_llm_prediction -- --ignored --nocapture
+
+# Run again to keep improving from checkpoint!
+```
+
+### Anomaly Detection Tests
+
+| Test | Command | What It Verifies |
+|------|---------|------------------|
+| **Anomaly Realworld** | `--test anomaly_realworld_test` | Anomaly scoring on realistic financial patterns |
+| **Ensemble Anomaly** | `--test ensemble_anomaly_test` | Cross-model anomaly consensus |
+| **HEHRGNN Anomaly** | `--test hehrgnn_anomaly_test` | KG-based anomaly scoring |
+
+### Interpretability Tests
+
+| Test | Command | What It Verifies |
+|------|---------|------------------|
+| **SAE Financial Health** | `--test sae_financial_health_test` | Sparse autoencoder feature discovery |
+| **All Models Probe** | `--test all_models_probe_test` | Linear probing across all 4 models |
+| **Probe Reward** | `--test probe_reward_test` | Probing with reward signal |
+| **Learnable Scorer** | `--test learnable_scorer_test` | Thompson sampling scorer training |
+
+### Scenario Tests (Financial Use Cases)
+
+| Test | Command | Financial Scenario |
+|------|---------|-------------------|
+| **Entity Resolution** | `--test scenario_entity_resolution_test` | Linked account detection |
+| **GL Tax** | `--test scenario_gl_tax_test` | General ledger + tax computation |
+| **Peer Splits** | `--test scenario_peer_splits_test` | Peer-to-peer split tracking |
+| **Receipt Linking** | `--test scenario_receipt_linking_test` | Receipt → transaction matching |
+| **Recon Matching** | `--test scenario_recon_matching_test` | Bank reconciliation |
+| **Recurring Bills** | `--test scenario_recurring_bills_test` | Recurring payment detection |
+| **Tax Estimation** | `--test scenario_tax_estimation_test` | Tax obligation estimation |
+
+### Scale & Evolution Tests
+
+| Test | Command | What It Verifies |
+|------|---------|------------------|
+| **Large Scale** | `--test large_scale_test` | Performance with large graphs |
+| **Evolving Graph** | `--test evolving_graph_simulation_test` | Graph changes over time (add/remove entities) |
+| **Real Ensemble Evolution** | `--test real_ensemble_evolution_test` | Full ensemble over multiple graph evolution steps |
+| **Multi-hop** | `--test multihop_test` | Multi-hop traversal for deep financial patterns |
+| **E2E** | `--test e2e_test` | End-to-end: ingest → train → score → recommend |
+| **All Features** | `--test all_features_test` | Every feature in one pipeline run |
+
+---
+
+## Self-Improvement Feedback Loop
+
+The system automatically improves on every pipeline run:
+
+```
+Run 1 (fresh):
+  → Train 4 GNNs from scratch
+  → GEPA auto-tune: seed with default weights → 5 evals → save best
+  → Save model checkpoints
+
+Run 2 (loaded):
+  → Load 4 GNN checkpoints (start where Run 1 left off)
+  → Train further → better embeddings
+  → GEPA auto-tune: load Run 1's best weights → 5 more evals → save if improved
+  → Cumulative improvement compounds
+
+Run N:
+  → Models keep improving from checkpoints
+  → GEPA weights keep improving from persistence
+  → Fiduciary recommendations get better each run
+```
+
+**Persistence files:**
+
+| File | What | Reset Command |
+|------|------|---------------|
+| `/tmp/gnn_weights/` | Model checkpoints (all 5 models) | `rm -rf /tmp/gnn_weights` |
+| `gepa_weights.json` | Fiduciary blend + axes weights | `rm gepa_weights.json` |
+| `/tmp/gepa_train_config.json` | Training hyperparameters | `rm /tmp/gepa_train_config.json` |
+| `/tmp/gepa_prediction_config.json` | Prediction thresholds | `rm /tmp/gepa_prediction_config.json` |
+
+---
 
 ## Dependencies
 
-- `burn` 0.20 (wgpu + autodiff + ndarray + train)
-- `serde` / `serde_json` — serialization
-- `rand` — sampling and synthetic data
-- `axum` 0.8 — HTTP server
-- `tokio` 1 — async runtime
-- `tower-http` 0.6 — CORS
-- `chrono` 0.4 — timing
+| Crate | Purpose |
+|-------|---------|
+| `burn` | Deep learning framework (NdArray + WGPU backends) |
+| `serde` / `serde_json` | Serialization for weights, configs, PC circuits |
+| `rand` | Random sampling (negative edges, mutations) |
+| `axum` / `tokio` / `tower-http` | HTTP server (MCP/A2A) |
+| `chrono` | Timestamps for weight persistence |
+| `rayon` | Parallel iteration for large graphs |
+| `reqwest` | HTTP client for Trinity LLM API |
+| `dotenvy` | Load `.env` file for API keys |
+
+---
+
+## Development Tips
+
+### Running Tests Fast
+
+```bash
+# Run just the fast unit tests in gepa.rs
+cargo test -p hehrgnn -- gepa::tests --nocapture
+
+# Run just the alignment benchmark (3s)
+cargo test -p hehrgnn --test fiduciary_alignment_bench_test -- --nocapture
+
+# Run just the PC fiduciary check (1.6s)
+cargo test -p hehrgnn --test pc_fiduciary_test -- --nocapture
+```
+
+### Adding a New GNN Model
+
+1. Create `src/model/your_model.rs` implementing the `Module<B>` trait
+2. Implement `forward(&self, graph: &HeteroGraph<B>) -> NodeEmbeddings<B>`
+3. Add to `ensemble_pipeline.rs`: init → load checkpoint → train → save → extract embeddings
+4. Add a test in `tests/`
+
+### Adding a New Fiduciary Action Type
+
+1. Add variant to `FiduciaryActionType` enum in `eval/fiduciary.rs`
+2. Add matching logic in `generate_candidates()` to trigger from graph patterns
+3. Add scoring logic in `compute_fiduciary_axes()` to set axis values
+4. Add domain mapping in `FiduciaryActionType::domain()`
+5. Add scenario to `fiduciary_alignment_bench_test.rs`
+
+### Debugging PC Issues
+
+```bash
+# Check if probability distributions sum to 1.0
+cargo test -p hehrgnn --test pc_fiduciary_test -- --nocapture 2>&1 | grep "Check 2"
+
+# Check anomaly correlation
+cargo test -p hehrgnn --test pc_fiduciary_test -- --nocapture 2>&1 | grep "Check 4"
+```

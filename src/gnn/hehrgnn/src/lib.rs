@@ -15,6 +15,7 @@ pub mod eval;
 pub mod feedback;
 pub mod ingest;
 pub mod model;
+pub mod optimizer;
 pub mod server;
 pub mod tasks;
 pub mod training;

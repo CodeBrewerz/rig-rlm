@@ -1581,7 +1581,7 @@ pub async fn fiduciary_next_actions(
         hidden_dim: state.hidden_dim,
     };
 
-    let mut response = crate::eval::fiduciary::recommend(&ctx);
+    let mut response = crate::eval::fiduciary::recommend(&ctx, None);
 
     // Attach SAE interpretability explanation if available
     if let Some(sae_state) = &state.sae_state {

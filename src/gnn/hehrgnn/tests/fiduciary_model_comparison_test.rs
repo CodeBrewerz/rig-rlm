@@ -319,7 +319,7 @@ fn test_fiduciary_all_models_comparison() {
         );
 
         // Run fiduciary prediction
-        let resp = recommend(&ctx);
+        let resp = recommend(&ctx, None);
 
         // Measure results
         let (comp_pass, comp_total) = compliance_score(&resp);

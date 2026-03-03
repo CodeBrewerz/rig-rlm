@@ -764,7 +764,7 @@ mod tests {
                     hidden_dim,
                 };
 
-                let response = recommend(&ctx);
+                let response = recommend(&ctx, None);
                 let rec_types: Vec<String> = response
                     .recommendations
                     .iter()

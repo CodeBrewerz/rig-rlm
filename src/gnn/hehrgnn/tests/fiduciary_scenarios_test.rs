@@ -148,7 +148,7 @@ fn scenario_high_interest_debt() {
     s.add_entity("instrument", "Checking_Account", "user-has-instrument", 0.05);
 
     let ctx = s.build();
-    let resp = recommend(&ctx);
+    let resp = recommend(&ctx, None);
     print_recommendations("SCENARIO 1: High-Interest Debt", &resp);
 
     // The credit card should trigger refinance + investigate + avoid (high anomaly)
@@ -216,7 +216,7 @@ fn scenario_tax_deadline() {
     s.add_entity("instrument", "Checking", "user-has-instrument", 0.05);
 
     let ctx = s.build();
-    let resp = recommend(&ctx);
+    let resp = recommend(&ctx, None);
     print_recommendations("SCENARIO 2: Tax Deadline Approaching", &resp);
 
     // prepare_tax should rank FIRST (highest urgency)
@@ -278,7 +278,7 @@ fn scenario_anomalous_merchant() {
     s.add_entity("goal", "Vacation_Fund", "subledger-holds-goal-funds", 0.1);
 
     let ctx = s.build();
-    let resp = recommend(&ctx);
+    let resp = recommend(&ctx, None);
     print_recommendations("SCENARIO 3: Anomalous Merchant", &resp);
 
     // Top actions should be investigate + avoid for the sketchy merchant
@@ -349,7 +349,7 @@ fn scenario_unused_subscription_redirect_to_goal() {
     s.add_entity("goal", "EmergencyFund_5000", "subledger-holds-goal-funds", 0.1);
 
     let ctx = s.build();
-    let resp = recommend(&ctx);
+    let resp = recommend(&ctx, None);
     print_recommendations("SCENARIO 4: Cancel Unused → Fund Goal", &resp);
 
     // Cancel actions should appear
@@ -400,7 +400,7 @@ fn scenario_reconcile_and_revalue() {
     s.add_entity("instrument", "Checking_Acct", "user-has-instrument", 0.05);
 
     let ctx = s.build();
-    let resp = recommend(&ctx);
+    let resp = recommend(&ctx, None);
     print_recommendations("SCENARIO 5: Reconcile + Revalue", &resp);
 
     // Reconcile should rank above revalue (accuracy before informational)
@@ -449,7 +449,7 @@ fn scenario_lien_and_dispute() {
     s.add_entity("budget-estimation", "Monthly_Budget", "records-budget-estimation", 0.1);
 
     let ctx = s.build();
-    let resp = recommend(&ctx);
+    let resp = recommend(&ctx, None);
     print_recommendations("SCENARIO 6: Lien + Dispute", &resp);
 
     // Dispute should appear for the suspicious fee
@@ -522,7 +522,7 @@ fn scenario_complete_financial_health() {
     s.add_entity("instrument", "Main_Checking", "user-has-instrument", 0.03);
 
     let ctx = s.build();
-    let resp = recommend(&ctx);
+    let resp = recommend(&ctx, None);
     print_recommendations("SCENARIO 7: Complete Financial Health", &resp);
 
     // Extract ranks for key action types
