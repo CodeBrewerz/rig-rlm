@@ -1434,6 +1434,7 @@ mod tests {
         let num_signals = 7;
         let mut ensemble: Vec<f64> = Vec::with_capacity(data.tx_amounts.len());
         let mut attn_sums = vec![0.0f64; num_signals]; // track avg attention weights
+        let mut per_tx_attn: Vec<[f64; 7]> = Vec::with_capacity(data.tx_amounts.len());
 
         for i in 0..data.tx_amounts.len() {
             let signals = [
@@ -1459,9 +1460,12 @@ mod tests {
                 .sum();
             ensemble.push(score);
 
+            let mut attn_arr = [0.0f64; 7];
             for (j, w) in attn_weights.iter().enumerate() {
                 attn_sums[j] += w;
+                attn_arr[j] = *w;
             }
+            per_tx_attn.push(attn_arr);
         }
 
         let n = data.tx_amounts.len() as f64;
@@ -1479,6 +1483,78 @@ mod tests {
         }
         println!();
         let ens_n = min_max_normalize(&ensemble);
+
+        // ── Explanation traces for flagged anomalies ──
+        use hehrgnn::eval::explanation::*;
+
+        println!("  ── EXPLANATION TRACES (top flagged anomalies) ──\n");
+        let threshold = 0.5;
+        let mut explained_count = 0;
+        for a in data.anomalies.iter() {
+            let i = a.tx_idx;
+            if ens_n[i] < threshold || explained_count >= 5 {
+                continue;
+            }
+            explained_count += 1;
+
+            let raw_scores = [
+                sage_scores[i],
+                rgcn_scores[i],
+                gat_scores[i],
+                gt_scores[i],
+                zscore_scores[i],
+                novelty_scores[i],
+                distmult_scores[i],
+            ];
+            let norm_scores = [
+                sage_n[i], rgcn_n[i], gat_n[i], gt_n[i], z_n[i], nov_n[i], dm_n[i],
+            ];
+
+            let merchant = &data.tx_merchants[i];
+            let user = &data.tx_users[i];
+            let amount = data.tx_amounts[i];
+            let merch_avg = data.merchant_stats.get(merchant).map(|(m, _)| *m);
+            let prior_visits = data
+                .user_merchants
+                .get(user)
+                .map(|ms| ms.iter().filter(|m| *m == merchant).count())
+                .unwrap_or(0);
+
+            let reasons = [
+                gnn_reason("SAGE", sage_n[i]),
+                gnn_reason("RGCN", rgcn_n[i]),
+                gnn_reason("GAT", gat_n[i]),
+                gnn_reason("GT", gt_n[i]),
+                zscore_reason(amount, merchant, merch_avg),
+                novelty_reason(user, merchant, prior_visits),
+                distmult_reason(user, merchant, distmult_scores[i], dm_n[i]),
+            ];
+
+            let context = GraphContext {
+                user: user.clone(),
+                merchant: merchant.clone(),
+                amount,
+                user_avg_amount: None,
+                merchant_avg_amount: merch_avg,
+                user_merchant_prior_visits: prior_visits,
+                merchant_category: None,
+                anomaly_type: Some(a.anomaly_type.clone()),
+            };
+
+            let explanation = AnomalyExplanation::build(
+                i,
+                ens_n[i],
+                threshold,
+                &raw_scores,
+                &norm_scores,
+                &per_tx_attn[i],
+                &signal_names,
+                &reasons,
+                context,
+            );
+
+            println!("{}", explanation);
+        }
 
         // ── Anomaly indices ──
         let anomaly_tx_indices: Vec<usize> = data.anomalies.iter().map(|a| a.tx_idx).collect();

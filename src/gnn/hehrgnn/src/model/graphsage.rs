@@ -194,6 +194,9 @@ impl<B: Backend> GraphSageLayer<B> {
 pub struct GraphSageModel<B: Backend> {
     pub layers: Vec<GraphSageLayer<B>>,
     pub input_linears: Vec<nn::Linear<B>>,
+    /// Optional HeteroDoRA adapters for input projections.
+    /// When present: y = input_linear(x) + adapter(x)
+    pub input_adapters: Option<crate::model::lora::HeteroBasisAdapter<B>>,
     #[module(skip)]
     node_type_keys: Vec<String>,
 }
@@ -237,17 +240,45 @@ impl GraphSageModelConfig {
         GraphSageModel {
             layers,
             input_linears,
+            input_adapters: None,
             node_type_keys,
         }
     }
 }
 
 impl<B: Backend> GraphSageModel<B> {
+    /// Attach a HeteroDoRA adapter for input projections.
+    pub fn attach_adapter(&mut self, adapter: crate::model::lora::HeteroBasisAdapter<B>) {
+        self.input_adapters = Some(adapter);
+    }
+
+    /// Count adapter parameters (0 if no adapter attached).
+    pub fn adapter_param_count(&self) -> usize {
+        self.input_adapters.as_ref().map_or(0, |a| a.param_count())
+    }
+
+    /// Count base model parameters (input linears only for comparison).
+    pub fn base_param_count(&self) -> usize {
+        self.input_linears
+            .iter()
+            .map(|l| {
+                let d = l.weight.val().dims();
+                d[0] * d[1]
+            })
+            .sum()
+    }
+
     pub fn forward(&self, graph: &HeteroGraph<B>) -> NodeEmbeddings<B> {
         let mut embeddings = NodeEmbeddings::new();
         for (node_type, features) in &graph.node_features {
             if let Some(idx) = self.node_type_keys.iter().position(|k| k == node_type) {
-                let projected = self.input_linears[idx].forward(features.clone());
+                let mut projected = self.input_linears[idx].forward(features.clone());
+
+                // DoRA: y = m * normalize(base + adapter)
+                if let Some(ref adapter) = self.input_adapters {
+                    projected = adapter.dora_forward(projected, features.clone(), node_type);
+                }
+
                 embeddings.insert(node_type, projected);
             }
         }
@@ -257,6 +288,33 @@ impl<B: Backend> GraphSageModel<B> {
         }
 
         embeddings
+    }
+
+    /// Forward pass that also captures per-layer activations.
+    /// Returns (final_embeddings, vec_of_per_layer_embeddings).
+    /// Layer 0 = input projection, Layer 1..N = after each GNN layer.
+    pub fn forward_with_activations(
+        &self,
+        graph: &HeteroGraph<B>,
+    ) -> (NodeEmbeddings<B>, Vec<NodeEmbeddings<B>>) {
+        let mut embeddings = NodeEmbeddings::new();
+        for (node_type, features) in &graph.node_features {
+            if let Some(idx) = self.node_type_keys.iter().position(|k| k == node_type) {
+                let projected = self.input_linears[idx].forward(features.clone());
+                embeddings.insert(node_type, projected);
+            }
+        }
+
+        let mut layer_activations: Vec<NodeEmbeddings<B>> = Vec::new();
+        // Capture input projection as layer 0
+        layer_activations.push(embeddings.clone());
+
+        for layer in &self.layers {
+            embeddings = layer.forward(&embeddings, graph);
+            layer_activations.push(embeddings.clone());
+        }
+
+        (embeddings, layer_activations)
     }
 }
 

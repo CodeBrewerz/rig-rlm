@@ -1,8 +1,15 @@
 pub mod backbone;
 pub mod embedding;
+pub mod ensemble_pipeline;
 pub mod gat;
 pub mod gnn_layer;
 pub mod graph_transformer;
 pub mod graphsage;
 pub mod hehrgnn;
+pub mod jepa;
+pub mod lora;
+pub mod mhc;
+pub mod probe;
 pub mod rgcn;
+pub mod trainer;
+pub mod weights;

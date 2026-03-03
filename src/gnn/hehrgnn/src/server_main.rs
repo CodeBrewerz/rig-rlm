@@ -81,6 +81,9 @@ async fn main() {
         .route("/classify", post(handlers::classify_nodes))
         .route("/anomaly/score", post(handlers::score_anomalies))
         .route("/similarity/search", post(handlers::similarity_search))
+        .route("/fiduciary/actions", post(handlers::fiduciary_next_actions))
+        .route("/checkpoints", get(handlers::list_checkpoints_handler))
+        .route("/retrain", post(handlers::retrain))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
@@ -95,6 +98,9 @@ async fn main() {
     println!("    POST /classify            — classify nodes (category/tax code)");
     println!("    POST /anomaly/score       — anomaly scores for nodes");
     println!("    POST /similarity/search   — kNN similarity search");
+    println!("    POST /fiduciary/actions   — fiduciary next-action predictions");
+    println!("    GET  /checkpoints         — list saved model checkpoints");
+    println!("    POST /retrain             — retrain all models + save checkpoints");
     println!();
 
     let listener = tokio::net::TcpListener::bind(&bind)

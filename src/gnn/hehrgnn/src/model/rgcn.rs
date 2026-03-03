@@ -164,6 +164,8 @@ impl<B: Backend> RgcnLayer<B> {
 pub struct RgcnModel<B: Backend> {
     pub layers: Vec<RgcnLayer<B>>,
     pub input_linears: Vec<nn::Linear<B>>,
+    /// Optional HeteroDoRA adapters for input projections.
+    pub input_adapters: Option<crate::model::lora::HeteroBasisAdapter<B>>,
     #[module(skip)]
     node_type_keys: Vec<String>,
 }
@@ -191,17 +193,40 @@ impl RgcnConfig {
         RgcnModel {
             layers,
             input_linears,
+            input_adapters: None,
             node_type_keys,
         }
     }
 }
 
 impl<B: Backend> RgcnModel<B> {
+    pub fn attach_adapter(&mut self, adapter: crate::model::lora::HeteroBasisAdapter<B>) {
+        self.input_adapters = Some(adapter);
+    }
+    pub fn adapter_param_count(&self) -> usize {
+        self.input_adapters.as_ref().map_or(0, |a| a.param_count())
+    }
+    pub fn base_param_count(&self) -> usize {
+        self.input_linears
+            .iter()
+            .map(|l| {
+                let d = l.weight.val().dims();
+                d[0] * d[1]
+            })
+            .sum()
+    }
+
     pub fn forward(&self, graph: &HeteroGraph<B>) -> NodeEmbeddings<B> {
         let mut embeddings = NodeEmbeddings::new();
         for (node_type, features) in &graph.node_features {
             if let Some(idx) = self.node_type_keys.iter().position(|k| k == node_type) {
-                let projected = self.input_linears[idx].forward(features.clone());
+                let mut projected = self.input_linears[idx].forward(features.clone());
+
+                // DoRA: y = m * normalize(base + adapter)
+                if let Some(ref adapter) = self.input_adapters {
+                    projected = adapter.dora_forward(projected, features.clone(), node_type);
+                }
+
                 embeddings.insert(node_type, projected);
             }
         }

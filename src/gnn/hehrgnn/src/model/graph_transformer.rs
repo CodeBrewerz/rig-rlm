@@ -8,11 +8,16 @@
 //! Reference: Rampášek et al. "Recipe for a General, Powerful, Scalable
 //! Graph Transformer" (NeurIPS 2022)
 
+use burn::nn;
 use burn::prelude::*;
 use std::collections::HashMap;
 
 use crate::data::hetero_graph::{EdgeType, HeteroGraph};
 use crate::model::backbone::NodeEmbeddings;
+
+fn edge_type_key(et: &EdgeType) -> String {
+    format!("{}_{}_{}", et.0, et.1, et.2)
+}
 
 /// Configuration for Graph Transformer.
 #[derive(Debug, Clone)]
@@ -26,26 +31,29 @@ pub struct GraphTransformerConfig {
 }
 
 /// A single GPS layer: Local MPNN + Global Attention + FFN
-#[derive(Debug)]
+#[derive(Module, Debug)]
 pub struct GpsLayer<B: Backend> {
-    // Local MPNN weights (per edge type, like RGCN)
-    mpnn_weights: HashMap<String, Tensor<B, 2>>,
-    mpnn_bias: Tensor<B, 1>,
+    // Local MPNN: per-edge-type linear transforms
+    mpnn_linears: Vec<nn::Linear<B>>,
+    mpnn_bias: nn::Linear<B>, // hidden → hidden (bias-only via identity+bias)
 
-    // Global multi-head self-attention (per node type)
-    // Q, K, V projections
-    attn_q: Tensor<B, 2>,
-    attn_k: Tensor<B, 2>,
-    attn_v: Tensor<B, 2>,
-    attn_out: Tensor<B, 2>,
-    num_heads: usize,
-    head_dim: usize,
+    // Global multi-head self-attention projections
+    attn_q: nn::Linear<B>,
+    attn_k: nn::Linear<B>,
+    attn_v: nn::Linear<B>,
+    attn_out: nn::Linear<B>,
 
     // FFN
-    ffn_w1: Tensor<B, 2>,
-    ffn_b1: Tensor<B, 1>,
-    ffn_w2: Tensor<B, 2>,
-    ffn_b2: Tensor<B, 1>,
+    ffn1: nn::Linear<B>,
+    ffn2: nn::Linear<B>,
+
+    // Non-module metadata
+    #[module(skip)]
+    num_heads: usize,
+    #[module(skip)]
+    head_dim: usize,
+    #[module(skip)]
+    edge_type_keys: Vec<String>,
 }
 
 impl<B: Backend> GpsLayer<B> {
@@ -59,62 +67,45 @@ impl<B: Backend> GpsLayer<B> {
         let head_dim = hidden_dim / num_heads;
         let ffn_hidden = hidden_dim * ffn_ratio;
 
-        // Local MPNN: per-relation weight matrices
-        let mut mpnn_weights = HashMap::new();
+        // Local MPNN: per-relation linear transforms (no bias, like RGCN)
+        let mut mpnn_linears = Vec::new();
+        let mut edge_type_keys = Vec::new();
         for et in edge_types {
-            let key = format!("{}_{}_{}", et.0, et.1, et.2);
-            let w: Tensor<B, 2> = Tensor::random(
-                [hidden_dim, hidden_dim],
-                burn::tensor::Distribution::Uniform(
-                    -(1.0 / (hidden_dim as f64).sqrt()),
-                    1.0 / (hidden_dim as f64).sqrt(),
-                ),
-                device,
-            );
-            mpnn_weights.insert(key, w);
+            let linear = nn::LinearConfig::new(hidden_dim, hidden_dim)
+                .with_bias(false)
+                .init(device);
+            mpnn_linears.push(linear);
+            edge_type_keys.push(edge_type_key(et));
         }
-        let mpnn_bias: Tensor<B, 1> = Tensor::zeros([hidden_dim], device);
+        // MPNN output bias (identity transform + bias)
+        let mpnn_bias = nn::LinearConfig::new(hidden_dim, hidden_dim)
+            .with_bias(true)
+            .init(device);
 
         // Global self-attention projections
-        let scale = 1.0 / (hidden_dim as f64).sqrt();
-        let attn_q: Tensor<B, 2> = Tensor::random(
-            [hidden_dim, hidden_dim],
-            burn::tensor::Distribution::Uniform(-scale, scale),
-            device,
-        );
-        let attn_k = Tensor::random(
-            [hidden_dim, hidden_dim],
-            burn::tensor::Distribution::Uniform(-scale, scale),
-            device,
-        );
-        let attn_v = Tensor::random(
-            [hidden_dim, hidden_dim],
-            burn::tensor::Distribution::Uniform(-scale, scale),
-            device,
-        );
-        let attn_out = Tensor::random(
-            [hidden_dim, hidden_dim],
-            burn::tensor::Distribution::Uniform(-scale, scale),
-            device,
-        );
+        let attn_q = nn::LinearConfig::new(hidden_dim, hidden_dim)
+            .with_bias(false)
+            .init(device);
+        let attn_k = nn::LinearConfig::new(hidden_dim, hidden_dim)
+            .with_bias(false)
+            .init(device);
+        let attn_v = nn::LinearConfig::new(hidden_dim, hidden_dim)
+            .with_bias(false)
+            .init(device);
+        let attn_out = nn::LinearConfig::new(hidden_dim, hidden_dim)
+            .with_bias(false)
+            .init(device);
 
         // FFN layers
-        let ffn_scale = 1.0 / (ffn_hidden as f64).sqrt();
-        let ffn_w1: Tensor<B, 2> = Tensor::random(
-            [hidden_dim, ffn_hidden],
-            burn::tensor::Distribution::Uniform(-scale, scale),
-            device,
-        );
-        let ffn_b1: Tensor<B, 1> = Tensor::zeros([ffn_hidden], device);
-        let ffn_w2: Tensor<B, 2> = Tensor::random(
-            [ffn_hidden, hidden_dim],
-            burn::tensor::Distribution::Uniform(-ffn_scale, ffn_scale),
-            device,
-        );
-        let ffn_b2: Tensor<B, 1> = Tensor::zeros([hidden_dim], device);
+        let ffn1 = nn::LinearConfig::new(hidden_dim, ffn_hidden)
+            .with_bias(true)
+            .init(device);
+        let ffn2 = nn::LinearConfig::new(ffn_hidden, hidden_dim)
+            .with_bias(true)
+            .init(device);
 
         Self {
-            mpnn_weights,
+            mpnn_linears,
             mpnn_bias,
             attn_q,
             attn_k,
@@ -122,11 +113,14 @@ impl<B: Backend> GpsLayer<B> {
             attn_out,
             num_heads,
             head_dim,
-            ffn_w1,
-            ffn_b1,
-            ffn_w2,
-            ffn_b2,
+            ffn1,
+            ffn2,
+            edge_type_keys,
         }
+    }
+
+    fn edge_type_idx(&self, key: &str) -> Option<usize> {
+        self.edge_type_keys.iter().position(|k| k == key)
     }
 
     /// Forward pass for one GPS layer.
@@ -141,11 +135,12 @@ impl<B: Backend> GpsLayer<B> {
         let mut mpnn_out: HashMap<String, Tensor<B, 2>> = HashMap::new();
 
         for et in graph.edge_types() {
-            let key = format!("{}_{}_{}", et.0, et.1, et.2);
-            let weight = match self.mpnn_weights.get(&key) {
-                Some(w) => w,
+            let key = edge_type_key(et);
+            let linear_idx = match self.edge_type_idx(&key) {
+                Some(idx) => idx,
                 None => continue,
             };
+            let linear = &self.mpnn_linears[linear_idx];
 
             let src_emb: &Tensor<B, 2> = match embeddings.get(&et.0) {
                 Some(e) => e,
@@ -168,8 +163,8 @@ impl<B: Backend> GpsLayer<B> {
                 continue;
             }
 
-            // Transform source embeddings: src_emb @ weight
-            let transformed = src_emb.clone().matmul(weight.clone()); // [num_src, hidden]
+            // Transform source embeddings via nn::Linear
+            let transformed = linear.forward(src_emb.clone()); // [num_src, hidden]
             let hidden_dim = transformed.dims()[1];
 
             // Gather source node features by edge source indices
@@ -186,16 +181,9 @@ impl<B: Backend> GpsLayer<B> {
                 .clone()
                 .slice([1..2, 0..num_edges])
                 .reshape([num_edges]);
-            let msg_expanded = msg.clone();
 
-            // Manual scatter-add
-            let msg_data: Vec<f32> = msg_expanded
-                .clone()
-                .into_data()
-                .as_slice::<f32>()
-                .unwrap()
-                .to_vec();
-            // Try i32 first (Wgpu), fall back to i64 (NdArray)
+            // Manual scatter-add (autodiff-compatible: only reads data for indices)
+            let msg_data: Vec<f32> = msg.clone().into_data().as_slice::<f32>().unwrap().to_vec();
             let dst_data: Vec<i32> = {
                 let data = dst_indices.into_data();
                 if let Ok(slice) = data.as_slice::<i32>() {
@@ -243,7 +231,6 @@ impl<B: Backend> GpsLayer<B> {
         }
 
         // ── Step 2: Global Self-Attention (per node type) ──
-        // For each node type, apply multi-head self-attention
         for nt in graph.node_types() {
             let x = match embeddings.get(nt) {
                 Some(e) => e,
@@ -253,62 +240,47 @@ impl<B: Backend> GpsLayer<B> {
             let n = x.dims()[0];
             let d = x.dims()[1];
 
-            // Residual connection input = x
             let residual = x.clone();
 
             // Local MPNN result + bias + ReLU
             let local_out = match mpnn_out.get(nt) {
                 Some(m) => {
-                    let biased =
-                        m.clone() + self.mpnn_bias.clone().unsqueeze_dim::<2>(0).expand([n, d]);
+                    // Apply MPNN bias through the linear layer (acts as bias transform)
+                    let biased = self.mpnn_bias.forward(m.clone());
                     biased.clamp_min(0.0) // ReLU
                 }
                 None => Tensor::zeros([n, d], &x.device()),
             };
 
-            // Global self-attention over all nodes of this type
-            // For large node types (>5000), skip global attention (O(N²) is infeasible)
-            // and rely solely on local MPNN — this matches GraphGPS paper's recommendation
-            // to use Performer/linear attention for scalability
+            // Global self-attention
             let max_attn_nodes = 5000;
             let global_out = if n <= 1 {
                 x.clone()
             } else if n > max_attn_nodes {
-                // Too many nodes for full attention — use identity (local MPNN already captures structure)
                 eprintln!(
                     "      [GT] Skipping global attn for {} ({} nodes > {})",
                     nt, n, max_attn_nodes
                 );
                 x.clone()
             } else {
-                // Full attention: [n, n] attention matrix
                 let scale = (self.head_dim as f64).sqrt();
-                let q = x.clone().matmul(self.attn_q.clone());
-                let k = x.clone().matmul(self.attn_k.clone());
-                let v = x.clone().matmul(self.attn_v.clone());
+                let q = self.attn_q.forward(x.clone());
+                let k = self.attn_k.forward(x.clone());
+                let v = self.attn_v.forward(x.clone());
                 let scores = q.matmul(k.transpose()) / scale;
                 let attn_weights = burn::tensor::activation::softmax(scores, 1);
                 let attn_out = attn_weights.matmul(v);
-                attn_out.matmul(self.attn_out.clone())
+                self.attn_out.forward(attn_out)
             };
 
             // ── Step 3: Combine local + global, then FFN with residual ──
-            // GPS formula: out = local + global (sum)
             let combined = local_out + global_out;
-
-            // Residual connection 1
             let h1 = combined + residual;
 
             // FFN: Linear → ReLU → Linear
-            let ffn_out = h1.clone().matmul(self.ffn_w1.clone())
-                + self
-                    .ffn_b1
-                    .clone()
-                    .unsqueeze_dim::<2>(0)
-                    .expand([n, self.ffn_w1.dims()[1]]);
+            let ffn_out = self.ffn1.forward(h1.clone());
             let ffn_out = ffn_out.clamp_min(0.0); // ReLU
-            let ffn_out = ffn_out.matmul(self.ffn_w2.clone())
-                + self.ffn_b2.clone().unsqueeze_dim::<2>(0).expand([n, d]);
+            let ffn_out = self.ffn2.forward(ffn_out);
 
             // Residual connection 2
             let final_out = ffn_out + h1;
@@ -318,69 +290,54 @@ impl<B: Backend> GpsLayer<B> {
 
         output
     }
-
-    /// Chunked attention for large graphs (avoids O(N²) memory)
-    fn chunked_attention(
-        &self,
-        q: &Tensor<B, 2>,
-        k: &Tensor<B, 2>,
-        v: &Tensor<B, 2>,
-        n: usize,
-        d: usize,
-        device: &B::Device,
-    ) -> Tensor<B, 2> {
-        let chunk_size = 2000;
-        let scale = (self.head_dim as f64).sqrt();
-        let mut result_data = vec![0.0f32; n * d];
-
-        let k_t = k.clone().transpose(); // [d, n]
-
-        for start in (0..n).step_by(chunk_size) {
-            let end = (start + chunk_size).min(n);
-            let chunk_n = end - start;
-
-            // q_chunk: [chunk_n, d]
-            let q_chunk = q.clone().slice([start..end, 0..d]);
-            let scores = q_chunk.matmul(k_t.clone()) / scale; // [chunk_n, n]
-            let attn = burn::tensor::activation::softmax(scores, 1);
-            let out_chunk = attn.matmul(v.clone()); // [chunk_n, d]
-            let out_proj = out_chunk.matmul(self.attn_out.clone()); // [chunk_n, d]
-
-            let chunk_data: Vec<f32> = out_proj.into_data().as_slice::<f32>().unwrap().to_vec();
-
-            for i in 0..chunk_n {
-                for j in 0..d {
-                    result_data[(start + i) * d + j] = chunk_data[i * d + j];
-                }
-            }
-        }
-
-        Tensor::<B, 1>::from_data(result_data.as_slice(), device).reshape([n, d])
-    }
 }
 
 /// Multi-layer Graph Transformer model.
-#[derive(Debug)]
+#[derive(Module, Debug)]
 pub struct GraphTransformerModel<B: Backend> {
     /// Input projection per node type
-    input_proj: HashMap<String, Tensor<B, 2>>,
+    pub input_projs: Vec<nn::Linear<B>>,
     /// GPS layers
     layers: Vec<GpsLayer<B>>,
+    /// Optional HeteroDoRA adapters for input projections.
+    pub input_adapters: Option<crate::model::lora::HeteroBasisAdapter<B>>,
+    /// Node type keys for input projection lookup
+    #[module(skip)]
+    node_type_keys: Vec<String>,
 }
 
 impl<B: Backend> GraphTransformerModel<B> {
+    pub fn attach_adapter(&mut self, adapter: crate::model::lora::HeteroBasisAdapter<B>) {
+        self.input_adapters = Some(adapter);
+    }
+    pub fn adapter_param_count(&self) -> usize {
+        self.input_adapters.as_ref().map_or(0, |a| a.param_count())
+    }
+    pub fn base_param_count(&self) -> usize {
+        self.input_projs
+            .iter()
+            .map(|l| {
+                let d = l.weight.val().dims();
+                d[0] * d[1]
+            })
+            .sum()
+    }
+
     pub fn forward(&self, graph: &HeteroGraph<B>) -> NodeEmbeddings<B> {
-        // Project input features to hidden dim
         let mut embeddings = NodeEmbeddings::new();
-        for nt in graph.node_types() {
-            if let (Some(feat), Some(proj)) = (graph.node_features.get(nt), self.input_proj.get(nt))
-            {
-                let projected = feat.clone().matmul(proj.clone());
+        for (i, nt) in self.node_type_keys.iter().enumerate() {
+            if let Some(feat) = graph.node_features.get(nt) {
+                let mut projected = self.input_projs[i].forward(feat.clone());
+
+                // DoRA: y = m * normalize(base + adapter)
+                if let Some(ref adapter) = self.input_adapters {
+                    projected = adapter.dora_forward(projected, feat.clone(), nt);
+                }
+
                 embeddings.insert(nt, projected);
             }
         }
 
-        // Apply GPS layers
         for layer in &self.layers {
             embeddings = layer.forward(&embeddings, graph);
         }
@@ -396,17 +353,15 @@ impl GraphTransformerConfig {
         edge_types: &[EdgeType],
         device: &B::Device,
     ) -> GraphTransformerModel<B> {
-        let scale = 1.0 / (self.in_dim as f64).sqrt();
-
-        // Input projections per node type
-        let mut input_proj = HashMap::new();
+        // Input projections per node type (using nn::Linear)
+        let mut input_projs = Vec::new();
+        let mut node_type_keys = Vec::new();
         for nt in node_types {
-            let proj: Tensor<B, 2> = Tensor::random(
-                [self.in_dim, self.hidden_dim],
-                burn::tensor::Distribution::Uniform(-scale, scale),
-                device,
-            );
-            input_proj.insert(nt.clone(), proj);
+            let proj = nn::LinearConfig::new(self.in_dim, self.hidden_dim)
+                .with_bias(false)
+                .init(device);
+            input_projs.push(proj);
+            node_type_keys.push(nt.clone());
         }
 
         // GPS layers
@@ -421,7 +376,12 @@ impl GraphTransformerConfig {
             ));
         }
 
-        GraphTransformerModel { input_proj, layers }
+        GraphTransformerModel {
+            input_projs,
+            layers,
+            input_adapters: None,
+            node_type_keys,
+        }
     }
 }
 
@@ -476,8 +436,8 @@ mod tests {
 
         // Check output has all node types
         for nt in &node_types {
-            assert!(out.data.contains_key(nt), "Missing node type: {}", nt);
-            let emb = &out.data[nt];
+            assert!(out.embeddings.contains_key(nt), "Missing node type: {}", nt);
+            let emb = &out.embeddings[nt];
             assert_eq!(emb.dims()[1], 32, "Wrong hidden dim for {}", nt);
         }
 
@@ -489,8 +449,8 @@ mod tests {
             println!(
                 "   {}: {} nodes × {} dim",
                 nt,
-                out.data[nt].dims()[0],
-                out.data[nt].dims()[1]
+                out.embeddings[nt].dims()[0],
+                out.embeddings[nt].dims()[1]
             );
         }
     }
