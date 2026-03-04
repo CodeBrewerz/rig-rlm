@@ -504,7 +504,7 @@ mod tests {
         let config = GraphBuildConfig {
             node_feat_dim: hidden_dim,
             add_reverse_edges: true,
-            add_self_loops: true,
+            add_self_loops: true, add_positional_encoding: true,
         };
         let graph = build_hetero_graph::<B>(facts, &config, &device);
         let node_types: Vec<String> = graph.node_types().iter().map(|s| s.to_string()).collect();
@@ -662,6 +662,7 @@ mod tests {
             hidden1: 64,
             hidden2: 32,
             lr: 0.003,
+            miss_penalty_multiplier: 3.0,
         };
         let mut scorer = LearnableScorer::new(&scorer_config);
 
@@ -825,6 +826,7 @@ mod tests {
                             embedding_affinity: 0.5,
                             context: [0.3, 0.3, 0.3, 0.0, 0.0],
                         },
+                        was_high_risk: false,
                     };
                     scorer.apply_reward(&reward);
                     reward_buffer.push(reward);

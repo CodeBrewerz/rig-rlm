@@ -103,7 +103,7 @@ pub fn run_pipeline(
     let build_config = GraphBuildConfig {
         node_feat_dim: config.hidden_dim,
         add_reverse_edges: true,
-        add_self_loops: true,
+        add_self_loops: true, add_positional_encoding: true,
     };
     let mut graph = build_hetero_graph::<B>(facts, &build_config, &device);
     let node_types: Vec<String> = graph.node_types().iter().map(|s| s.to_string()).collect();

@@ -126,6 +126,31 @@ impl FiduciaryActionType {
         }
     }
 
+    /// Parse action type from its string name.
+    pub fn from_name(s: &str) -> Self {
+        match s {
+            "should_pay" => Self::ShouldPay,
+            "should_cancel" => Self::ShouldCancel,
+            "should_transfer" => Self::ShouldTransfer,
+            "should_avoid" => Self::ShouldAvoid,
+            "should_investigate" => Self::ShouldInvestigate,
+            "should_consolidate" => Self::ShouldConsolidate,
+            "should_refinance" => Self::ShouldRefinance,
+            "should_pay_down_lien" => Self::ShouldPayDownLien,
+            "should_dispute" => Self::ShouldDispute,
+            "should_fund_goal" => Self::ShouldFundGoal,
+            "should_adjust_budget" => Self::ShouldAdjustBudget,
+            "should_prepare_tax" => Self::ShouldPrepareTax,
+            "should_fund_tax_sinking" => Self::ShouldFundTaxSinking,
+            "should_claim_exemption" => Self::ShouldClaimExemption,
+            "should_run_tax_scenario" => Self::ShouldRunTaxScenario,
+            "should_reconcile" => Self::ShouldReconcile,
+            "should_review_recurring" => Self::ShouldReviewRecurring,
+            "should_revalue_asset" => Self::ShouldRevalueAsset,
+            _ => Self::ShouldInvestigate, // safe default
+        }
+    }
+
     pub fn verb(&self) -> &'static str {
         match self {
             Self::ShouldPay => "Pay",
@@ -334,6 +359,11 @@ pub struct FiduciaryRecommendation {
     /// `None` if PC training data is insufficient.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pc_analysis: Option<crate::model::pc::fiduciary_pc::PcAnalysis>,
+    /// Learned scorer logit from asymmetric RL (paper 2402.18246).
+    /// Positive = model endorses recommendation, negative = model advises caution.
+    /// `None` if scorer is not available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scorer_logit: Option<f32>,
 }
 
 /// Full fiduciary response.
@@ -965,6 +995,7 @@ pub fn recommend(ctx: &FiduciaryContext, mut pc_state: Option<&mut PcState>) -> 
                 reasoning,
                 is_recommended: fiduciary_score >= 0.3,
                 pc_analysis: None,
+                scorer_logit: None,
             }
         })
         .collect();

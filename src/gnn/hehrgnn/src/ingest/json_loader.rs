@@ -226,7 +226,7 @@ mod tests {
         let config = GraphBuildConfig {
             node_feat_dim: 8,
             add_reverse_edges: true,
-            add_self_loops: false,
+            add_self_loops: false, add_positional_encoding: true,
         };
 
         let graph = build_graph_from_export::<TestBackend>(&export, &config, &device);

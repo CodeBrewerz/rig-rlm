@@ -51,7 +51,7 @@ fn build_test_graph() -> HeteroGraph<B> {
         gf("user", "alice", "linked", "user", "bob"),
     ];
     build_hetero_graph::<B>(&facts, &GraphBuildConfig {
-        node_feat_dim: 16, add_reverse_edges: true, add_self_loops: true,
+        node_feat_dim: 16, add_reverse_edges: true, add_self_loops: true, add_positional_encoding: true,
     }, &device)
 }
 

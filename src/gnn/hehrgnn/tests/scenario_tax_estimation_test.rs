@@ -93,7 +93,7 @@ mod tests {
         println!("   Freelancer income patterns → under-reserve risk scoring");
         println!("  ═══════════════════════════════════════════════════════════════\n");
 
-        let config = GraphBuildConfig { node_feat_dim: 32, add_reverse_edges: true, add_self_loops: true };
+        let config = GraphBuildConfig { node_feat_dim: 32, add_reverse_edges: true, add_self_loops: true, add_positional_encoding: true };
         let graph = build_hetero_graph::<B>(&facts, &config, &device);
         println!("  Graph: {} nodes, {} edges\n", graph.total_nodes(), graph.total_edges());
 

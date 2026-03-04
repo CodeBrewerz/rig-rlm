@@ -56,7 +56,7 @@ fn build_test_graph() -> hehrgnn::data::hetero_graph::HeteroGraph<B> {
         &GraphBuildConfig {
             node_feat_dim: 16,
             add_reverse_edges: true,
-            add_self_loops: true,
+            add_self_loops: true, add_positional_encoding: true,
         },
         &device,
     )

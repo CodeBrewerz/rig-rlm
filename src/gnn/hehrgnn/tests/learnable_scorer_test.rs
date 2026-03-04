@@ -92,6 +92,7 @@ fn test_knowledge_distillation_matches_expert() {
         hidden1: 64,
         hidden2: 32,
         lr: 0.005,
+        ..ScorerConfig::default()
     };
     let mut scorer = LearnableScorer::new(&config);
 
@@ -195,6 +196,7 @@ fn test_reward_fine_tuning_improves_scoring() {
         hidden1: 64,
         hidden2: 32,
         lr: 0.005,
+        miss_penalty_multiplier: 3.0,
     };
     let mut scorer = LearnableScorer::new(&config);
 
@@ -230,6 +232,7 @@ fn test_reward_fine_tuning_improves_scoring() {
                 0.5,
                 [0.3, 0.8, 0.1, 0.0, 0.0],
             ),
+            was_high_risk: false,
         },
         RewardSignal {
             action_type: FiduciaryActionType::ShouldFundGoal,
@@ -241,6 +244,7 @@ fn test_reward_fine_tuning_improves_scoring() {
                 0.5,
                 [0.3, 0.8, 0.1, 0.0, 0.0],
             ),
+            was_high_risk: false,
         },
         RewardSignal {
             action_type: FiduciaryActionType::ShouldCancel,
@@ -252,6 +256,7 @@ fn test_reward_fine_tuning_improves_scoring() {
                 0.4,
                 [0.3, 0.5, 0.3, 0.0, 0.5],
             ),
+            was_high_risk: false,
         },
         RewardSignal {
             action_type: FiduciaryActionType::ShouldAvoid,
@@ -263,6 +268,7 @@ fn test_reward_fine_tuning_improves_scoring() {
                 0.1,
                 [0.1, 0.2, 0.1, 0.0, 0.0],
             ),
+            was_high_risk: true, // high anomaly = genuinely risky
         },
     ];
 
@@ -339,6 +345,7 @@ fn test_recursive_self_improvement() {
         hidden1: 64,
         hidden2: 32,
         lr: 0.005,
+        miss_penalty_multiplier: 3.0,
     };
     let mut scorer = LearnableScorer::new(&config);
 
@@ -367,6 +374,7 @@ fn test_recursive_self_improvement() {
                 0.6,
                 [0.2, 0.7, 0.2, 0.0, 0.0],
             ),
+            was_high_risk: false,
         },
         // Goal building accepted when no debt
         RewardSignal {
@@ -379,6 +387,7 @@ fn test_recursive_self_improvement() {
                 0.7,
                 [0.5, 0.1, 0.7, 0.0, 0.0],
             ),
+            was_high_risk: false,
         },
         // Fund goal rejected when in debt
         RewardSignal {
@@ -391,6 +400,7 @@ fn test_recursive_self_improvement() {
                 0.5,
                 [0.3, 0.8, 0.1, 0.0, 0.0],
             ),
+            was_high_risk: false,
         },
         // Tax prep accepted
         RewardSignal {
@@ -403,6 +413,7 @@ fn test_recursive_self_improvement() {
                 0.5,
                 [0.4, 0.3, 0.5, 1.0, 0.0],
             ),
+            was_high_risk: false,
         },
         // Avoid accepted for fraud
         RewardSignal {
@@ -415,6 +426,7 @@ fn test_recursive_self_improvement() {
                 0.1,
                 [0.1, 0.2, 0.1, 0.0, 0.0],
             ),
+            was_high_risk: true,
         },
     ];
 
@@ -466,6 +478,7 @@ fn test_full_learning_lifecycle() {
         hidden1: 64,
         hidden2: 32,
         lr: 0.005,
+        miss_penalty_multiplier: 3.0,
     };
     let mut scorer = LearnableScorer::new(&config);
 
@@ -517,6 +530,7 @@ fn test_full_learning_lifecycle() {
                 0.5,
                 [0.3, anomaly, 0.5 - anomaly, 0.0, 0.0],
             ),
+            was_high_risk: anomaly > 0.5, // high anomaly = high risk
         };
         scorer.apply_reward(&reward);
         replay_buffer.push(reward);

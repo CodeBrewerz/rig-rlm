@@ -646,6 +646,7 @@ fn test_100_iteration_evolving_graph() {
         hidden1: 64,
         hidden2: 32,
         lr: 0.003,
+        miss_penalty_multiplier: 3.0,
     };
     let mut scorer = LearnableScorer::new(&scorer_config);
 
@@ -820,6 +821,7 @@ fn test_100_iteration_evolving_graph() {
                     embedding_affinity: 0.5,
                     context: ctx_feat,
                 },
+                was_high_risk: risk_level > 0.5,
             };
             scorer.apply_reward(&reward);
             reward_buffer.push(reward);
@@ -946,7 +948,7 @@ fn test_recommendation_changes_at_phase_transitions() {
     graph.update_user_embedding(0.0, 0.5, 0.1);
 
     let ctx_a = graph.fiduciary_context();
-    let resp_a = recommend(&ctx_a);
+    let resp_a = recommend(&ctx_a, None);
     let types_a: Vec<String> = resp_a
         .recommendations
         .iter()
@@ -969,7 +971,7 @@ fn test_recommendation_changes_at_phase_transitions() {
     graph.update_user_embedding(0.7, 0.2, 0.5);
 
     let ctx_b = graph.fiduciary_context();
-    let resp_b = recommend(&ctx_b);
+    let resp_b = recommend(&ctx_b, None);
     let types_b: Vec<String> = resp_b
         .recommendations
         .iter()
@@ -987,7 +989,7 @@ fn test_recommendation_changes_at_phase_transitions() {
     graph.update_user_embedding(0.0, 0.5, 0.1);
 
     let ctx_c = graph.fiduciary_context();
-    let resp_c = recommend(&ctx_c);
+    let resp_c = recommend(&ctx_c, None);
     let types_c: Vec<String> = resp_c
         .recommendations
         .iter()

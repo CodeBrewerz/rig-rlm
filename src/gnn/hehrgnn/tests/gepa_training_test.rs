@@ -74,7 +74,7 @@ fn build_training_graph() -> (Vec<GraphFact>, GraphBuildConfig) {
     let config = GraphBuildConfig {
         node_feat_dim: 16,
         add_reverse_edges: true,
-        add_self_loops: true,
+        add_self_loops: true, add_positional_encoding: true,
     };
     (facts, config)
 }

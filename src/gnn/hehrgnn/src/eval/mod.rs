@@ -1,4 +1,5 @@
 pub mod bench;
+pub mod critical_path;
 pub mod evaluate;
 pub mod explanation;
 pub mod fiduciary;

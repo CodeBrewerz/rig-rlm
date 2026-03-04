@@ -8,6 +8,7 @@
 //! Reference: Rampášek et al. "Recipe for a General, Powerful, Scalable
 //! Graph Transformer" (NeurIPS 2022)
 
+use burn::module::Param;
 use burn::nn;
 use burn::prelude::*;
 use std::collections::HashMap;
@@ -301,6 +302,9 @@ pub struct GraphTransformerModel<B: Backend> {
     layers: Vec<GpsLayer<B>>,
     /// Optional HeteroDoRA adapters for input projections.
     pub input_adapters: Option<crate::model::lora::HeteroBasisAdapter<B>>,
+    /// Learnable node-type embedding (KumoRFM §2.3)
+    /// Each node type gets a [1, hidden_dim] vector added after projection.
+    type_embeddings: Vec<Param<Tensor<B, 2>>>,
     /// Node type keys for input projection lookup
     #[module(skip)]
     node_type_keys: Vec<String>,
@@ -334,6 +338,13 @@ impl<B: Backend> GraphTransformerModel<B> {
                     projected = adapter.dora_forward(projected, feat.clone(), nt);
                 }
 
+                // Add learnable node-type embedding (KumoRFM §2.3)
+                if i < self.type_embeddings.len() {
+                    // Broadcast [1, hidden_dim] to [num_nodes, hidden_dim]
+                    let type_emb = self.type_embeddings[i].val();
+                    projected = projected + type_emb;
+                }
+
                 embeddings.insert(nt, projected);
             }
         }
@@ -356,12 +367,21 @@ impl GraphTransformerConfig {
         // Input projections per node type (using nn::Linear)
         let mut input_projs = Vec::new();
         let mut node_type_keys = Vec::new();
+        let mut type_embeddings = Vec::new();
         for nt in node_types {
             let proj = nn::LinearConfig::new(self.in_dim, self.hidden_dim)
                 .with_bias(false)
                 .init(device);
             input_projs.push(proj);
             node_type_keys.push(nt.clone());
+
+            // Learnable type embedding: small random init (KumoRFM §2.3)
+            let emb = Tensor::<B, 2>::random(
+                [1, self.hidden_dim],
+                burn::tensor::Distribution::Uniform(-0.1, 0.1),
+                device,
+            );
+            type_embeddings.push(Param::from_tensor(emb));
         }
 
         // GPS layers
@@ -380,6 +400,7 @@ impl GraphTransformerConfig {
             input_projs,
             layers,
             input_adapters: None,
+            type_embeddings,
             node_type_keys,
         }
     }
@@ -415,6 +436,7 @@ mod tests {
             node_feat_dim: 16,
             add_reverse_edges: true,
             add_self_loops: true,
+            add_positional_encoding: true,
         };
         let device = <B as Backend>::Device::default();
         let graph = build_hetero_graph::<B>(&facts, &config, &device);
@@ -422,8 +444,16 @@ mod tests {
         let node_types: Vec<String> = graph.node_types().iter().map(|s| s.to_string()).collect();
         let edge_types: Vec<EdgeType> = graph.edge_types().iter().map(|e| (*e).clone()).collect();
 
+        // Read actual feature dim from graph (may be larger than node_feat_dim due to PE)
+        let in_dim = graph
+            .node_features
+            .values()
+            .next()
+            .map(|t| t.dims()[1])
+            .unwrap_or(16);
+
         let model = GraphTransformerConfig {
-            in_dim: 16,
+            in_dim,
             hidden_dim: 32,
             num_heads: 4,
             num_layers: 2,

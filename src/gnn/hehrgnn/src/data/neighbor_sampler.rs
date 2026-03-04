@@ -289,7 +289,7 @@ mod tests {
         let config = GraphBuildConfig {
             node_feat_dim: 4,
             add_reverse_edges: true,
-            add_self_loops: false,
+            add_self_loops: false, add_positional_encoding: true,
         };
 
         build_hetero_graph(&facts, &config, &device)

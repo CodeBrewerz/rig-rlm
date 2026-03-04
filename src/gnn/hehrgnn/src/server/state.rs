@@ -5,7 +5,7 @@
 //! This makes the state `Send + Sync` as required by axum.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Returns current UTC timestamp as ISO 8601 string (no chrono dep).
 pub fn chrono_now() -> String {
@@ -187,6 +187,10 @@ pub struct AppState {
 
     /// Trained SAE for embedding interpretability (if available).
     pub sae_state: Option<SaeState>,
+
+    /// Learnable scorer for fiduciary recommendations (thread-safe for reward feedback).
+    /// Uses asymmetric RL rewards: miss_penalty_multiplier=3.0 (paper 2402.18246).
+    pub scorer: Arc<Mutex<crate::eval::learnable_scorer::LearnableScorer>>,
 }
 
 /// Pre-trained SAE + feature labels for interpretability.
@@ -560,6 +564,7 @@ impl AppState {
             node_feat_dim: feat_dim,
             add_reverse_edges: true,
             add_self_loops: true,
+            add_positional_encoding: true,
         };
 
         // Build graph
@@ -575,6 +580,20 @@ impl AppState {
 
         let node_types: Vec<String> = graph.node_types().iter().map(|s| s.to_string()).collect();
         let edge_types: Vec<EdgeType> = graph.edge_types().iter().map(|e| (*e).clone()).collect();
+
+        // Derive actual feature dimension from graph (may differ from feat_dim due to PE)
+        let actual_feat_dim = graph
+            .node_features
+            .values()
+            .next()
+            .map(|t| t.dims()[1])
+            .unwrap_or(feat_dim);
+        println!(
+            "  Feature dim: {} (base={}, with PE={})",
+            actual_feat_dim,
+            feat_dim,
+            actual_feat_dim > feat_dim
+        );
 
         // ── Run all 5 GNN models with optimal feature combos ──
         let mut model_embeddings: HashMap<String, PlainEmbeddings> = HashMap::new();
@@ -614,7 +633,7 @@ impl AppState {
         // 1. GraphSAGE + DoRA + JEPA (optimal: +7.9% AUC)
         println!("  Running GraphSAGE + DoRA + JEPA...");
         let mut sage_model = GraphSageModelConfig {
-            in_dim: feat_dim,
+            in_dim: actual_feat_dim,
             hidden_dim: config.hidden_dim,
             num_layers: config.num_gnn_layers,
             dropout: 0.0,
@@ -682,7 +701,7 @@ impl AppState {
         // 2. RGCN + mHC + JEPA (optimal: +4.2% AUC, 8 layers, 4 streams)
         println!("  Running RGCN + mHC + JEPA...");
         let mhc_rgcn = MhcRgcnConfig {
-            in_dim: feat_dim,
+            in_dim: actual_feat_dim,
             hidden_dim: config.hidden_dim,
             num_layers: 8,
             num_bases: 4,
@@ -739,7 +758,7 @@ impl AppState {
         // 3. GAT + JEPA (optimal: +9.9% AUC)
         println!("  Running GAT + JEPA...");
         let gat_model = GatConfig {
-            in_dim: feat_dim,
+            in_dim: actual_feat_dim,
             hidden_dim: config.hidden_dim,
             num_heads: 4,
             num_layers: config.num_gnn_layers,
@@ -780,7 +799,7 @@ impl AppState {
         // 4. GPS Transformer + JEPA (optimal: +3.8% AUC)
         println!("  Running GPS + JEPA...");
         let gt_model = GraphTransformerConfig {
-            in_dim: feat_dim,
+            in_dim: actual_feat_dim,
             hidden_dim: config.hidden_dim,
             num_heads: 4,
             num_layers: config.num_gnn_layers,
@@ -904,6 +923,7 @@ impl AppState {
         println!("  ✅ Extracted {} edge types", graph_edges_data.edges.len());
 
         // ── Build audit provenance ──
+        let graph_hash_u64 = graph_hash; // save u64 for scorer checkpoint
         let graph_hash = format!(
             "N{}_E{}_NT{}_ET{}_D{}",
             graph.total_nodes(),
@@ -1060,6 +1080,30 @@ impl AppState {
             }
         };
 
+        // ── Initialize learnable scorer with asymmetric RL rewards ──
+        println!("  Initializing learnable scorer (asymmetric RL, 3× miss penalty)...");
+        let scorer = {
+            use crate::eval::learnable_scorer::{LearnableScorer, ScorerConfig};
+            let scorer_config = ScorerConfig {
+                embedding_dim: config.hidden_dim,
+                hidden1: 64,
+                hidden2: 32,
+                lr: 0.005,
+                miss_penalty_multiplier: 3.0, // paper 2402.18246
+            };
+            // Try loading from checkpoint
+            let (scorer, loaded) = crate::model::ensemble_pipeline::get_or_create_scorer(
+                graph_hash_u64,
+                &scorer_config,
+            );
+            if loaded {
+                println!("  ✅ Scorer loaded from checkpoint");
+            } else {
+                println!("  ✅ Fresh scorer initialized (miss_penalty=3.0×)");
+            }
+            Arc::new(Mutex::new(scorer))
+        };
+
         Arc::new(Self {
             embeddings: sage_emb,
             model_embeddings,
@@ -1076,6 +1120,7 @@ impl AppState {
             concept_labels,
             layer_activations: all_layer_activations,
             sae_state,
+            scorer,
         })
     }
 

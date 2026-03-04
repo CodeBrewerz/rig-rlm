@@ -434,6 +434,196 @@ pub async fn classify_nodes(
 }
 
 // ===========================================================================
+// Transaction Categorization (paper 2506.09234 — Rel-Cat link prediction)
+// ===========================================================================
+
+#[derive(Deserialize)]
+pub struct CategorizeRequest {
+    /// Node type of the transaction.
+    /// Real ontology: "transaction-evidence", default schema: "transaction".
+    #[serde(default = "default_txn_type")]
+    pub node_type: String,
+    /// Node ID of the transaction.
+    pub node_id: usize,
+    /// Category node type to rank against.
+    /// Real ontology: "transaction-category", default schema: "category".
+    #[serde(default = "default_category_type")]
+    pub category_type: String,
+    /// Number of top categories to return (default: 5).
+    #[serde(default = "default_categorize_top_k")]
+    pub top_k: usize,
+}
+
+fn default_txn_type() -> String {
+    "transaction-evidence".into()
+}
+fn default_category_type() -> String {
+    "transaction-category".into()
+}
+fn default_categorize_top_k() -> usize {
+    5
+}
+
+pub async fn categorize_transaction(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CategorizeRequest>,
+) -> Result<Json<crate::tasks::link_predictor::LinkPredictionResult>, (StatusCode, String)>
+{
+    use crate::tasks::link_predictor::{LinkPredictorConfig, LinkPredictor};
+
+    // Validate transaction node
+    let txn_emb = state
+        .embeddings
+        .data
+        .get(&req.node_type)
+        .and_then(|vecs| vecs.get(req.node_id))
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("No embedding for {}:{}", req.node_type, req.node_id),
+            )
+        })?;
+
+    // Get all category embeddings
+    let cat_embs: Vec<(String, usize, String, Vec<f32>)> = state
+        .embeddings
+        .data
+        .get(&req.category_type)
+        .map(|vecs| {
+            vecs.iter()
+                .enumerate()
+                .map(|(id, emb)| {
+                    let name = state.node_name(&req.category_type, id);
+                    (req.category_type.clone(), id, name, emb.clone())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if cat_embs.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("No category nodes of type '{}' found", req.category_type),
+        ));
+    }
+
+    // Build historical transaction context for TopK-NN
+    // Find all transactions from the same company/owner as this transaction
+    let historical = build_historical_context(
+        &state, &req.node_type, req.node_id, &req.category_type,
+    );
+
+    let config = LinkPredictorConfig {
+        top_k: req.top_k,
+        nn_sim_threshold: 0.8,
+        nn_min_targets: 1,
+        diversity_keep_ratio: 0.4,
+    };
+
+    let predictor = LinkPredictor::new(config);
+
+    let result = predictor.predict(
+        txn_emb,
+        &cat_embs,
+        historical.as_ref().map(|(h, _)| h.as_slice()),
+        historical.as_ref().map(|(_, c)| c.as_slice()),
+        &req.node_type,
+        req.node_id,
+    );
+
+    Ok(Json(result))
+}
+
+/// Build historical transaction context for TopK-NN from graph edges.
+///
+/// Finds all other transactions connected to the same parent entity
+/// (e.g., same company/account/user) and their category assignments.
+///
+/// Works with both default schema (transaction → transaction-has-category → category)
+/// and real schema (transaction-evidence → evidence-has-category → transaction-category).
+fn build_historical_context(
+    state: &AppState,
+    txn_type: &str,
+    txn_id: usize,
+    category_type: &str,
+) -> Option<(Vec<(Vec<f32>, usize)>, Vec<(String, usize, String)>)> {
+    // edges is HashMap<(src_type, relation, dst_type), Vec<(src_idx, dst_idx)>>
+
+    // Step 1: Find what parent entity this transaction is connected to
+    let mut parent_type = String::new();
+    let mut parent_id: Option<usize> = None;
+
+    for ((src_t, _rel, dst_t), pairs) in &state.graph_edges.edges {
+        if src_t == txn_type && dst_t != category_type {
+            for &(src, dst) in pairs {
+                if src == txn_id {
+                    parent_type = dst_t.clone();
+                    parent_id = Some(dst);
+                    break;
+                }
+            }
+            if parent_id.is_some() {
+                break;
+            }
+        }
+    }
+
+    let parent_id = parent_id?;
+
+    // Step 2: Find all sibling transactions connected to the same parent
+    let mut sibling_txns: Vec<usize> = Vec::new();
+    for ((src_t, _rel, dst_t), pairs) in &state.graph_edges.edges {
+        if src_t == txn_type && *dst_t == parent_type {
+            for &(src, dst) in pairs {
+                if dst == parent_id && src != txn_id {
+                    sibling_txns.push(src);
+                }
+            }
+        }
+    }
+
+    if sibling_txns.is_empty() {
+        return None;
+    }
+
+    // Step 3: Find each sibling transaction's category
+    let mut txn_to_cat: HashMap<usize, usize> = HashMap::new();
+    for ((src_t, _rel, dst_t), pairs) in &state.graph_edges.edges {
+        if src_t == txn_type && dst_t == category_type {
+            for &(src, dst) in pairs {
+                if sibling_txns.contains(&src) {
+                    txn_to_cat.insert(src, dst);
+                }
+            }
+        }
+    }
+
+    // Step 4: Build historical embeddings with their category IDs
+    let txn_embs = state.embeddings.data.get(txn_type)?;
+    let historical_embs: Vec<(Vec<f32>, usize)> = txn_to_cat
+        .iter()
+        .filter_map(|(&txn, &cat)| {
+            txn_embs.get(txn).map(|emb| (emb.clone(), cat))
+        })
+        .collect();
+
+    // Step 5: Build category metadata
+    let mut seen_cats: Vec<(String, usize, String)> = Vec::new();
+    for &cat_id in txn_to_cat.values() {
+        if !seen_cats.iter().any(|(_, id, _)| *id == cat_id) {
+            let name = state.node_name(category_type, cat_id);
+            seen_cats.push((category_type.to_string(), cat_id, name));
+        }
+    }
+
+    if historical_embs.is_empty() {
+        None
+    } else {
+        Some((historical_embs, seen_cats))
+    }
+}
+
+// ===========================================================================
 // Anomaly scoring — the main prediction endpoint (MULTI-MODEL ENSEMBLE)
 // ===========================================================================
 
@@ -1583,6 +1773,42 @@ pub async fn fiduciary_next_actions(
 
     let mut response = crate::eval::fiduciary::recommend(&ctx, None);
 
+    // ── Enrich recommendations with learned scorer (asymmetric RL, paper 2402.18246) ──
+    if let Ok(scorer) = state.scorer.lock() {
+        use crate::eval::learnable_scorer::ScorerExample;
+        for rec in &mut response.recommendations {
+            let action_type = crate::eval::fiduciary::FiduciaryActionType::from_name(&rec.action_type);
+            let target_emb = state
+                .embeddings
+                .data
+                .get(&rec.target_node_type)
+                .and_then(|vecs| vecs.get(rec.target_node_id))
+                .map(|v| v.clone())
+                .unwrap_or_else(|| vec![0.0; state.hidden_dim]);
+
+            let example = ScorerExample {
+                user_emb: user_emb.to_vec(),
+                target_emb,
+                action_type,
+                anomaly_score: rec.target_anomaly_score,
+                embedding_affinity: rec.embedding_affinity,
+                context: [
+                    rec.axes.cost_reduction,
+                    rec.axes.risk_reduction,
+                    rec.axes.goal_alignment,
+                    rec.axes.urgency,
+                    rec.axes.conflict_freedom,
+                ],
+            };
+
+            let (_axes, logit) = scorer.forward(&example);
+            rec.scorer_logit = Some(logit);
+            // Override recommendation using learned model:
+            // logit > 0 = model endorses, logit <= 0 = model advises caution
+            rec.is_recommended = logit > 0.0;
+        }
+    }
+
     // Attach SAE interpretability explanation if available
     if let Some(sae_state) = &state.sae_state {
         let sae_explanation = crate::eval::sae::explain(
@@ -1594,6 +1820,231 @@ pub async fn fiduciary_next_actions(
     }
 
     Ok(Json(response))
+}
+
+// ===========================================================================
+// Critical Path Discovery (paper 2402.18246)
+// ===========================================================================
+
+#[derive(Deserialize)]
+pub struct CriticalPathRequest {
+    pub node_type: String,
+    pub node_id: usize,
+    /// Risk threshold above which the user is in danger (default: 0.7).
+    #[serde(default = "default_danger_threshold")]
+    pub danger_threshold: f32,
+    /// Max edges to ablate (default: 5).
+    #[serde(default = "default_max_depth")]
+    pub max_depth: usize,
+}
+
+fn default_danger_threshold() -> f32 {
+    0.7
+}
+fn default_max_depth() -> usize {
+    5
+}
+
+#[derive(Serialize)]
+pub struct CriticalPathResponse {
+    pub user_node_type: String,
+    pub user_node_id: usize,
+    pub baseline_risk: f32,
+    pub total_ablations: usize,
+    pub paths: Vec<CriticalPathInfo>,
+}
+
+#[derive(Serialize)]
+pub struct CriticalPathInfo {
+    pub removed_edges: Vec<CriticalEdgeInfo>,
+    pub baseline_risk: f32,
+    pub final_risk: f32,
+    pub risk_trajectory: Vec<f32>,
+    pub explanation: String,
+}
+
+#[derive(Serialize)]
+pub struct CriticalEdgeInfo {
+    pub src_type: String,
+    pub relation: String,
+    pub dst_type: String,
+    pub dst_name: String,
+    pub risk_delta: f32,
+}
+
+pub async fn critical_path(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CriticalPathRequest>,
+) -> Result<Json<CriticalPathResponse>, (StatusCode, String)> {
+    use crate::eval::critical_path::{discover_critical_paths, CriticalPathConfig};
+
+    // Build anomaly scores map
+    let mut anomaly_scores: HashMap<String, HashMap<String, Vec<f32>>> = HashMap::new();
+    for model in &state.model_names {
+        let mut type_scores: HashMap<String, Vec<f32>> = HashMap::new();
+        for (nt, &count) in &state.graph_meta.node_counts {
+            if let Some(scores) = state.precomputed.get(model, nt) {
+                let norm: Vec<f32> = (0..count).map(|i| scores.normalized(i)).collect();
+                type_scores.insert(nt.clone(), norm);
+            }
+        }
+        anomaly_scores.insert(model.clone(), type_scores);
+    }
+
+    let config = CriticalPathConfig {
+        danger_threshold: req.danger_threshold,
+        max_depth: req.max_depth,
+        min_risk_delta: 0.01,
+    };
+
+    let report = discover_critical_paths(
+        &anomaly_scores,
+        &state.graph_edges.edges,
+        &state.node_names,
+        &req.node_type,
+        req.node_id,
+        &config,
+    );
+
+    let paths: Vec<CriticalPathInfo> = report
+        .paths
+        .iter()
+        .map(|p| CriticalPathInfo {
+            removed_edges: p
+                .removed_edges
+                .iter()
+                .map(|e| CriticalEdgeInfo {
+                    src_type: e.src_type.clone(),
+                    relation: e.relation.clone(),
+                    dst_type: e.dst_type.clone(),
+                    dst_name: e.dst_name.clone(),
+                    risk_delta: e.risk_delta,
+                })
+                .collect(),
+            baseline_risk: p.baseline_risk,
+            final_risk: p.final_risk,
+            risk_trajectory: p.risk_trajectory.clone(),
+            explanation: p.explanation.clone(),
+        })
+        .collect();
+
+    Ok(Json(CriticalPathResponse {
+        user_node_type: req.node_type,
+        user_node_id: req.node_id,
+        baseline_risk: report.baseline_risk,
+        total_ablations: report.total_ablations,
+        paths,
+    }))
+}
+
+// ===========================================================================
+// Fiduciary Reward Feedback (online RL learning)
+// ===========================================================================
+
+#[derive(Deserialize)]
+pub struct RewardRequest {
+    /// Action type name (e.g. "ShouldInvestigate").
+    pub action_type: String,
+    /// Whether the user accepted the recommendation.
+    pub accepted: bool,
+    /// How helpful the recommendation was (0.0–1.0).
+    pub helpfulness: Option<f32>,
+    /// Was the target entity actually high-risk?
+    #[serde(default)]
+    pub was_high_risk: bool,
+    /// User node type.
+    pub node_type: String,
+    /// User node ID.
+    pub node_id: usize,
+    /// Target node type.
+    pub target_node_type: String,
+    /// Target node ID.
+    pub target_node_id: usize,
+}
+
+#[derive(Serialize)]
+pub struct RewardResponse {
+    pub status: String,
+    pub scorer_updated: bool,
+}
+
+pub async fn fiduciary_reward(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RewardRequest>,
+) -> Result<Json<RewardResponse>, (StatusCode, String)> {
+    use crate::eval::learnable_scorer::{RewardSignal, ScorerExample};
+
+    let action_type = crate::eval::fiduciary::FiduciaryActionType::from_name(&req.action_type);
+
+    // Get embeddings for user and target
+    let user_emb = state
+        .embeddings
+        .data
+        .get(&req.node_type)
+        .and_then(|vecs| vecs.get(req.node_id))
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("No embedding for {}:{}", req.node_type, req.node_id),
+            )
+        })?
+        .clone();
+
+    let target_emb = state
+        .embeddings
+        .data
+        .get(&req.target_node_type)
+        .and_then(|vecs| vecs.get(req.target_node_id))
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "No embedding for {}:{}",
+                    req.target_node_type, req.target_node_id
+                ),
+            )
+        })?
+        .clone();
+
+    // Get anomaly score and affinity for context
+    let anomaly_score = state
+        .precomputed
+        .get("SAGE", &req.target_node_type)
+        .map(|s| s.normalized(req.target_node_id))
+        .unwrap_or(0.0);
+
+    let affinity = PlainEmbeddings::cosine_similarity(&user_emb, &target_emb);
+
+    let reward = RewardSignal {
+        action_type,
+        accepted: req.accepted,
+        helpfulness: req.helpfulness,
+        example: ScorerExample {
+            user_emb,
+            target_emb,
+            action_type,
+            anomaly_score,
+            embedding_affinity: affinity,
+            context: [0.5, 0.5, 0.5, 0.5, 0.5], // default context
+        },
+        was_high_risk: req.was_high_risk,
+    };
+
+    let updated = if let Ok(mut scorer) = state.scorer.lock() {
+        scorer.apply_reward(&reward);
+        true
+    } else {
+        false
+    };
+
+    Ok(Json(RewardResponse {
+        status: if updated {
+            "Reward applied — scorer updated with asymmetric RL".into()
+        } else {
+            "Failed to acquire scorer lock".into()
+        },
+        scorer_updated: updated,
+    }))
 }
 
 // ===========================================================================
@@ -1689,12 +2140,18 @@ pub async fn retrain(
     let graph_config = GraphBuildConfig {
         node_feat_dim: feat_dim,
         add_reverse_edges: true,
-        add_self_loops: true,
+        add_self_loops: true, add_positional_encoding: true,
     };
     let mut graph = build_from_schema::<B>(&schema, &syn_config, &graph_config, &device);
     let node_types: Vec<String> = graph.node_types().iter().map(|s| s.to_string()).collect();
     let edge_types: Vec<crate::data::hetero_graph::EdgeType> =
         graph.edge_types().iter().map(|e| (*e).clone()).collect();
+
+    // Derive actual feature dim (may differ from feat_dim due to PE)
+    let actual_feat_dim = graph.node_features.values()
+        .next()
+        .map(|t| t.dims()[1])
+        .unwrap_or(feat_dim);
 
     // Compute graph hash
     let graph_hash = {
@@ -1724,7 +2181,7 @@ pub async fn retrain(
     // 1. GraphSAGE + DoRA + JEPA
     {
         let mut sage = GraphSageModelConfig {
-            in_dim: feat_dim, hidden_dim, num_layers: 2, dropout: 0.0,
+            in_dim: actual_feat_dim, hidden_dim, num_layers: 2, dropout: 0.0,
         }.init::<B>(&node_types, &edge_types, &device);
         sage.attach_adapter(init_hetero_basis_adapter(
             hidden_dim, hidden_dim, &LoraConfig::default(), node_types.clone(), &device,
@@ -1751,7 +2208,7 @@ pub async fn retrain(
     // 2. GAT + JEPA
     {
         let gat = GatConfig {
-            in_dim: feat_dim, hidden_dim, num_heads: 4, num_layers: 2, dropout: 0.0,
+            in_dim: actual_feat_dim, hidden_dim, num_heads: 4, num_layers: 2, dropout: 0.0,
         }.init_model::<B>(&node_types, &edge_types, &device);
         let fwd = |g: &crate::data::hetero_graph::HeteroGraph<B>| gat.forward(g);
         let report = train_jepa(&mut graph, &fwd, &train_config, 0.1, 0.5, false);
@@ -1775,7 +2232,7 @@ pub async fn retrain(
     // 3. GPS + JEPA
     {
         let gps = GraphTransformerConfig {
-            in_dim: feat_dim, hidden_dim, num_heads: 4, num_layers: 2,
+            in_dim: actual_feat_dim, hidden_dim, num_heads: 4, num_layers: 2,
             ffn_ratio: 2, dropout: 0.0,
         }.init_model::<B>(&node_types, &edge_types, &device);
         let fwd = |g: &crate::data::hetero_graph::HeteroGraph<B>| gps.forward(g);
@@ -1800,7 +2257,7 @@ pub async fn retrain(
     // 4. RGCN + mHC + JEPA
     {
         let mhc = MhcRgcnConfig {
-            in_dim: feat_dim, hidden_dim, num_layers: 8,
+            in_dim: actual_feat_dim, hidden_dim, num_layers: 8,
             num_bases: 4, n_streams: 4, dropout: 0.0,
         }.init::<B>(&node_types, &edge_types, &device);
         let fwd = |g: &crate::data::hetero_graph::HeteroGraph<B>| mhc.forward(g);
@@ -1831,4 +2288,238 @@ pub async fn retrain(
         checkpoints_saved,
         total_duration_ms: duration_ms,
     })
+}
+
+// ===========================================================================
+// PQL Predictive Query (KumoRFM-inspired)
+// ===========================================================================
+
+#[derive(Deserialize)]
+pub struct PqlRequest {
+    /// PQL query string, e.g. "PREDICT transaction-category FOR transaction VIA categorized_as"
+    pub query: String,
+    /// Source node ID to predict for.
+    pub source_node_id: usize,
+    /// Number of results to return.
+    #[serde(default = "default_top_k")]
+    pub top_k: usize,
+}
+
+#[derive(Serialize)]
+pub struct PqlResponse {
+    pub query: String,
+    pub parsed_task: Option<PqlParsedTask>,
+    pub predictions: Option<crate::tasks::link_predictor::LinkPredictionResult>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct PqlParsedTask {
+    pub source_type: String,
+    pub target_type: String,
+    pub relation_path: Vec<String>,
+}
+
+pub async fn predict_pql(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PqlRequest>,
+) -> Result<Json<PqlResponse>, (StatusCode, String)> {
+    use crate::tasks::pql::parse_pql;
+    use crate::tasks::link_predictor::{LinkPredictorConfig, LinkPredictor};
+
+    // Parse the PQL query
+    let task = match parse_pql(&req.query) {
+        Some(t) => t,
+        None => {
+            return Ok(Json(PqlResponse {
+                query: req.query,
+                parsed_task: None,
+                predictions: None,
+                error: Some("Failed to parse PQL query. Expected: PREDICT <target_type> FOR <source_type> VIA <relation>".into()),
+            }));
+        }
+    };
+
+    let parsed = PqlParsedTask {
+        source_type: task.source_type.clone(),
+        target_type: task.target_type.clone(),
+        relation_path: task.path.clone(),
+    };
+
+    // Get source embedding
+    let src_emb = state
+        .embeddings
+        .data
+        .get(&task.source_type)
+        .and_then(|vecs| vecs.get(req.source_node_id))
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("No embedding for {}:{}", task.source_type, req.source_node_id),
+            )
+        })?;
+
+    // Get all target embeddings
+    let tgt_embs: Vec<(String, usize, String, Vec<f32>)> = state
+        .embeddings
+        .data
+        .get(&task.target_type)
+        .map(|vecs| {
+            vecs.iter()
+                .enumerate()
+                .map(|(id, emb)| {
+                    let name = state.node_name(&task.target_type, id);
+                    (task.target_type.clone(), id, name, emb.clone())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if tgt_embs.is_empty() {
+        return Ok(Json(PqlResponse {
+            query: req.query,
+            parsed_task: Some(parsed),
+            predictions: None,
+            error: Some(format!("No target nodes of type '{}' found", task.target_type)),
+        }));
+    }
+
+    let config = LinkPredictorConfig {
+        top_k: req.top_k,
+        nn_sim_threshold: 0.8,
+        nn_min_targets: 1,
+        diversity_keep_ratio: 0.4,
+    };
+
+    let predictor = LinkPredictor::new(config);
+    let result = predictor.predict(
+        src_emb,
+        &tgt_embs,
+        None,
+        None,
+        &task.source_type,
+        req.source_node_id,
+    );
+
+    Ok(Json(PqlResponse {
+        query: req.query,
+        parsed_task: Some(parsed),
+        predictions: Some(result),
+        error: None,
+    }))
+}
+
+// ===========================================================================
+// Feature Importance Explainability (KumoRFM §2.4)
+// ===========================================================================
+
+#[derive(Deserialize)]
+pub struct ExplainRequest {
+    /// Source node type.
+    pub source_type: String,
+    /// Source node ID.
+    pub source_id: usize,
+    /// Target node type.
+    pub target_type: String,
+    /// Target node ID.
+    pub target_id: usize,
+    /// Number of top features to return.
+    #[serde(default = "default_top_k")]
+    pub top_k: usize,
+}
+
+#[derive(Serialize)]
+pub struct ExplainResponse {
+    pub source: NodeRef,
+    pub target: NodeRef,
+    pub base_score: f32,
+    pub feature_importances: Vec<crate::tasks::link_predictor::FeatureImportance>,
+    pub explanation: PredictionExplanation,
+}
+
+pub async fn explain_link(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ExplainRequest>,
+) -> Result<Json<ExplainResponse>, (StatusCode, String)> {
+    use crate::tasks::link_predictor::explain_prediction;
+
+    let src_emb = state
+        .embeddings
+        .data
+        .get(&req.source_type)
+        .and_then(|vecs| vecs.get(req.source_id))
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("No embedding for {}:{}", req.source_type, req.source_id),
+            )
+        })?;
+
+    let tgt_emb = state
+        .embeddings
+        .data
+        .get(&req.target_type)
+        .and_then(|vecs| vecs.get(req.target_id))
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("No embedding for {}:{}", req.target_type, req.target_id),
+            )
+        })?;
+
+    let base_score: f32 = src_emb.iter().zip(tgt_emb.iter()).map(|(a, b)| a * b).sum();
+    let importances = explain_prediction(src_emb, tgt_emb, req.top_k);
+
+    let src_name = state.node_name(&req.source_type, req.source_id);
+    let tgt_name = state.node_name(&req.target_type, req.target_id);
+
+    let top_features_desc: Vec<String> = importances
+        .iter()
+        .take(3)
+        .map(|fi| format!("dim[{}]: importance={:.4}, direction={:.4}", fi.feature_idx, fi.importance, fi.direction))
+        .collect();
+
+    let explanation = PredictionExplanation {
+        methodology: "Perturbation-based feature importance (KumoRFM §2.4)".into(),
+        inputs: vec![
+            format!("Source: {} ({}:{})", src_name, req.source_type, req.source_id),
+            format!("Target: {} ({}:{})", tgt_name, req.target_type, req.target_id),
+            format!("Embedding dim: {}", state.hidden_dim),
+        ],
+        reasoning_steps: vec![
+            ReasoningStep {
+                step: 1,
+                description: format!("Compute base dot-product score between {} and {}", src_name, tgt_name),
+                result: format!("base_score = {:.4}", base_score),
+            },
+            ReasoningStep {
+                step: 2,
+                description: format!("Perturb each of {} features by ±σ, measure score change", state.hidden_dim),
+                result: format!("Top {} features: {}", importances.len(), top_features_desc.join("; ")),
+            },
+        ],
+        conclusion: format!(
+            "The link between {} and {} (score={:.4}) is most influenced by {} embedding dimensions. \
+             Positive direction means the feature pushes the prediction score higher.",
+            src_name, tgt_name, base_score, importances.len()
+        ),
+        confidence: Some((base_score.abs() as f64).min(1.0)),
+        models_used: vec!["GraphSAGE".into()],
+    };
+
+    Ok(Json(ExplainResponse {
+        source: NodeRef {
+            node_type: req.source_type,
+            node_id: req.source_id,
+            name: src_name,
+        },
+        target: NodeRef {
+            node_type: req.target_type,
+            node_id: req.target_id,
+            name: tgt_name,
+        },
+        base_score,
+        feature_importances: importances,
+        explanation,
+    }))
 }

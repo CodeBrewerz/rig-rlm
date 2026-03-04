@@ -74,7 +74,7 @@ fn build_financial_graph() -> (HeteroGraph<B>, Vec<GraphFact>) {
         gf("user", "alice", "tracks", "budget", "monthly_budget"),
     ];
     let graph = build_hetero_graph::<B>(&facts, &GraphBuildConfig {
-        node_feat_dim: 16, add_reverse_edges: true, add_self_loops: true,
+        node_feat_dim: 16, add_reverse_edges: true, add_self_loops: true, add_positional_encoding: true,
     }, &device);
     (graph, facts)
 }

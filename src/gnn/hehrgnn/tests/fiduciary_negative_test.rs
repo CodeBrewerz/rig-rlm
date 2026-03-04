@@ -896,7 +896,7 @@ fn test_full_pipeline_adversarial_with_real_ensemble_and_scorer() {
     let config = GraphBuildConfig {
         node_feat_dim: hidden_dim,
         add_reverse_edges: true,
-        add_self_loops: true,
+        add_self_loops: true, add_positional_encoding: true,
     };
     let start = std::time::Instant::now();
     let graph = build_hetero_graph::<B>(&facts, &config, &device);
@@ -976,6 +976,7 @@ fn test_full_pipeline_adversarial_with_real_ensemble_and_scorer() {
         hidden1: 64,
         hidden2: 32,
         lr: 0.003,
+        ..ScorerConfig::default()
     };
     let mut scorer = LearnableScorer::new(&scorer_config);
 
@@ -1043,6 +1044,7 @@ fn test_full_pipeline_adversarial_with_real_ensemble_and_scorer() {
                     embedding_affinity: 0.8,
                     context: [0.0, 0.9, 0.1, 0.0, 0.0], // no debt, high savings, low risk
                 },
+                was_high_risk: false,
             };
             scorer.apply_reward(&reward);
             reward_buffer.push(reward);
@@ -1068,6 +1070,7 @@ fn test_full_pipeline_adversarial_with_real_ensemble_and_scorer() {
                     embedding_affinity: 0.8,
                     context: [0.0, 0.9, 0.1, 0.0, 0.0],
                 },
+                was_high_risk: false,
             };
             scorer.apply_reward(&reward);
             reward_buffer.push(reward);
@@ -1094,6 +1097,7 @@ fn test_full_pipeline_adversarial_with_real_ensemble_and_scorer() {
                 embedding_affinity: 0.3,
                 context: [0.0, 0.9, anomaly, 0.0, 0.0],
             },
+            was_high_risk: true, // high anomaly = genuinely risky
         };
         scorer.apply_reward(&reward);
         reward_buffer.push(reward);
@@ -1112,6 +1116,7 @@ fn test_full_pipeline_adversarial_with_real_ensemble_and_scorer() {
                 embedding_affinity: 0.8,
                 context: [0.0, 0.9, anomaly, 0.0, 0.0],
             },
+            was_high_risk: false, // low anomaly = not actually risky
         };
         scorer.apply_reward(&reward);
         reward_buffer.push(reward);

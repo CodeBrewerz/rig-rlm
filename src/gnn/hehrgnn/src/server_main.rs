@@ -79,11 +79,16 @@ async fn main() {
         .route("/embeddings", post(handlers::get_embedding))
         .route("/match/rank", post(handlers::rank_matches))
         .route("/classify", post(handlers::classify_nodes))
+        .route("/categorize", post(handlers::categorize_transaction))
         .route("/anomaly/score", post(handlers::score_anomalies))
         .route("/similarity/search", post(handlers::similarity_search))
         .route("/fiduciary/actions", post(handlers::fiduciary_next_actions))
+        .route("/fiduciary/reward", post(handlers::fiduciary_reward))
+        .route("/critical-path", post(handlers::critical_path))
         .route("/checkpoints", get(handlers::list_checkpoints_handler))
         .route("/retrain", post(handlers::retrain))
+        .route("/predict/pql", post(handlers::predict_pql))
+        .route("/explain", post(handlers::explain_link))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
@@ -96,11 +101,16 @@ async fn main() {
     println!("    POST /embeddings          — get node embedding vector");
     println!("    POST /match/rank          — rank match candidates (link prediction)");
     println!("    POST /classify            — classify nodes (category/tax code)");
+    println!("    POST /categorize          — transaction category prediction (TopK-NN + GNN link prediction)");
     println!("    POST /anomaly/score       — anomaly scores for nodes");
     println!("    POST /similarity/search   — kNN similarity search");
-    println!("    POST /fiduciary/actions   — fiduciary next-action predictions");
+    println!("    POST /fiduciary/actions   — fiduciary next-action predictions (with RL scorer)");
+    println!("    POST /fiduciary/reward    — submit reward feedback for RL learning");
+    println!("    POST /critical-path       — critical financial dependency analysis");
     println!("    GET  /checkpoints         — list saved model checkpoints");
     println!("    POST /retrain             — retrain all models + save checkpoints");
+    println!("    POST /predict/pql         — PQL predictive query (PREDICT ... FOR ... VIA ...)");
+    println!("    POST /explain             — feature importance explainability");
     println!();
 
     let listener = tokio::net::TcpListener::bind(&bind)

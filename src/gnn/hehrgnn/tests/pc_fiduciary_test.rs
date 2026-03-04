@@ -284,7 +284,7 @@ fn test_pc_circuit_predicts_all_fiduciary_actions() {
         &GraphBuildConfig {
             node_feat_dim: 16,
             add_reverse_edges: true,
-            add_self_loops: true,
+            add_self_loops: true, add_positional_encoding: true,
         },
         &device,
     );

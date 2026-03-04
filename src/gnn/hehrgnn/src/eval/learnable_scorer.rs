@@ -69,6 +69,8 @@ pub struct LearnableScorer {
 
     /// Learning rate for gradient updates.
     lr: f32,
+    /// Asymmetric penalty multiplier for high-risk misses (from PRA paper).
+    miss_penalty_multiplier: f32,
     /// Number of training samples seen (for logging).
     pub samples_seen: usize,
     /// Input dimensionality.
@@ -84,6 +86,13 @@ pub struct ScorerConfig {
     pub hidden1: usize,
     pub hidden2: usize,
     pub lr: f32,
+    /// Asymmetric RL reward multiplier (from PRA paper 2402.18246).
+    /// When the scorer misses a high-risk entity (false negative),
+    /// the penalty gradient is multiplied by this factor.
+    /// Default: 3.0 (missing risk costs 3× more than false positive).
+    /// Rationale: fiduciary duty makes under-estimating risk far worse
+    /// than over-flagging a safe entity.
+    pub miss_penalty_multiplier: f32,
 }
 
 impl Default for ScorerConfig {
@@ -93,6 +102,7 @@ impl Default for ScorerConfig {
             hidden1: 64,
             hidden2: 32,
             lr: 0.001,
+            miss_penalty_multiplier: 3.0,
         }
     }
 }
@@ -134,6 +144,11 @@ pub struct RewardSignal {
     pub helpfulness: Option<f32>,
     /// The input that generated this recommendation.
     pub example: ScorerExample,
+    /// Whether this entity was actually high-risk (ground truth).
+    /// Used for asymmetric rewards: if the scorer failed to flag a
+    /// high-risk entity, the penalty is multiplied by miss_penalty_multiplier.
+    /// (From PRA paper 2402.18246: pessimistic bias for safety-critical systems)
+    pub was_high_risk: bool,
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -174,6 +189,7 @@ impl LearnableScorer {
             axis_weights: [0.25, 0.25, 0.15, 0.15, 0.10, 0.10],
             conflict_matrix: vec![vec![0.0; NUM_ACTIONS]; NUM_ACTIONS],
             lr: config.lr,
+            miss_penalty_multiplier: config.miss_penalty_multiplier,
             samples_seen: 0,
             input_dim,
             hidden_dim1: h1,
@@ -471,8 +487,20 @@ impl LearnableScorer {
         let h2_gated: Vec<f32> = h2.iter().zip(gate.iter()).map(|(h, g)| h * g).collect();
         let output = matmul_bias(&self.w3, &self.b3, &h2_gated);
 
-        // Reward signal: +1 for accepted, -1 for rejected
-        let base_reward = if reward.accepted { 1.0 } else { -1.0 };
+        // Asymmetric RL reward (PRA paper 2402.18246):
+        // - Accepted recommendation → positive reward (+1)
+        // - Rejected recommendation → negative reward (-1)
+        // - Missed high-risk entity → amplified negative reward (-1 × miss_penalty_multiplier)
+        //   This creates a pessimistic bias: the scorer learns to err on the side of
+        //   flagging possible risks rather than missing them.
+        let base_reward = if reward.accepted {
+            1.0
+        } else if reward.was_high_risk {
+            // Critical miss: we failed to flag a genuinely risky entity
+            -1.0 * self.miss_penalty_multiplier
+        } else {
+            -1.0
+        };
         let reward_strength = reward.helpfulness.unwrap_or(0.5) * base_reward;
 
         let mut grad_output = vec![0.0f32; OUTPUT_DIM];
@@ -571,9 +599,11 @@ impl LearnableScorer {
                     };
                     self.apply_reward(&boosted);
                 } else {
-                    // Replay failures with stronger negative signal
+                    // Replay failures with stronger negative signal.
+                    // High-risk misses get extra boost (PRA paper: pessimistic replay)
+                    let boost = if signal.was_high_risk { 2.0 } else { 1.5 };
                     let boosted = RewardSignal {
-                        helpfulness: Some(signal.helpfulness.unwrap_or(0.5) * 1.5),
+                        helpfulness: Some(signal.helpfulness.unwrap_or(0.5) * boost),
                         ..signal.clone()
                     };
                     self.apply_reward(&boosted);

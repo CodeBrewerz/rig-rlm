@@ -85,7 +85,7 @@ fn build_financial_graph() -> (HeteroGraph<B>, Vec<GraphFact>) {
         &GraphBuildConfig {
             node_feat_dim: 16,
             add_reverse_edges: true,
-            add_self_loops: true,
+            add_self_loops: true, add_positional_encoding: true,
         },
         &device,
     );

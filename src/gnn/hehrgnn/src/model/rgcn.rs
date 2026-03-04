@@ -279,7 +279,7 @@ mod tests {
             &GraphBuildConfig {
                 node_feat_dim: 8,
                 add_reverse_edges: true,
-                add_self_loops: true,
+                add_self_loops: true, add_positional_encoding: true,
             },
             &device,
         );

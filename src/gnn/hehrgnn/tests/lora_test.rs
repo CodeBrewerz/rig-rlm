@@ -64,7 +64,7 @@ fn financial_facts() -> Vec<GraphFact> {
 fn test_adapter_zero_init() {
     let device = <B as Backend>::Device::default();
     let (facts, build_config) = (financial_facts(), GraphBuildConfig {
-        node_feat_dim: 16, add_reverse_edges: true, add_self_loops: true,
+        node_feat_dim: 16, add_reverse_edges: true, add_self_loops: true, add_positional_encoding: true,
     });
     let graph = build_hetero_graph::<B>(&facts, &build_config, &device);
     let node_types: Vec<String> = graph.node_types().iter().map(|s| s.to_string()).collect();
@@ -120,7 +120,7 @@ fn test_full_vs_adapter_comparison() {
     let device = <B as Backend>::Device::default();
     let facts = financial_facts();
     let build_config = GraphBuildConfig {
-        node_feat_dim: 16, add_reverse_edges: true, add_self_loops: true,
+        node_feat_dim: 16, add_reverse_edges: true, add_self_loops: true, add_positional_encoding: true,
     };
     let graph = build_hetero_graph::<B>(&facts, &build_config, &device);
     let node_types: Vec<String> = graph.node_types().iter().map(|s| s.to_string()).collect();
@@ -238,7 +238,7 @@ fn test_adapter_persistence() {
     let device = <B as Backend>::Device::default();
     let facts = financial_facts();
     let build_config = GraphBuildConfig {
-        node_feat_dim: 16, add_reverse_edges: true, add_self_loops: true,
+        node_feat_dim: 16, add_reverse_edges: true, add_self_loops: true, add_positional_encoding: true,
     };
     let graph = build_hetero_graph::<B>(&facts, &build_config, &device);
     let node_types: Vec<String> = graph.node_types().iter().map(|s| s.to_string()).collect();

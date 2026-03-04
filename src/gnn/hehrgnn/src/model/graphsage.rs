@@ -8,6 +8,7 @@
 //!
 //! Best for: transaction categorization, merchant similarity, fast embeddings.
 
+use burn::module::Param;
 use burn::nn;
 use burn::prelude::*;
 
@@ -197,6 +198,8 @@ pub struct GraphSageModel<B: Backend> {
     /// Optional HeteroDoRA adapters for input projections.
     /// When present: y = input_linear(x) + adapter(x)
     pub input_adapters: Option<crate::model::lora::HeteroBasisAdapter<B>>,
+    /// Learnable node-type embedding (KumoRFM §2.3)
+    type_embeddings: Vec<Param<Tensor<B, 2>>>,
     #[module(skip)]
     node_type_keys: Vec<String>,
 }
@@ -219,10 +222,17 @@ impl GraphSageModelConfig {
     ) -> GraphSageModel<B> {
         let mut input_linears = Vec::new();
         let mut node_type_keys = Vec::new();
+        let mut type_embeddings = Vec::new();
         for nt in node_types.iter() {
             let linear = nn::LinearConfig::new(self.in_dim, self.hidden_dim).init(device);
             input_linears.push(linear);
             node_type_keys.push(nt.clone());
+            let emb = Tensor::<B, 2>::random(
+                [1, self.hidden_dim],
+                burn::tensor::Distribution::Uniform(-0.1, 0.1),
+                device,
+            );
+            type_embeddings.push(Param::from_tensor(emb));
         }
 
         let sage_config = GraphSageConfig {
@@ -241,6 +251,7 @@ impl GraphSageModelConfig {
             layers,
             input_linears,
             input_adapters: None,
+            type_embeddings,
             node_type_keys,
         }
     }
@@ -277,6 +288,11 @@ impl<B: Backend> GraphSageModel<B> {
                 // DoRA: y = m * normalize(base + adapter)
                 if let Some(ref adapter) = self.input_adapters {
                     projected = adapter.dora_forward(projected, features.clone(), node_type);
+                }
+
+                // Add learnable node-type embedding (KumoRFM §2.3)
+                if idx < self.type_embeddings.len() {
+                    projected = projected + self.type_embeddings[idx].val();
                 }
 
                 embeddings.insert(node_type, projected);
@@ -357,14 +373,22 @@ mod tests {
             node_feat_dim: 8,
             add_reverse_edges: true,
             add_self_loops: true,
+            add_positional_encoding: true,
         };
         let graph = build_hetero_graph::<TestBackend>(&facts, &graph_config, &device);
 
         let node_types: Vec<String> = graph.node_types().iter().map(|s| s.to_string()).collect();
         let edge_types: Vec<EdgeType> = graph.edge_types().iter().map(|e| (*e).clone()).collect();
 
+        let in_dim = graph
+            .node_features
+            .values()
+            .next()
+            .map(|t| t.dims()[1])
+            .unwrap_or(8);
+
         let model_config = GraphSageModelConfig {
-            in_dim: 8,
+            in_dim,
             hidden_dim: 16,
             num_layers: 2,
             dropout: 0.0,

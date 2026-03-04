@@ -7,6 +7,7 @@
 //! Superior to RGCN when neighbor importance varies (e.g., not all
 //! transactions at a merchant are equally relevant for anomaly detection).
 
+use burn::module::Param;
 use burn::nn;
 use burn::prelude::*;
 
@@ -242,6 +243,8 @@ pub struct GatModel<B: Backend> {
     pub input_linears: Vec<nn::Linear<B>>,
     /// Optional HeteroDoRA adapters for input projections.
     pub input_adapters: Option<crate::model::lora::HeteroBasisAdapter<B>>,
+    /// Learnable node-type embedding (KumoRFM §2.3)
+    type_embeddings: Vec<Param<Tensor<B, 2>>>,
     #[module(skip)]
     node_type_keys: Vec<String>,
 }
@@ -255,10 +258,17 @@ impl GatConfig {
     ) -> GatModel<B> {
         let mut input_linears = Vec::new();
         let mut node_type_keys = Vec::new();
+        let mut type_embeddings = Vec::new();
         for nt in node_types.iter() {
             let linear = nn::LinearConfig::new(self.in_dim, self.hidden_dim).init(device);
             input_linears.push(linear);
             node_type_keys.push(nt.clone());
+            let emb = Tensor::<B, 2>::random(
+                [1, self.hidden_dim],
+                burn::tensor::Distribution::Uniform(-0.1, 0.1),
+                device,
+            );
+            type_embeddings.push(Param::from_tensor(emb));
         }
 
         let mut layers = Vec::new();
@@ -270,6 +280,7 @@ impl GatConfig {
             layers,
             input_linears,
             input_adapters: None,
+            type_embeddings,
             node_type_keys,
         }
     }
@@ -301,6 +312,11 @@ impl<B: Backend> GatModel<B> {
                 // DoRA: y = m * normalize(base + adapter)
                 if let Some(ref adapter) = self.input_adapters {
                     projected = adapter.dora_forward(projected, features.clone(), node_type);
+                }
+
+                // Add learnable node-type embedding (KumoRFM §2.3)
+                if idx < self.type_embeddings.len() {
+                    projected = projected + self.type_embeddings[idx].val();
                 }
 
                 embeddings.insert(node_type, projected);
@@ -349,14 +365,22 @@ mod tests {
             node_feat_dim: 16,
             add_reverse_edges: true,
             add_self_loops: true,
+            add_positional_encoding: true,
         };
         let graph = build_hetero_graph::<TestBackend>(&facts, &config, &device);
 
         let node_types: Vec<String> = graph.node_types().iter().map(|s| s.to_string()).collect();
         let edge_types: Vec<EdgeType> = graph.edge_types().iter().map(|e| (*e).clone()).collect();
 
+        let in_dim = graph
+            .node_features
+            .values()
+            .next()
+            .map(|t| t.dims()[1])
+            .unwrap_or(16);
+
         let gat = GatConfig {
-            in_dim: 16,
+            in_dim,
             hidden_dim: 32,
             num_heads: 4,
             num_layers: 2,

@@ -20,6 +20,9 @@ pub struct GraphBuildConfig {
     pub add_reverse_edges: bool,
     /// Whether to add self-loops for each node type.
     pub add_self_loops: bool,
+    /// Whether to add structural positional encoding (node-type ID, in/out degree).
+    /// Adds 3 extra dimensions to node features. (KumoRFM §2.3)
+    pub add_positional_encoding: bool,
 }
 
 impl Default for GraphBuildConfig {
@@ -28,6 +31,7 @@ impl Default for GraphBuildConfig {
             node_feat_dim: 16,
             add_reverse_edges: true,
             add_self_loops: true,
+            add_positional_encoding: true,
         }
     }
 }
@@ -150,6 +154,86 @@ pub fn build_hetero_graph<B: Backend>(
         }
     }
 
+    // Step 5: Add structural positional encoding (KumoRFM §2.3)
+    // Concatenate [node_type_id, log(in_degree+1), log(out_degree+1)] to node features
+    if config.add_positional_encoding {
+        // Assign a type index to each node type (sorted alphabetically for determinism)
+        let mut sorted_types: Vec<&NodeType> = graph.node_counts.keys().collect();
+        sorted_types.sort();
+        let num_types = sorted_types.len().max(1) as f32;
+        let type_idx: HashMap<&str, f32> = sorted_types
+            .iter()
+            .enumerate()
+            .map(|(i, nt)| (nt.as_str(), i as f32 / num_types))
+            .collect();
+
+        // Compute in-degree and out-degree per (node_type, node_idx)
+        let mut in_degree: HashMap<String, Vec<f32>> = HashMap::new();
+        let mut out_degree: HashMap<String, Vec<f32>> = HashMap::new();
+
+        for (nt, &count) in &graph.node_counts {
+            in_degree.insert(nt.clone(), vec![0.0; count]);
+            out_degree.insert(nt.clone(), vec![0.0; count]);
+        }
+
+        for (et, edge_idx) in &graph.edge_index {
+            let (src_type, _, dst_type) = et;
+            if let Some((src_vec, dst_vec)) = graph.edges_as_vecs(et) {
+                // Out-degree for source nodes
+                if let Some(out_deg) = out_degree.get_mut(src_type) {
+                    for &s in &src_vec {
+                        let s = s as usize;
+                        if s < out_deg.len() {
+                            out_deg[s] += 1.0;
+                        }
+                    }
+                }
+                // In-degree for destination nodes
+                if let Some(in_deg) = in_degree.get_mut(dst_type) {
+                    for &d in &dst_vec {
+                        let d = d as usize;
+                        if d < in_deg.len() {
+                            in_deg[d] += 1.0;
+                        }
+                    }
+                }
+                let _ = edge_idx; // suppress unused warning
+            }
+        }
+
+        // Concatenate positional features to existing node features
+        for (nt, feat) in &graph.node_features.clone() {
+            let count = graph.node_counts[nt];
+            let tid = *type_idx.get(nt.as_str()).unwrap_or(&0.0);
+            let in_deg = in_degree
+                .get(nt)
+                .cloned()
+                .unwrap_or_else(|| vec![0.0; count]);
+            let out_deg = out_degree
+                .get(nt)
+                .cloned()
+                .unwrap_or_else(|| vec![0.0; count]);
+
+            // Build positional features: [type_id, log(in_deg+1), log(out_deg+1)]
+            let mut pe_data = Vec::with_capacity(count * 3);
+            for i in 0..count {
+                pe_data.push(tid);
+                pe_data.push((in_deg[i] + 1.0).ln());
+                pe_data.push((out_deg[i] + 1.0).ln());
+            }
+
+            let pe_tensor: Tensor<B, 2> =
+                Tensor::<B, 1>::from_data(pe_data.as_slice(), device).reshape([count, 3]);
+
+            // Concatenate: [original_features | positional_encoding]
+            let new_feat = Tensor::cat(vec![feat.clone(), pe_tensor], 1);
+            let new_dim = config.node_feat_dim + 3;
+
+            graph.node_features.insert(nt.clone(), new_feat);
+            graph.node_feat_dims.insert(nt.clone(), new_dim);
+        }
+    }
+
     graph
 }
 
@@ -264,6 +348,7 @@ mod tests {
             node_feat_dim: 8,
             add_reverse_edges: true,
             add_self_loops: false,
+            add_positional_encoding: true,
         };
 
         let graph = build_hetero_graph::<TestBackend>(&facts, &config, &device);
@@ -340,6 +425,7 @@ relation user-owns-account,
             node_feat_dim: 8,
             add_reverse_edges: true,
             add_self_loops: true,
+            add_positional_encoding: true,
         };
 
         let device = <TestBackend as Backend>::Device::default();

@@ -334,6 +334,46 @@ pub fn generate_synthetic_facts(schema: &TqlSchema, config: &SyntheticDataConfig
         });
     }
 
+    // ── Guarantee critical relation facts ──
+    // The random generator rarely produces evidence-has-category facts
+    // (307 relations means ~0.3% chance per fact). We explicitly add them
+    // so every transaction-evidence instance has a category assignment.
+    // This is critical for the transaction categorization use case.
+
+    let critical_pairs = [
+        (
+            "transaction-evidence",
+            "evidence-has-category",
+            "transaction-category",
+        ),
+        (
+            "transaction-evidence",
+            "evidence-from-instrument",
+            "instrument",
+        ),
+    ];
+
+    for (src_type, rel_name, dst_type) in &critical_pairs {
+        if let (Some(src_instances), Some(dst_instances)) = (
+            instances_by_type.get(*src_type),
+            instances_by_type.get(*dst_type),
+        ) {
+            if dst_instances.is_empty() {
+                continue;
+            }
+            for (i, src_inst) in src_instances.iter().enumerate() {
+                // Round-robin assignment so categories are distributed
+                let dst_inst = &dst_instances[i % dst_instances.len()];
+                facts.push(RawFact {
+                    head: src_inst.clone(),
+                    relation: rel_name.to_string(),
+                    tail: dst_inst.clone(),
+                    qualifiers: vec![],
+                });
+            }
+        }
+    }
+
     facts
 }
 
