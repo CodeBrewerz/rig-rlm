@@ -7,9 +7,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use super::state::{AppState, PlainEmbeddings};
@@ -64,76 +64,78 @@ fn derived_scorer_context(
         target_recurring = true;
     }
 
-    for ((src_t, rel, dst_t), edges) in &state.graph_edges.edges {
-        let rel_l = rel.to_ascii_lowercase();
-        let src_l = src_t.to_ascii_lowercase();
-        let dst_l = dst_t.to_ascii_lowercase();
+    if let Ok(graph_edges) = state.graph_edges.read() {
+        for ((src_t, rel, dst_t), edges) in &graph_edges.edges {
+            let rel_l = rel.to_ascii_lowercase();
+            let src_l = src_t.to_ascii_lowercase();
+            let dst_l = dst_t.to_ascii_lowercase();
 
-        for &(src, dst) in edges {
-            let touches_target = (src_t == target_type && src == target_id)
-                || (dst_t == target_type && dst == target_id);
-            if touches_target {
-                degree += 1;
+            for &(src, dst) in edges {
+                let touches_target = (src_t == target_type && src == target_id)
+                    || (dst_t == target_type && dst == target_id);
+                if touches_target {
+                    degree += 1;
 
-                let debt_rel = rel_l.contains("debt")
-                    || rel_l.contains("obligation")
-                    || rel_l.contains("lien")
-                    || rel_l.contains("loan");
-                let debt_type = src_l.contains("debt")
-                    || dst_l.contains("debt")
-                    || src_l.contains("obligation")
-                    || dst_l.contains("obligation")
-                    || src_l.contains("loan")
-                    || dst_l.contains("loan")
-                    || src_l.contains("lien")
-                    || dst_l.contains("lien");
-                if debt_rel || debt_type {
-                    debt_hits += 1;
-                }
+                    let debt_rel = rel_l.contains("debt")
+                        || rel_l.contains("obligation")
+                        || rel_l.contains("lien")
+                        || rel_l.contains("loan");
+                    let debt_type = src_l.contains("debt")
+                        || dst_l.contains("debt")
+                        || src_l.contains("obligation")
+                        || dst_l.contains("obligation")
+                        || src_l.contains("loan")
+                        || dst_l.contains("loan")
+                        || src_l.contains("lien")
+                        || dst_l.contains("lien");
+                    if debt_rel || debt_type {
+                        debt_hits += 1;
+                    }
 
-                if target_is_goal
-                    || rel_l.contains("goal")
-                    || src_l.contains("goal")
-                    || dst_l.contains("goal")
-                {
-                    goal_links += 1;
-                    if rel_l.contains("fund")
-                        || rel_l.contains("contribution")
-                        || rel_l.contains("allocation")
-                        || rel_l.contains("sinking")
+                    if target_is_goal
+                        || rel_l.contains("goal")
+                        || src_l.contains("goal")
+                        || dst_l.contains("goal")
                     {
-                        goal_funding_links += 1;
+                        goal_links += 1;
+                        if rel_l.contains("fund")
+                            || rel_l.contains("contribution")
+                            || rel_l.contains("allocation")
+                            || rel_l.contains("sinking")
+                        {
+                            goal_funding_links += 1;
+                        }
+                    }
+
+                    if rel_l.contains("tax") || src_l.contains("tax") || dst_l.contains("tax") {
+                        target_tax = true;
+                    }
+                    if rel_l.contains("recurring")
+                        || src_l.contains("recurring")
+                        || dst_l.contains("recurring")
+                        || rel_l.contains("subscription")
+                        || src_l.contains("subscription")
+                        || dst_l.contains("subscription")
+                    {
+                        target_recurring = true;
                     }
                 }
 
-                if rel_l.contains("tax") || src_l.contains("tax") || dst_l.contains("tax") {
-                    target_tax = true;
-                }
-                if rel_l.contains("recurring")
-                    || src_l.contains("recurring")
-                    || dst_l.contains("recurring")
-                    || rel_l.contains("subscription")
-                    || src_l.contains("subscription")
-                    || dst_l.contains("subscription")
-                {
-                    target_recurring = true;
-                }
-            }
-
-            let touches_user =
-                (src_t == user_type && src == user_id) || (dst_t == user_type && dst == user_id);
-            if touches_user {
-                if rel_l.contains("tax") || src_l.contains("tax") || dst_l.contains("tax") {
-                    user_tax = true;
-                }
-                if rel_l.contains("recurring")
-                    || src_l.contains("recurring")
-                    || dst_l.contains("recurring")
-                    || rel_l.contains("subscription")
-                    || src_l.contains("subscription")
-                    || dst_l.contains("subscription")
-                {
-                    user_recurring = true;
+                let touches_user = (src_t == user_type && src == user_id)
+                    || (dst_t == user_type && dst == user_id);
+                if touches_user {
+                    if rel_l.contains("tax") || src_l.contains("tax") || dst_l.contains("tax") {
+                        user_tax = true;
+                    }
+                    if rel_l.contains("recurring")
+                        || src_l.contains("recurring")
+                        || dst_l.contains("recurring")
+                        || rel_l.contains("subscription")
+                        || src_l.contains("subscription")
+                        || dst_l.contains("subscription")
+                    {
+                        user_recurring = true;
+                    }
                 }
             }
         }
@@ -168,6 +170,112 @@ fn derived_scorer_context(
 
 fn sigmoid_f32(x: f32) -> f32 {
     1.0 / (1.0 + (-x.clamp(-20.0, 20.0)).exp())
+}
+
+fn model_calibration_weight(model_name: &str) -> f32 {
+    match model_name.to_ascii_uppercase().as_str() {
+        "GAT" => 1.15,
+        "RGCN" => 1.05,
+        "SAGE" => 1.00,
+        "GT" | "GPS" => 1.00,
+        "HEHRGNN" => 0.95,
+        _ => 1.00,
+    }
+}
+
+/// Calibrated ensemble head over per-model candidate logits.
+///
+/// Input shape:
+/// - map[model_name] = Vec[candidate_raw_score]
+///
+/// Output:
+/// - Vec[candidate_probability in 0..1]
+fn calibrated_candidate_scores(
+    per_model_scores: &HashMap<String, Vec<f32>>,
+    num_candidates: usize,
+) -> Vec<f32> {
+    if num_candidates == 0 || per_model_scores.is_empty() {
+        return vec![];
+    }
+
+    let mut logits = vec![0.0f32; num_candidates];
+    let mut weight_sum = vec![0.0f32; num_candidates];
+    let mut z_sum = vec![0.0f32; num_candidates];
+    let mut z_sq_sum = vec![0.0f32; num_candidates];
+    let mut z_count = vec![0usize; num_candidates];
+
+    for (model_name, scores) in per_model_scores {
+        let finite: Vec<f32> = scores.iter().copied().filter(|x| x.is_finite()).collect();
+        if finite.len() < 2 {
+            continue;
+        }
+        let mean = finite.iter().sum::<f32>() / finite.len() as f32;
+        let var = finite.iter().map(|s| (s - mean).powi(2)).sum::<f32>() / finite.len() as f32;
+        let std = var.sqrt().max(1e-5);
+        let weight = model_calibration_weight(model_name);
+
+        for i in 0..num_candidates {
+            let Some(raw) = scores.get(i).copied() else {
+                continue;
+            };
+            if !raw.is_finite() {
+                continue;
+            }
+            let z = ((raw - mean) / std).clamp(-6.0, 6.0);
+            logits[i] += weight * z;
+            weight_sum[i] += weight;
+            z_sum[i] += z;
+            z_sq_sum[i] += z * z;
+            z_count[i] += 1;
+        }
+    }
+
+    for i in 0..num_candidates {
+        if weight_sum[i] > 0.0 {
+            logits[i] /= weight_sum[i];
+        }
+
+        // Penalize candidates where model signals disagree (high cross-model variance).
+        if z_count[i] > 1 {
+            let c = z_count[i] as f32;
+            let mean_z = z_sum[i] / c;
+            let var_z = (z_sq_sum[i] / c - mean_z * mean_z).max(0.0);
+            logits[i] -= 0.10 * var_z;
+        }
+    }
+
+    let mean_logit = logits.iter().sum::<f32>() / num_candidates as f32;
+    logits
+        .iter()
+        .map(|l| sigmoid_f32((l - mean_logit) * 1.4))
+        .collect()
+}
+
+fn normalize_raw_candidate_scores(raw_scores: &[f32]) -> Vec<f32> {
+    if raw_scores.is_empty() {
+        return Vec::new();
+    }
+    let finite: Vec<f32> = raw_scores
+        .iter()
+        .copied()
+        .filter(|x| x.is_finite())
+        .collect();
+    if finite.is_empty() {
+        return vec![0.5; raw_scores.len()];
+    }
+    let mean = finite.iter().sum::<f32>() / finite.len() as f32;
+    let var = finite.iter().map(|s| (s - mean).powi(2)).sum::<f32>() / finite.len() as f32;
+    let std = var.sqrt().max(1e-5);
+    raw_scores
+        .iter()
+        .map(|s| {
+            if s.is_finite() {
+                sigmoid_f32((*s - mean) / std)
+            } else {
+                0.5
+            }
+        })
+        .collect()
 }
 
 // ===========================================================================
@@ -217,11 +325,15 @@ pub struct HealthResponse {
 }
 
 pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
+    let graph_meta = state.graph_meta.read().ok();
     Json(HealthResponse {
         status: "ok".into(),
-        total_nodes: state.graph_meta.total_nodes,
-        total_edges: state.graph_meta.total_edges,
-        node_types: state.graph_meta.node_types.clone(),
+        total_nodes: graph_meta.as_ref().map(|m| m.total_nodes).unwrap_or(0),
+        total_edges: graph_meta.as_ref().map(|m| m.total_edges).unwrap_or(0),
+        node_types: graph_meta
+            .as_ref()
+            .map(|m| m.node_types.clone())
+            .unwrap_or_default(),
         hidden_dim: state.hidden_dim,
     })
 }
@@ -261,6 +373,11 @@ pub async fn get_embedding(
     ))?;
 
     let node_name = state.node_name(&req.node_type, req.node_id);
+    let (total_nodes, total_edges) = state
+        .graph_meta
+        .read()
+        .map(|m| (m.total_nodes, m.total_edges))
+        .unwrap_or((0, 0));
     let explanation = PredictionExplanation {
         methodology: "GNN node embedding via GraphSAGE message passing".into(),
         inputs: vec![
@@ -287,7 +404,7 @@ pub async fn get_embedding(
         ],
         conclusion: format!(
             "Embedding for {} computed via 2-layer GraphSAGE over {} nodes and {} edges",
-            node_name, state.graph_meta.total_nodes, state.graph_meta.total_edges
+            node_name, total_nodes, total_edges
         ),
         confidence: None,
         models_used: vec!["GraphSAGE".into()],
@@ -363,13 +480,87 @@ pub async fn rank_matches(
 
     let src_name = state.node_name(&req.src_type, req.src_id);
 
-    // Score all destination candidates using dot product
-    let mut scored: Vec<(usize, f32)> = dst_nodes
+    let raw_dot_scores: Vec<f32> = dst_nodes
         .iter()
-        .enumerate()
-        .map(|(id, dst_emb)| (id, PlainEmbeddings::dot_score(src_emb, dst_emb)))
+        .map(|dst_emb| PlainEmbeddings::dot_score(src_emb, dst_emb))
         .collect();
 
+    // Calibrated ensemble head: z-normalize per model then combine with reliability weights.
+    let mut per_model_scores: HashMap<String, Vec<f32>> = HashMap::new();
+    {
+        let all_models = state.model_embeddings.read().unwrap();
+        for (model_name, model_emb) in all_models.iter() {
+            let Some(src_vec) = model_emb
+                .data
+                .get(&req.src_type)
+                .and_then(|v| v.get(req.src_id))
+            else {
+                continue;
+            };
+            let Some(dst_vecs) = model_emb.data.get(&req.dst_type) else {
+                continue;
+            };
+
+            let mut model_scores = Vec::with_capacity(dst_nodes.len());
+            for dst_id in 0..dst_nodes.len() {
+                let s = dst_vecs
+                    .get(dst_id)
+                    .map(|d| PlainEmbeddings::dot_score(src_vec, d))
+                    .unwrap_or(f32::NAN);
+                model_scores.push(s);
+            }
+            if model_scores.iter().any(|s| s.is_finite()) {
+                per_model_scores.insert(model_name.clone(), model_scores);
+            }
+        }
+    }
+
+    let base_scores: Vec<f32> = if per_model_scores.is_empty() {
+        normalize_raw_candidate_scores(&raw_dot_scores)
+    } else {
+        calibrated_candidate_scores(&per_model_scores, dst_nodes.len())
+    };
+
+    let candidate_ids: Vec<usize> = (0..dst_nodes.len()).collect();
+    let (relation_scores, relation_channels) = state
+        .relation_head
+        .read()
+        .map(|head| {
+            head.score_candidates(
+                &req.src_type,
+                req.src_id,
+                &req.dst_type,
+                src_emb,
+                &candidate_ids,
+                dst_nodes,
+            )
+        })
+        .unwrap_or_else(|_| (vec![0.0; candidate_ids.len()], 0));
+    let rel_min = relation_scores
+        .iter()
+        .copied()
+        .fold(f32::INFINITY, f32::min)
+        .min(1.0);
+    let rel_max = relation_scores
+        .iter()
+        .copied()
+        .fold(f32::NEG_INFINITY, f32::max)
+        .max(0.0);
+    let relation_blend = if relation_channels > 0 && (rel_max - rel_min) > 1e-3 {
+        0.18
+    } else {
+        0.0
+    };
+
+    let final_scores: Vec<f32> = base_scores
+        .iter()
+        .enumerate()
+        .map(|(i, base)| {
+            let rel = relation_scores.get(i).copied().unwrap_or(0.5);
+            (base * (1.0 - relation_blend) + rel * relation_blend).clamp(0.0, 1.0)
+        })
+        .collect();
+    let mut scored: Vec<(usize, f32)> = final_scores.into_iter().enumerate().collect();
     scored.sort_by(|a, b| b.1.total_cmp(&a.1));
 
     let top_k = req.top_k.min(scored.len());
@@ -380,7 +571,8 @@ pub async fn rank_matches(
         .map(|(rank, &(id, score))| {
             let dst_name = state.node_name(&req.dst_type, id);
             let explanation = PredictionExplanation {
-                methodology: "Dot-product link prediction on GNN embeddings".into(),
+                methodology:
+                    "Calibrated multi-model link prediction with relation-conditioned head".into(),
                 inputs: vec![
                     format!("Source: {} ({})", src_name, req.src_type),
                     format!("Target: {} ({})", dst_name, req.dst_type),
@@ -388,16 +580,20 @@ pub async fn rank_matches(
                 reasoning_steps: vec![
                     ReasoningStep {
                         step: 1,
-                        description: "Retrieve source and target GNN embeddings".into(),
+                        description:
+                            "Retrieve source and target embeddings across all GNN backbones".into(),
                         result: format!(
-                            "Both embeddings are {}-dimensional vectors from GraphSAGE",
-                            state.hidden_dim
+                            "{}-dimensional vectors; per-model scores are z-normalized then fused",
+                            state.hidden_dim,
                         ),
                     },
                     ReasoningStep {
                         step: 2,
-                        description: "Compute dot product: score = Σ(src_i × dst_i)".into(),
-                        result: format!("score = {:.4}", score),
+                        description: "Blend calibrated ensemble probability with relation-conditioned compatibility".into(),
+                        result: format!(
+                            "score = {:.4} (relation_channels={}, relation_weight={:.2})",
+                            score, relation_channels, relation_blend
+                        ),
                     },
                     ReasoningStep {
                         step: 3,
@@ -414,9 +610,8 @@ pub async fn rank_matches(
                     },
                 ],
                 conclusion: format!(
-                    "{} is ranked #{} match for {} with dot-product score {:.4}. \
-                     This means their graph neighborhoods are structurally aligned — \
-                     entities they connect to are similar.",
+                    "{} is ranked #{} match for {} with calibrated score {:.4}. \
+                     This reflects cross-model agreement plus relation-specific structural compatibility.",
                     dst_name,
                     rank + 1,
                     src_name,
@@ -436,7 +631,8 @@ pub async fn rank_matches(
         .collect();
 
     let overall_explanation = PredictionExplanation {
-        methodology: "Link prediction via dot-product similarity on GraphSAGE embeddings".into(),
+        methodology:
+            "Calibrated link prediction via ensemble logits + relation-conditioned scoring".into(),
         inputs: vec![
             format!(
                 "Source: {} (type={}, id={})",
@@ -452,28 +648,38 @@ pub async fn rank_matches(
         reasoning_steps: vec![
             ReasoningStep {
                 step: 1,
-                description:
-                    "Compute GraphSAGE embeddings for all nodes via 2-layer message passing".into(),
+                description: "Compute per-model similarity logits and normalize each model's scale"
+                    .into(),
                 result: format!(
-                    "{}-dimensional embeddings for {} nodes",
-                    state.hidden_dim, state.graph_meta.total_nodes
+                    "{} model channels fused over {} candidates",
+                    per_model_scores.len().max(1),
+                    dst_nodes.len()
                 ),
             },
             ReasoningStep {
                 step: 2,
                 description: format!(
-                    "Score {} {} candidates via dot product with source embedding",
-                    dst_nodes.len(),
-                    req.dst_type
+                    "Blend calibrated scores with relation-conditioned compatibility over {} relation channels",
+                    relation_channels
                 ),
                 result: format!(
-                    "Scores range from {:.4} to {:.4}",
+                    "relation_blend={:.2}, score range {:.4}..{:.4}",
+                    relation_blend,
                     scored.last().map(|x| x.1).unwrap_or(0.0),
                     scored[0].1
                 ),
             },
             ReasoningStep {
                 step: 3,
+                description: format!(
+                    "Rank {} {} candidates by final fused score",
+                    dst_nodes.len(),
+                    req.dst_type
+                ),
+                result: format!("Top {} returned", top_k),
+            },
+            ReasoningStep {
+                step: 4,
                 description: format!("Sort and return top {} matches", top_k),
                 result: format!(
                     "Top match: {} (score={:.4}), lowest returned: {} (score={:.4})",
@@ -485,14 +691,24 @@ pub async fn rank_matches(
             },
         ],
         conclusion: format!(
-            "Found top {} matches for {} among {} {} candidates using dot-product link prediction",
+            "Found top {} matches for {} among {} {} candidates using calibrated + relation-conditioned link prediction",
             top_k,
             src_name,
             dst_nodes.len(),
             req.dst_type
         ),
         confidence: None,
-        models_used: vec!["GraphSAGE".into()],
+        models_used: {
+            let mut used = if per_model_scores.is_empty() {
+                vec!["GraphSAGE".to_string()]
+            } else {
+                per_model_scores.keys().cloned().collect::<Vec<_>>()
+            };
+            if relation_channels > 0 {
+                used.push("RelationHead".to_string());
+            }
+            used
+        },
     };
 
     Ok(Json(MatchRankResponse {
@@ -748,47 +964,166 @@ pub async fn categorize_transaction(
         req.node_id,
     );
 
-    // ── Ensemble scoring: average dot-product across all 5 models ──
-    // Each model provides its own embedding perspective; averaging improves robustness.
+    // ── Calibrated ensemble scoring head over all model channels ──
+    // Uses per-model z-normalization + reliability-weighted fusion.
     {
         let all_models = state.model_embeddings.read().unwrap();
+        let mut per_model_scores: HashMap<String, Vec<f32>> = HashMap::new();
 
-        for pred in &mut result.predictions {
-            let mut ensemble_score = 0.0f32;
-            let mut models_scored = 0;
+        for (model_name, model_emb) in all_models.iter() {
+            let Some(src_vec) = model_emb
+                .data
+                .get(&req.node_type)
+                .and_then(|vecs| vecs.get(req.node_id))
+            else {
+                continue;
+            };
+            let Some(target_vecs) = model_emb.data.get(&req.category_type) else {
+                continue;
+            };
 
-            for (_model_name, model_emb) in all_models.iter() {
-                let src = model_emb
-                    .data
-                    .get(&req.node_type)
-                    .and_then(|vecs| vecs.get(req.node_id));
-                let tgt = model_emb
-                    .data
-                    .get(&pred.target_type)
-                    .and_then(|vecs| vecs.get(pred.target_id));
+            let mut model_scores = Vec::with_capacity(cat_embs.len());
+            for (_tt, target_id, _name, _emb) in &cat_embs {
+                let s = target_vecs
+                    .get(*target_id)
+                    .map(|dst| PlainEmbeddings::dot_score(src_vec, dst))
+                    .unwrap_or(f32::NAN);
+                model_scores.push(s);
+            }
+            if model_scores.iter().any(|s| s.is_finite()) {
+                per_model_scores.insert(model_name.clone(), model_scores);
+            }
+        }
 
-                if let (Some(s), Some(t)) = (src, tgt) {
-                    // Dot-product score
-                    let dot: f32 = s.iter().zip(t.iter()).map(|(a, b)| a * b).sum();
-                    ensemble_score += dot;
-                    models_scored += 1;
+        let mut ranked: Vec<(usize, f32)> = if !per_model_scores.is_empty() {
+            calibrated_candidate_scores(&per_model_scores, cat_embs.len())
+                .into_iter()
+                .enumerate()
+                .collect()
+        } else {
+            let raw: Vec<f32> = cat_embs
+                .iter()
+                .map(|(_, _, _, emb)| PlainEmbeddings::dot_score(txn_emb, emb))
+                .collect();
+            normalize_raw_candidate_scores(&raw)
+                .into_iter()
+                .enumerate()
+                .collect()
+        };
+
+        let candidate_ids: Vec<usize> = cat_embs.iter().map(|(_, tid, _, _)| *tid).collect();
+        let candidate_vecs: Vec<Vec<f32>> =
+            cat_embs.iter().map(|(_, _, _, emb)| emb.clone()).collect();
+        let (relation_scores, relation_channels) = state
+            .relation_head
+            .read()
+            .map(|head| {
+                head.score_candidates(
+                    &req.node_type,
+                    req.node_id,
+                    &req.category_type,
+                    txn_emb,
+                    &candidate_ids,
+                    &candidate_vecs,
+                )
+            })
+            .unwrap_or_else(|_| (vec![0.0; candidate_ids.len()], 0));
+        let rel_min = relation_scores
+            .iter()
+            .copied()
+            .fold(f32::INFINITY, f32::min)
+            .min(1.0);
+        let rel_max = relation_scores
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max)
+            .max(0.0);
+        let relation_blend = if relation_channels > 0 && (rel_max - rel_min) > 1e-3 {
+            0.18
+        } else {
+            0.0
+        };
+        if relation_blend > 0.0 {
+            for (i, (_, score)) in ranked.iter_mut().enumerate() {
+                let rel = relation_scores.get(i).copied().unwrap_or(0.5);
+                *score = (*score * (1.0 - relation_blend) + rel * relation_blend).clamp(0.0, 1.0);
+            }
+        }
+
+        // Historical category frequency prior from sibling transactions.
+        let history_prior: HashMap<usize, f32> = historical
+            .as_ref()
+            .map(|(hist, _)| {
+                let mut counts: HashMap<usize, usize> = HashMap::new();
+                for (_emb, cat_id) in hist {
+                    *counts.entry(*cat_id).or_insert(0) += 1;
+                }
+                let total = hist.len().max(1) as f32;
+                counts
+                    .into_iter()
+                    .map(|(cat_id, c)| (cat_id, c as f32 / total))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Blend in TopK-NN prior when early-exit evidence exists.
+        if result.used_early_exit && !result.predictions.is_empty() {
+            let max_nn = result
+                .predictions
+                .iter()
+                .map(|p| p.score)
+                .fold(0.0f32, f32::max)
+                .max(1e-6);
+            let mut nn_by_target: HashMap<usize, f32> = HashMap::new();
+            for p in &result.predictions {
+                nn_by_target.insert(p.target_id, (p.score / max_nn).clamp(0.0, 1.0));
+            }
+            for (cat_idx, score) in ranked.iter_mut() {
+                let target_id = cat_embs[*cat_idx].1;
+                if let Some(nn_prior) = nn_by_target.get(&target_id) {
+                    *score = (*score * 0.85 + *nn_prior * 0.15).clamp(0.0, 1.0);
                 }
             }
+        }
 
-            if models_scored > 0 {
-                pred.score = ensemble_score / models_scored as f32;
+        // Blend historical prior (if available) after NN evidence.
+        if !history_prior.is_empty() {
+            for (cat_idx, score) in ranked.iter_mut() {
+                let target_id = cat_embs[*cat_idx].1;
+                if let Some(p) = history_prior.get(&target_id) {
+                    *score = (*score * 0.90 + *p * 0.10).clamp(0.0, 1.0);
+                }
             }
         }
 
-        // Re-sort by ensemble score (descending)
-        result
-            .predictions
-            .sort_by(|a, b| b.score.total_cmp(&a.score));
-        // Re-assign ranks
-        for (i, pred) in result.predictions.iter_mut().enumerate() {
-            pred.rank = i + 1;
-            pred.source = "gnn_ensemble_5model".to_string();
-        }
+        ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let top_k = req.top_k.min(ranked.len());
+        result.predictions = ranked[..top_k]
+            .iter()
+            .enumerate()
+            .map(|(rank, (cat_idx, score))| {
+                let (tt, tid, name, _emb) = &cat_embs[*cat_idx];
+                crate::tasks::link_predictor::LinkPrediction {
+                    target_type: tt.clone(),
+                    target_id: *tid,
+                    target_name: name.clone(),
+                    score: *score,
+                    rank: rank + 1,
+                    source: if per_model_scores.is_empty() {
+                        "gnn_relation_fused".to_string()
+                    } else {
+                        "gnn_ensemble_calibrated".to_string()
+                    },
+                }
+            })
+            .collect();
+        result.explanation = format!(
+            "Ranking over {} model channels with relation-conditioned head (relations={}, w={:.2}); top score={:.3}.",
+            per_model_scores.len().max(1),
+            relation_channels,
+            relation_blend,
+            result.predictions.first().map(|p| p.score).unwrap_or(0.0)
+        );
     }
 
     Ok(Json(result))
@@ -808,12 +1143,13 @@ fn build_historical_context(
     category_type: &str,
 ) -> Option<(Vec<(Vec<f32>, usize)>, Vec<(String, usize, String)>)> {
     // edges is HashMap<(src_type, relation, dst_type), Vec<(src_idx, dst_idx)>>
+    let graph_edges = state.graph_edges.read().ok()?;
 
     // Step 1: Find what parent entity this transaction is connected to
     let mut parent_type = String::new();
     let mut parent_id: Option<usize> = None;
 
-    for ((src_t, _rel, dst_t), pairs) in &state.graph_edges.edges {
+    for ((src_t, _rel, dst_t), pairs) in &graph_edges.edges {
         if src_t == txn_type && dst_t != category_type {
             for &(src, dst) in pairs {
                 if src == txn_id {
@@ -832,7 +1168,7 @@ fn build_historical_context(
 
     // Step 2: Find all sibling transactions connected to the same parent
     let mut sibling_txns: Vec<usize> = Vec::new();
-    for ((src_t, _rel, dst_t), pairs) in &state.graph_edges.edges {
+    for ((src_t, _rel, dst_t), pairs) in &graph_edges.edges {
         if src_t == txn_type && *dst_t == parent_type {
             for &(src, dst) in pairs {
                 if dst == parent_id && src != txn_id {
@@ -848,7 +1184,7 @@ fn build_historical_context(
 
     // Step 3: Find each sibling transaction's category
     let mut txn_to_cat: HashMap<usize, usize> = HashMap::new();
-    for ((src_t, _rel, dst_t), pairs) in &state.graph_edges.edges {
+    for ((src_t, _rel, dst_t), pairs) in &graph_edges.edges {
         if src_t == txn_type && dst_t == category_type {
             for &(src, dst) in pairs {
                 if sibling_txns.contains(&src) {
@@ -1449,7 +1785,11 @@ pub async fn score_anomalies(
 
         // ── Feature 5: Neighborhood Influence ──
         let k_hops = state.model_k_hops();
-        let neighbors = state.graph_edges.neighbors_of(&req.node_type, node_id);
+        let neighbors = state
+            .graph_edges
+            .read()
+            .map(|g| g.neighbors_of(&req.node_type, node_id))
+            .unwrap_or_default();
         let total_neighbors = neighbors.len();
 
         // Score each neighbor and find anomalous ones
@@ -1739,24 +2079,48 @@ pub async fn score_anomalies(
 
         // ── Feature 12: Neural Activation Probing ──
         let mut node_layer_acts: HashMap<String, Vec<Vec<f32>>> = HashMap::new();
-        if let Some(sage_acts) = state.layer_activations.get("SAGE") {
-            let mut per_layer: Vec<Vec<f32>> = Vec::new();
-            for layer_data in sage_acts {
-                if let Some(type_vecs) = layer_data.get(&req.node_type) {
-                    if let Some(node_vec) = type_vecs.get(node_id) {
-                        per_layer.push(node_vec.clone());
+        if let Ok(layer_activations) = state.layer_activations.read() {
+            if let Some(sage_acts) = layer_activations.get("SAGE") {
+                let mut per_layer: Vec<Vec<f32>> = Vec::new();
+                for layer_data in sage_acts {
+                    if let Some(type_vecs) = layer_data.get(&req.node_type) {
+                        if let Some(node_vec) = type_vecs.get(node_id) {
+                            per_layer.push(node_vec.clone());
+                        }
                     }
                 }
+                node_layer_acts.insert("SAGE".into(), per_layer);
             }
-            node_layer_acts.insert("SAGE".into(), per_layer);
         }
-        let activation_profile = ActivationProfile::build(
-            &node_layer_acts,
-            &state.probe_results,
-            &state.concept_labels,
-            &req.node_type,
-            node_id,
-        );
+        let activation_profile = {
+            let probe_guard = state.probe_results.read().ok();
+            let concept_guard = state.concept_labels.read().ok();
+            match (probe_guard, concept_guard) {
+                (Some(probes), Some(concepts)) => ActivationProfile::build(
+                    &node_layer_acts,
+                    &probes,
+                    &concepts,
+                    &req.node_type,
+                    node_id,
+                ),
+                _ => {
+                    let empty_probe = crate::eval::probing::ProbeResults {
+                        models: HashMap::new(),
+                        model_specializations: HashMap::new(),
+                    };
+                    let empty_concepts = crate::eval::probing::ConceptLabels {
+                        labels: HashMap::new(),
+                    };
+                    ActivationProfile::build(
+                        &node_layer_acts,
+                        &empty_probe,
+                        &empty_concepts,
+                        &req.node_type,
+                        node_id,
+                    )
+                }
+            }
+        };
 
         results.push(AnomalyResult {
             node_id,
@@ -2068,31 +2432,38 @@ pub struct EdgeTypeInfo {
 }
 
 pub async fn graph_info(State(state): State<Arc<AppState>>) -> Json<GraphInfoResponse> {
-    let node_types: Vec<NodeTypeInfo> = state
-        .graph_meta
-        .node_types
-        .iter()
-        .map(|nt| NodeTypeInfo {
-            name: nt.clone(),
-            count: state.graph_meta.node_counts.get(nt).copied().unwrap_or(0),
+    let graph_meta = state.graph_meta.read().ok();
+    let node_types: Vec<NodeTypeInfo> = graph_meta
+        .as_ref()
+        .map(|m| {
+            m.node_types
+                .iter()
+                .map(|nt| NodeTypeInfo {
+                    name: nt.clone(),
+                    count: m.node_counts.get(nt).copied().unwrap_or(0),
+                })
+                .collect()
         })
-        .collect();
+        .unwrap_or_default();
 
-    let edge_types: Vec<EdgeTypeInfo> = state
-        .graph_meta
-        .edge_types
-        .iter()
-        .map(|et| EdgeTypeInfo {
-            src_type: et.0.clone(),
-            relation: et.1.clone(),
-            dst_type: et.2.clone(),
-            count: state.graph_meta.edge_counts.get(et).copied().unwrap_or(0),
+    let edge_types: Vec<EdgeTypeInfo> = graph_meta
+        .as_ref()
+        .map(|m| {
+            m.edge_types
+                .iter()
+                .map(|et| EdgeTypeInfo {
+                    src_type: et.0.clone(),
+                    relation: et.1.clone(),
+                    dst_type: et.2.clone(),
+                    count: m.edge_counts.get(et).copied().unwrap_or(0),
+                })
+                .collect()
         })
-        .collect();
+        .unwrap_or_default();
 
     Json(GraphInfoResponse {
-        total_nodes: state.graph_meta.total_nodes,
-        total_edges: state.graph_meta.total_edges,
+        total_nodes: graph_meta.as_ref().map(|m| m.total_nodes).unwrap_or(0),
+        total_edges: graph_meta.as_ref().map(|m| m.total_edges).unwrap_or(0),
         node_types,
         edge_types,
     })
@@ -2114,10 +2485,10 @@ pub async fn fiduciary_next_actions(
 ) -> Result<Json<crate::eval::fiduciary::FiduciaryResponse>, (StatusCode, String)> {
     // Verify node type exists
     let node_count = state
-        .graph_meta
-        .node_counts
-        .get(&req.node_type)
-        .copied()
+        .embeddings
+        .read()
+        .ok()
+        .and_then(|emb| emb.data.get(&req.node_type).map(|v| v.len()))
         .unwrap_or(0);
 
     if node_count == 0 {
@@ -2155,10 +2526,15 @@ pub async fn fiduciary_next_actions(
 
     // Build anomaly scores map: model → { node_type → scores }
     let mut anomaly_scores: HashMap<String, HashMap<String, Vec<f32>>> = HashMap::new();
+    let node_counts_snapshot = state
+        .graph_meta
+        .read()
+        .map(|m| m.node_counts.clone())
+        .unwrap_or_default();
     let model_names = &state.model_names;
     for model in model_names {
         let mut type_scores: HashMap<String, Vec<f32>> = HashMap::new();
-        for (nt, &count) in &state.graph_meta.node_counts {
+        for (nt, &count) in &node_counts_snapshot {
             if let Some(scores) = state.precomputed.get(model, nt) {
                 let norm: Vec<f32> = (0..count).map(|i| scores.normalized(i)).collect();
                 type_scores.insert(nt.clone(), norm);
@@ -2170,18 +2546,28 @@ pub async fn fiduciary_next_actions(
     // Build node counts map
     let node_counts: HashMap<String, usize> = state
         .graph_meta
-        .node_counts
-        .iter()
-        .map(|(k, &v)| (k.clone(), v))
-        .collect();
+        .read()
+        .map(|m| m.node_counts.clone())
+        .unwrap_or_default();
+    let node_names = state
+        .node_names
+        .read()
+        .map(|n| n.clone())
+        .unwrap_or_default();
 
     let emb_guard = state.embeddings.read().unwrap();
+    let graph_edges_guard = state.graph_edges.read().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("RwLock error: {}", e),
+        )
+    })?;
     let ctx = crate::eval::fiduciary::FiduciaryContext {
         user_emb,
         embeddings: &emb_guard.data,
         anomaly_scores: &anomaly_scores,
-        edges: &state.graph_edges.edges,
-        node_names: &state.node_names,
+        edges: &graph_edges_guard.edges,
+        node_names: &node_names,
         node_counts: &node_counts,
         user_type: req.node_type.clone(),
         user_id: req.node_id,
@@ -2255,10 +2641,12 @@ pub async fn fiduciary_next_actions(
     }
 
     // Attach SAE interpretability explanation if available
-    if let Some(sae_state) = &state.sae_state {
-        let sae_explanation =
-            crate::eval::sae::explain(&sae_state.sae, user_emb, &sae_state.feature_labels);
-        response.sae_explanation = Some(sae_explanation);
+    if let Ok(sae_guard) = state.sae_state.read() {
+        if let Some(sae_state) = sae_guard.as_ref() {
+            let sae_explanation =
+                crate::eval::sae::explain(&sae_state.sae, user_emb, &sae_state.feature_labels);
+            response.sae_explanation = Some(sae_explanation);
+        }
     }
 
     Ok(Json(response))
@@ -2318,13 +2706,18 @@ pub async fn critical_path(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CriticalPathRequest>,
 ) -> Result<Json<CriticalPathResponse>, (StatusCode, String)> {
-    use crate::eval::critical_path::{CriticalPathConfig, discover_critical_paths};
+    use crate::eval::critical_path::{discover_critical_paths, CriticalPathConfig};
 
     // Build anomaly scores map
     let mut anomaly_scores: HashMap<String, HashMap<String, Vec<f32>>> = HashMap::new();
+    let node_counts_snapshot = state
+        .graph_meta
+        .read()
+        .map(|m| m.node_counts.clone())
+        .unwrap_or_default();
     for model in &state.model_names {
         let mut type_scores: HashMap<String, Vec<f32>> = HashMap::new();
-        for (nt, &count) in &state.graph_meta.node_counts {
+        for (nt, &count) in &node_counts_snapshot {
             if let Some(scores) = state.precomputed.get(model, nt) {
                 let norm: Vec<f32> = (0..count).map(|i| scores.normalized(i)).collect();
                 type_scores.insert(nt.clone(), norm);
@@ -2338,11 +2731,23 @@ pub async fn critical_path(
         max_depth: req.max_depth,
         min_risk_delta: 0.01,
     };
+    let graph_edges_guard = state.graph_edges.read().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("RwLock error: {}", e),
+        )
+    })?;
+    let node_names = state.node_names.read().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("RwLock error: {}", e),
+        )
+    })?;
 
     let report = discover_critical_paths(
         &anomaly_scores,
-        &state.graph_edges.edges,
-        &state.node_names,
+        &graph_edges_guard.edges,
+        &node_names,
         &req.node_type,
         req.node_id,
         &config,
@@ -2530,6 +2935,86 @@ pub async fn list_checkpoints_handler() -> Json<CheckpointsResponse> {
     })
 }
 
+fn build_live_training_graph<B: burn::prelude::Backend>(
+    embeddings: &HashMap<String, Vec<Vec<f32>>>,
+    edge_map: &HashMap<(String, String, String), Vec<(usize, usize)>>,
+    hidden_dim: usize,
+    device: &B::Device,
+) -> crate::data::hetero_graph::HeteroGraph<B> {
+    use burn::prelude::*;
+    let mut graph = crate::data::hetero_graph::HeteroGraph::<B>::new();
+
+    for (node_type, vecs) in embeddings {
+        if vecs.is_empty() {
+            continue;
+        }
+        let feat_dim = vecs
+            .iter()
+            .map(|v| v.len())
+            .max()
+            .unwrap_or(hidden_dim.max(1))
+            .max(1);
+        let mut flat = Vec::with_capacity(vecs.len() * feat_dim);
+        for emb in vecs {
+            for i in 0..feat_dim {
+                let v = emb.get(i).copied().unwrap_or(0.0);
+                flat.push(if v.is_finite() { v } else { 0.0 });
+            }
+        }
+        let feat =
+            Tensor::<B, 1>::from_data(flat.as_slice(), device).reshape([vecs.len(), feat_dim]);
+        graph.add_node_type(node_type, feat);
+    }
+
+    let mut merged_edges = edge_map.clone();
+    for ((src_t, rel, dst_t), pairs) in edge_map {
+        if rel == "self_loop" || rel.starts_with("rev_") {
+            continue;
+        }
+        let rev_key = (dst_t.clone(), format!("rev_{}", rel), src_t.clone());
+        let rev_list = merged_edges.entry(rev_key).or_default();
+        for &(src, dst) in pairs {
+            rev_list.push((dst, src));
+        }
+    }
+    for (nt, &count) in &graph.node_counts {
+        let key = (nt.clone(), "self_loop".to_string(), nt.clone());
+        let entry = merged_edges.entry(key).or_default();
+        for i in 0..count {
+            entry.push((i, i));
+        }
+    }
+
+    for (et, pairs) in merged_edges {
+        let src_count = graph.node_counts.get(&et.0).copied().unwrap_or(0);
+        let dst_count = graph.node_counts.get(&et.2).copied().unwrap_or(0);
+        if src_count == 0 || dst_count == 0 {
+            continue;
+        }
+
+        let mut filtered: Vec<(usize, usize)> = pairs
+            .into_iter()
+            .filter(|(s, d)| *s < src_count && *d < dst_count)
+            .collect();
+        if filtered.is_empty() {
+            continue;
+        }
+        filtered.sort_unstable();
+        filtered.dedup();
+
+        let src_vec: Vec<i64> = filtered.iter().map(|(s, _)| *s as i64).collect();
+        let dst_vec: Vec<i64> = filtered.iter().map(|(_, d)| *d as i64).collect();
+        let mut flat = Vec::with_capacity(src_vec.len() * 2);
+        flat.extend_from_slice(&src_vec);
+        flat.extend_from_slice(&dst_vec);
+        let edge_idx =
+            Tensor::<B, 1, Int>::from_data(flat.as_slice(), device).reshape([2, src_vec.len()]);
+        graph.add_edge_type(et, edge_idx);
+    }
+
+    graph
+}
+
 // ===========================================================================
 // Retrain: trigger incremental JEPA training on all models
 // ===========================================================================
@@ -2556,6 +3041,9 @@ pub struct RetrainResponse {
     pub status: String,
     pub models_retrained: Vec<RetrainedModelInfo>,
     pub checkpoints_saved: usize,
+    pub precomputed_distributions: usize,
+    pub probe_alignments: usize,
+    pub interpretability_node_types: usize,
     pub total_duration_ms: u64,
 }
 
@@ -2573,12 +3061,10 @@ pub async fn retrain(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RetrainRequest>,
 ) -> Json<RetrainResponse> {
-    use crate::data::graph_builder::{GraphBuildConfig, build_from_schema};
-    use crate::data::synthetic::{SyntheticDataConfig, TqlSchema};
     use crate::model::gat::GatConfig;
     use crate::model::graph_transformer::GraphTransformerConfig;
     use crate::model::graphsage::GraphSageModelConfig;
-    use crate::model::lora::{LoraConfig, init_hetero_basis_adapter};
+    use crate::model::lora::{init_hetero_basis_adapter, LoraConfig};
     use crate::model::mhc::MhcRgcnConfig;
     use crate::model::trainer::*;
     use burn::backend::NdArray;
@@ -2588,35 +3074,29 @@ pub async fn retrain(
 
     let start = std::time::Instant::now();
     let device = <B as Backend>::Device::default();
-    let feat_dim = 16;
     let hidden_dim = state.hidden_dim;
-
-    // Rebuild graph from default schema (same as AppState.init)
-    let schema = TqlSchema::parse(super::state::DEFAULT_SCHEMA);
-    let syn_config = SyntheticDataConfig {
-        instances_per_type: 5,
-        num_facts: 200,
-        max_qualifiers: 2,
-        seed: 42,
-    };
-    let graph_config = GraphBuildConfig {
-        node_feat_dim: feat_dim,
-        add_reverse_edges: true,
-        add_self_loops: true,
-        add_positional_encoding: true,
-    };
-    let mut graph = build_from_schema::<B>(&schema, &syn_config, &graph_config, &device);
+    let live_embeddings = state
+        .embeddings
+        .read()
+        .map(|e| e.data.clone())
+        .unwrap_or_default();
+    let live_edges = state
+        .graph_edges
+        .read()
+        .map(|g| g.edges.clone())
+        .unwrap_or_default();
+    let graph = build_live_training_graph::<B>(&live_embeddings, &live_edges, hidden_dim, &device);
     let node_types: Vec<String> = graph.node_types().iter().map(|s| s.to_string()).collect();
     let edge_types: Vec<crate::data::hetero_graph::EdgeType> =
         graph.edge_types().iter().map(|e| (*e).clone()).collect();
 
-    // Derive actual feature dim (may differ from feat_dim due to PE)
+    // Derive actual feature dim from live graph embeddings.
     let actual_feat_dim = graph
         .node_features
         .values()
         .next()
         .map(|t| t.dims()[1])
-        .unwrap_or(feat_dim);
+        .unwrap_or(hidden_dim);
 
     // Compute graph hash
     let graph_hash = {
@@ -2628,6 +3108,7 @@ pub async fn retrain(
         graph.node_types().len().hash(&mut h);
         graph.edge_types().len().hash(&mut h);
         hidden_dim.hash(&mut h);
+        actual_feat_dim.hash(&mut h);
         h.finish()
     };
 
@@ -2642,6 +3123,8 @@ pub async fn retrain(
     };
 
     let mut models_retrained = Vec::new();
+    let mut updated_model_embeddings: HashMap<String, PlainEmbeddings> = HashMap::new();
+    let latest_sage_emb: PlainEmbeddings;
 
     // 1. GraphSAGE + DoRA + JEPA
     {
@@ -2681,6 +3164,9 @@ pub async fn retrain(
             final_loss: report.final_loss,
             checkpoint_saved: saved,
         });
+        let sage_emb = PlainEmbeddings::from_burn(&sage.forward(&graph));
+        latest_sage_emb = sage_emb.clone();
+        updated_model_embeddings.insert("SAGE".into(), sage_emb);
     }
 
     // 2. GAT + JEPA
@@ -2713,6 +3199,8 @@ pub async fn retrain(
             final_loss: report.final_loss,
             checkpoint_saved: saved,
         });
+        let gat_emb = PlainEmbeddings::from_burn(&gat.forward(&graph));
+        updated_model_embeddings.insert("GAT".into(), gat_emb);
     }
 
     // 3. GPS + JEPA
@@ -2746,6 +3234,8 @@ pub async fn retrain(
             final_loss: report.final_loss,
             checkpoint_saved: saved,
         });
+        let gt_emb = PlainEmbeddings::from_burn(&gps.forward(&graph));
+        updated_model_embeddings.insert("GT".into(), gt_emb);
     }
 
     // 4. RGCN + mHC + JEPA
@@ -2780,22 +3270,110 @@ pub async fn retrain(
             final_loss: report.final_loss,
             checkpoint_saved: saved,
         });
+        let rgcn_emb = PlainEmbeddings::from_burn(&mhc.forward(&graph));
+        updated_model_embeddings.insert("RGCN".into(), rgcn_emb);
+    }
+
+    updated_model_embeddings.insert(
+        "HEHRGNN".into(),
+        PlainEmbeddings {
+            data: latest_sage_emb.data.clone(),
+            hidden_dim: latest_sage_emb.hidden_dim,
+        },
+    );
+
+    let live_model_channels = updated_model_embeddings.len();
+    let live_sage = Some(latest_sage_emb);
+    let mut live_state_update_ok = true;
+    {
+        match state.model_embeddings.write() {
+            Ok(mut all_models) => {
+                *all_models = updated_model_embeddings;
+            }
+            Err(e) => {
+                live_state_update_ok = false;
+                eprintln!(
+                    "  ⚠ Failed to update live model embeddings after retrain: {}",
+                    e
+                );
+            }
+        }
+    }
+    if let Some(sage_emb) = live_sage {
+        match state.embeddings.write() {
+            Ok(mut emb) => {
+                *emb = sage_emb;
+            }
+            Err(e) => {
+                live_state_update_ok = false;
+                eprintln!(
+                    "  ⚠ Failed to update live SAGE embeddings after retrain: {}",
+                    e
+                );
+            }
+        }
     }
 
     let checkpoints_saved = models_retrained
         .iter()
         .filter(|m| m.checkpoint_saved)
         .count();
+    let precomputed_distributions = match state.refresh_precomputed_cache() {
+        Ok(count) => count,
+        Err(e) => {
+            eprintln!(
+                "  ⚠ Failed to refresh precomputed anomaly cache after retrain: {}",
+                e
+            );
+            0
+        }
+    };
+    let relation_refresh_summary = match state.refresh_relation_head_cache(true) {
+        Ok((pairs, channels)) => format!("relation_cache={}pairs/{}channels", pairs, channels),
+        Err(e) => {
+            eprintln!("  ⚠ Failed to refresh relation cache after retrain: {}", e);
+            "relation_cache_refresh_failed".to_string()
+        }
+    };
+    let _ = state.refresh_graph_metadata_from_live();
+    let (probe_alignments, interpretability_node_types) =
+        match state.refresh_interpretability_cache() {
+            Ok((alignments, ntypes)) => (alignments, ntypes),
+            Err(e) => {
+                eprintln!(
+                    "  ⚠ Failed to refresh interpretability caches after retrain: {}",
+                    e
+                );
+                (0, 0)
+            }
+        };
+    let precomputed_refresh_summary = if precomputed_distributions > 0 {
+        format!("precomputed={}dists", precomputed_distributions)
+    } else {
+        "precomputed_refresh_failed".to_string()
+    };
+    let live_update_summary = if live_state_update_ok {
+        format!("live_model_channels={}", live_model_channels)
+    } else {
+        "live_state_update_failed".to_string()
+    };
     let duration_ms = start.elapsed().as_millis() as u64;
 
     Json(RetrainResponse {
         status: format!(
-            "Retrained {} models in {}ms",
+            "Retrained {} models in {}ms ({}, {}, {}, probes={})",
             models_retrained.len(),
-            duration_ms
+            duration_ms,
+            live_update_summary,
+            precomputed_refresh_summary,
+            relation_refresh_summary,
+            probe_alignments
         ),
         models_retrained,
         checkpoints_saved,
+        precomputed_distributions,
+        probe_alignments,
+        interpretability_node_types,
         total_duration_ms: duration_ms,
     })
 }
@@ -3083,6 +3661,18 @@ pub struct GraphMutateResponse {
     pub total_mutations: usize,
     /// True if this mutation triggered an automatic background retrain (drift > θ).
     pub auto_retrain_triggered: bool,
+    /// Number of edge-index updates applied to the server's typed edge map.
+    pub edge_index_updates: usize,
+    /// Number of `(src_type, dst_type)` relation-head pairs after refresh.
+    pub relation_head_pairs: usize,
+    /// Number of relation channels after refresh.
+    pub relation_head_channels: usize,
+    /// Number of anomaly precomputed distributions after refresh.
+    pub precomputed_distributions: usize,
+    /// Number of probe neuron-concept alignments after refresh.
+    pub probe_alignments: usize,
+    /// Number of node types represented in refreshed interpretability state.
+    pub interpretability_node_types: usize,
 }
 
 pub async fn graph_mutate(
@@ -3138,6 +3728,18 @@ pub async fn graph_mutate(
 
         result
     };
+    let edge_index_updates = state
+        .apply_graph_events_to_edges(&req.events)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let precomputed_distributions = state
+        .refresh_precomputed_cache()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let (relation_head_pairs, relation_head_channels) = state
+        .refresh_relation_head_cache(true)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let (probe_alignments, interpretability_node_types) = state
+        .refresh_interpretability_cache()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     // Update retrain monitor with drift
     let retrain_status = {
@@ -3219,5 +3821,11 @@ pub async fn graph_mutate(
         affected_types: mutation_result.affected_types,
         total_mutations,
         auto_retrain_triggered,
+        edge_index_updates,
+        relation_head_pairs,
+        relation_head_channels,
+        precomputed_distributions,
+        probe_alignments,
+        interpretability_node_types,
     }))
 }

@@ -112,6 +112,11 @@ pub fn extract_positive_edges<B: Backend>(
     let mut edge_items: Vec<_> = graph.edge_index.iter().collect();
     edge_items.sort_by(|(a, _), (b, _)| a.cmp(b));
     for (edge_key, edge_index) in edge_items {
+        // Skip synthetic supervision edges that can dominate training without adding
+        // predictive signal for downstream link tasks.
+        if edge_key.1 == "self_loop" || edge_key.1.starts_with("rev_") {
+            continue;
+        }
         let num_edges = edge_index.dims()[1];
         if num_edges == 0 {
             continue;
@@ -137,7 +142,150 @@ pub fn extract_positive_edges<B: Backend>(
             ));
         }
     }
+    edges.sort_unstable();
+    edges.dedup();
     edges
+}
+
+fn extract_positive_edges_with_relation<B: Backend>(
+    graph: &HeteroGraph<B>,
+) -> Vec<(String, usize, String, String, usize)> {
+    let mut edges = Vec::new();
+    let mut edge_items: Vec<_> = graph.edge_index.iter().collect();
+    edge_items.sort_by(|(a, _), (b, _)| a.cmp(b));
+    for (edge_key, edge_index) in edge_items {
+        if edge_key.1 == "self_loop" || edge_key.1.starts_with("rev_") {
+            continue;
+        }
+        let num_edges = edge_index.dims()[1];
+        if num_edges == 0 {
+            continue;
+        }
+        let data = edge_index.clone().into_data();
+        if let Ok(slice) = data.as_slice::<i64>() {
+            for i in 0..num_edges {
+                edges.push((
+                    edge_key.0.clone(),
+                    slice[i] as usize,
+                    edge_key.1.clone(),
+                    edge_key.2.clone(),
+                    slice[num_edges + i] as usize,
+                ));
+            }
+        } else if let Ok(slice) = data.as_slice::<i32>() {
+            for i in 0..num_edges {
+                edges.push((
+                    edge_key.0.clone(),
+                    slice[i] as usize,
+                    edge_key.1.clone(),
+                    edge_key.2.clone(),
+                    slice[num_edges + i] as usize,
+                ));
+            }
+        }
+    }
+    edges.sort_unstable();
+    edges.dedup();
+    edges
+}
+
+fn adaptive_relation_cap(edges_with_relation: &[(String, usize, String, String, usize)]) -> usize {
+    if edges_with_relation.is_empty() {
+        return 0;
+    }
+    let mut rel_counts: HashMap<&str, usize> = HashMap::new();
+    for (_, _, rel, _, _) in edges_with_relation {
+        *rel_counts.entry(rel.as_str()).or_insert(0) += 1;
+    }
+    let rel_types = rel_counts.len().max(1);
+    let mean = (edges_with_relation.len() / rel_types).max(1);
+    (mean * 2).clamp(8, 512)
+}
+
+fn relation_balanced_edges(
+    edges_with_relation: &[(String, usize, String, String, usize)],
+    max_per_relation: usize,
+) -> Vec<(String, usize, String, usize)> {
+    if max_per_relation == 0 || edges_with_relation.is_empty() {
+        return Vec::new();
+    }
+    let mut by_rel: HashMap<String, Vec<(String, usize, String, usize)>> = HashMap::new();
+    for (src_t, src_i, rel, dst_t, dst_i) in edges_with_relation {
+        by_rel
+            .entry(rel.clone())
+            .or_default()
+            .push((src_t.clone(), *src_i, dst_t.clone(), *dst_i));
+    }
+
+    let mut rel_names: Vec<String> = by_rel.keys().cloned().collect();
+    rel_names.sort_unstable();
+
+    let mut out = Vec::new();
+    for rel in rel_names {
+        if let Some(mut edges) = by_rel.remove(&rel) {
+            edges.sort_unstable();
+            edges.dedup();
+            out.extend(edges.into_iter().take(max_per_relation));
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+fn total_graph_edge_count<B: Backend>(graph: &HeteroGraph<B>) -> usize {
+    graph
+        .edge_index
+        .values()
+        .map(|edge_index| edge_index.dims()[1])
+        .sum()
+}
+
+fn build_graph_positive_sets<B: Backend>(
+    graph: &HeteroGraph<B>,
+) -> HashMap<(String, String, usize), HashSet<usize>> {
+    let mut sets: HashMap<(String, String, usize), HashSet<usize>> = HashMap::new();
+    for (edge_key, edge_index) in graph.edge_index.iter() {
+        let num_edges = edge_index.dims()[1];
+        if num_edges == 0 {
+            continue;
+        }
+        let data = edge_index.clone().into_data();
+        if let Ok(slice) = data.as_slice::<i64>() {
+            for i in 0..num_edges {
+                let src = slice[i] as usize;
+                let dst = slice[num_edges + i] as usize;
+                sets.entry((edge_key.0.clone(), edge_key.2.clone(), src))
+                    .or_default()
+                    .insert(dst);
+            }
+        } else if let Ok(slice) = data.as_slice::<i32>() {
+            for i in 0..num_edges {
+                let src = slice[i] as usize;
+                let dst = slice[num_edges + i] as usize;
+                sets.entry((edge_key.0.clone(), edge_key.2.clone(), src))
+                    .or_default()
+                    .insert(dst);
+            }
+        }
+    }
+    sets
+}
+
+fn union_forbidden_count(
+    pos_set: Option<&HashSet<usize>>,
+    graph_set: Option<&HashSet<usize>>,
+) -> usize {
+    match (pos_set, graph_set) {
+        (Some(a), Some(b)) => {
+            let (small, large) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+            let overlap = small.iter().filter(|d| large.contains(*d)).count();
+            a.len() + b.len() - overlap
+        }
+        (Some(a), None) => a.len(),
+        (None, Some(b)) => b.len(),
+        (None, None) => 0,
+    }
 }
 
 /// Sample negative edges (random non-existing edges).
@@ -172,9 +320,17 @@ pub fn sample_negative_edges<B: Backend>(
         hard_negatives.insert(dst_type, ranked.into_iter().map(|(idx, _)| idx).collect());
     }
 
+    // When positives are a subset (e.g., temporal validation edges), avoid sampling
+    // negatives that are known true edges in the graph.
+    let graph_positive_sets = if positive.len() < total_graph_edge_count(graph) {
+        Some(build_graph_positive_sets(graph))
+    } else {
+        None
+    };
+
     let mut used_negatives: HashMap<(String, String, usize), HashSet<usize>> = HashMap::new();
     let mut seed: u64 = 42;
-    for (src_type, src_idx, dst_type, pos_dst) in positive {
+    for (src_type, src_idx, dst_type, _pos_dst) in positive {
         let dst_count = *graph.node_counts.get(dst_type).unwrap_or(&0);
         if dst_count == 0 {
             continue;
@@ -182,6 +338,11 @@ pub fn sample_negative_edges<B: Backend>(
 
         let key = (src_type.clone(), dst_type.clone(), *src_idx);
         let pos_set = positive_sets.get(&key);
+        let graph_set = graph_positive_sets.as_ref().and_then(|m| m.get(&key));
+        if union_forbidden_count(pos_set, graph_set) >= dst_count {
+            // Fully connected anchor: no valid negatives exist.
+            continue;
+        }
         let used = used_negatives.entry(key).or_default();
         let hard = hard_negatives
             .get(dst_type)
@@ -201,7 +362,8 @@ pub fn sample_negative_edges<B: Backend>(
                     (next_u64(&mut seed) as usize) % dst_count
                 };
 
-                let is_positive = pos_set.is_some_and(|s| s.contains(&neg_dst));
+                let is_positive = pos_set.is_some_and(|s| s.contains(&neg_dst))
+                    || graph_set.is_some_and(|s| s.contains(&neg_dst));
                 if !is_positive && !used.contains(&neg_dst) {
                     candidate = Some(neg_dst);
                     break;
@@ -213,20 +375,191 @@ pub fn sample_negative_edges<B: Backend>(
                 let start = (next_u64(&mut seed) as usize) % dst_count;
                 for off in 0..dst_count {
                     let neg_dst = (start + off) % dst_count;
-                    if !pos_set.is_some_and(|s| s.contains(&neg_dst)) {
+                    if !pos_set.is_some_and(|s| s.contains(&neg_dst))
+                        && !graph_set.is_some_and(|s| s.contains(&neg_dst))
+                    {
                         candidate = Some(neg_dst);
                         break;
                     }
                 }
             }
 
-            // Final degenerate fallback (fully connected anchor): keep length stable.
-            let neg_dst = candidate.unwrap_or(*pos_dst);
-            negatives.push((src_type.clone(), *src_idx, dst_type.clone(), neg_dst));
-            used.insert(neg_dst);
+            if let Some(neg_dst) = candidate {
+                negatives.push((src_type.clone(), *src_idx, dst_type.clone(), neg_dst));
+                used.insert(neg_dst);
+            }
         }
     }
     negatives
+}
+
+/// Adaptive temporal hard-negative sampling.
+///
+/// Improvements over `sample_negative_edges`:
+/// - Uses current embeddings to mine hard negatives (high similarity but non-edge).
+/// - Allocates more negatives to more recent positives (recency emphasis).
+/// - Falls back to popularity/random sampling when embeddings are unavailable.
+pub fn sample_temporal_hard_negative_edges<B: Backend>(
+    graph: &HeteroGraph<B>,
+    positive: &[(String, usize, String, usize)],
+    embeddings: &HashMap<String, Vec<Vec<f32>>>,
+    neg_ratio: usize,
+    hard_top_k: usize,
+    hard_mix_prob: f32,
+    recent_boost: f32,
+) -> Vec<(String, usize, String, usize)> {
+    let mut negatives = Vec::new();
+    if neg_ratio == 0 || positive.is_empty() {
+        return negatives;
+    }
+
+    let hard_top_k = hard_top_k.max(4);
+    let hard_mix_prob = hard_mix_prob.clamp(0.0, 1.0);
+    let recent_boost = recent_boost.max(0.0);
+
+    let mut positive_sets: HashMap<(String, String, usize), HashSet<usize>> = HashMap::new();
+    let mut dst_popularity: HashMap<String, HashMap<usize, usize>> = HashMap::new();
+    for (src_type, src_idx, dst_type, dst_idx) in positive {
+        positive_sets
+            .entry((src_type.clone(), dst_type.clone(), *src_idx))
+            .or_default()
+            .insert(*dst_idx);
+        let per_type = dst_popularity.entry(dst_type.clone()).or_default();
+        *per_type.entry(*dst_idx).or_insert(0) += 1;
+    }
+
+    let mut popular_by_type: HashMap<String, Vec<usize>> = HashMap::new();
+    for (dst_type, counts) in dst_popularity {
+        let mut ranked: Vec<(usize, usize)> = counts.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        popular_by_type.insert(dst_type, ranked.into_iter().map(|(idx, _)| idx).collect());
+    }
+
+    // If positives are a subset (e.g., temporal holdout), forbid any known
+    // graph-positive edges from being sampled as negatives.
+    let graph_positive_sets = if positive.len() < total_graph_edge_count(graph) {
+        Some(build_graph_positive_sets(graph))
+    } else {
+        None
+    };
+
+    let mut hard_cache: HashMap<(String, String, usize), Vec<usize>> = HashMap::new();
+    let mut used_negatives: HashMap<(String, String, usize), HashSet<usize>> = HashMap::new();
+    let mut seed: u64 = 1337;
+
+    for (pos_idx, (src_type, src_idx, dst_type, _pos_dst)) in positive.iter().enumerate() {
+        let dst_count = *graph.node_counts.get(dst_type).unwrap_or(&0);
+        if dst_count == 0 {
+            continue;
+        }
+
+        let anchor = (src_type.clone(), dst_type.clone(), *src_idx);
+        let pos_set = positive_sets.get(&anchor);
+        let graph_set = graph_positive_sets.as_ref().and_then(|m| m.get(&anchor));
+        if union_forbidden_count(pos_set, graph_set) >= dst_count {
+            continue;
+        }
+        let used = used_negatives.entry(anchor.clone()).or_default();
+
+        // Recent positives receive more negatives to sharpen decision boundaries.
+        let recency = if positive.len() <= 1 {
+            1.0
+        } else {
+            pos_idx as f32 / (positive.len() - 1) as f32
+        };
+        let extra = (neg_ratio as f32 * recent_boost * recency).round() as usize;
+        let local_ratio = (neg_ratio + extra).max(1);
+
+        let hard_candidates = hard_cache.entry(anchor.clone()).or_insert_with(|| {
+            let Some(src_emb) = embeddings.get(src_type).and_then(|v| v.get(*src_idx)) else {
+                return Vec::new();
+            };
+            let Some(dst_embs) = embeddings.get(dst_type) else {
+                return Vec::new();
+            };
+            let src_norm = src_emb.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
+
+            let mut ranked: Vec<(usize, f32)> = dst_embs
+                .iter()
+                .enumerate()
+                .map(|(i, dst)| {
+                    let dot: f32 = src_emb.iter().zip(dst.iter()).map(|(a, b)| a * b).sum();
+                    let dst_norm = dst.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
+                    let sim = dot / (src_norm * dst_norm);
+                    (i, sim)
+                })
+                .collect();
+            ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+            ranked
+                .into_iter()
+                .filter_map(|(i, _)| {
+                    if pos_set.is_some_and(|s| s.contains(&i))
+                        || graph_set.is_some_and(|s| s.contains(&i))
+                    {
+                        None
+                    } else {
+                        Some(i)
+                    }
+                })
+                .take(hard_top_k)
+                .collect()
+        });
+
+        let popular = popular_by_type
+            .get(dst_type)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+
+        for _ in 0..local_ratio {
+            let mut candidate = None;
+
+            for _ in 0..30 {
+                let choose_hard = !hard_candidates.is_empty()
+                    && (next_u64(&mut seed) % 10_000) < (hard_mix_prob * 10_000.0) as u64;
+                let neg_dst = if choose_hard {
+                    let pick = (next_u64(&mut seed) as usize) % hard_candidates.len();
+                    hard_candidates[pick]
+                } else if !popular.is_empty() && next_u64(&mut seed) % 100 < 70 {
+                    let pick = (next_u64(&mut seed) as usize) % popular.len().min(16);
+                    popular[pick]
+                } else {
+                    (next_u64(&mut seed) as usize) % dst_count
+                };
+
+                let is_positive = pos_set.is_some_and(|s| s.contains(&neg_dst))
+                    || graph_set.is_some_and(|s| s.contains(&neg_dst));
+                if !is_positive && !used.contains(&neg_dst) {
+                    candidate = Some(neg_dst);
+                    break;
+                }
+            }
+
+            if candidate.is_none() {
+                let start = (next_u64(&mut seed) as usize) % dst_count;
+                for off in 0..dst_count {
+                    let neg_dst = (start + off) % dst_count;
+                    if !pos_set.is_some_and(|s| s.contains(&neg_dst))
+                        && !graph_set.is_some_and(|s| s.contains(&neg_dst))
+                    {
+                        candidate = Some(neg_dst);
+                        break;
+                    }
+                }
+            }
+
+            if let Some(neg_dst) = candidate {
+                negatives.push((src_type.clone(), *src_idx, dst_type.clone(), neg_dst));
+                used.insert(neg_dst);
+            }
+        }
+    }
+
+    if negatives.is_empty() {
+        sample_negative_edges(graph, positive, neg_ratio)
+    } else {
+        negatives
+    }
 }
 
 fn next_u64(seed: &mut u64) -> u64 {
@@ -311,31 +644,46 @@ pub fn compute_bpr_loss(
     positive: &[(String, usize, String, usize)],
     negative: &[(String, usize, String, usize)],
 ) -> f32 {
-    let n = positive.len().min(negative.len());
-    if n == 0 {
+    if positive.is_empty() || negative.is_empty() {
         return 0.0;
     }
 
-    let mut total = 0.0f32;
-    for i in 0..n {
-        let ps = dot_score(
-            embeddings,
-            &positive[i].0,
-            positive[i].1,
-            &positive[i].2,
-            positive[i].3,
-        );
-        let ns = dot_score(
-            embeddings,
-            &negative[i].0,
-            negative[i].1,
-            &negative[i].2,
-            negative[i].3,
-        );
-        let diff = ps - ns;
-        total += -(1.0 / (1.0 + (-diff).exp())).ln().max(-10.0);
+    let mut neg_by_anchor: HashMap<(String, String, usize), Vec<usize>> = HashMap::new();
+    for (st, si, dt, di) in negative {
+        neg_by_anchor
+            .entry((st.clone(), dt.clone(), *si))
+            .or_default()
+            .push(*di);
     }
-    total / n as f32
+
+    let mut total = 0.0f32;
+    let mut count = 0usize;
+    for (i, pos) in positive.iter().enumerate() {
+        let ps = dot_score(embeddings, &pos.0, pos.1, &pos.2, pos.3);
+
+        let anchor = (pos.0.clone(), pos.2.clone(), pos.1);
+        if let Some(neg_dsts) = neg_by_anchor.get(&anchor) {
+            for &neg_dst in neg_dsts {
+                let ns = dot_score(embeddings, &pos.0, pos.1, &pos.2, neg_dst);
+                let diff = ps - ns;
+                total += -(1.0 / (1.0 + (-diff).exp())).ln().max(-10.0);
+                count += 1;
+            }
+        } else {
+            // Fallback preserves robustness if negatives are not grouped by anchor.
+            let neg = &negative[i % negative.len()];
+            let ns = dot_score(embeddings, &neg.0, neg.1, &neg.2, neg.3);
+            let diff = ps - ns;
+            total += -(1.0 / (1.0 + (-diff).exp())).ln().max(-10.0);
+            count += 1;
+        }
+    }
+
+    if count == 0 {
+        0.0
+    } else {
+        total / count as f32
+    }
 }
 
 fn scheduled_temperature(base: f32, epoch: usize, total_epochs: usize) -> f32 {
@@ -399,10 +747,25 @@ pub fn train_jepa_input_weights<B: Backend, M: JepaTrainable<B>>(
     uniformity_weight: f32,
     use_edge_predictor: bool,
 ) -> TrainReport {
-    let positive = extract_positive_edges(graph);
-    let negative = sample_negative_edges(graph, &positive, config.neg_ratio);
-
+    let positive_all = extract_positive_edges(graph);
+    let positive_rel = extract_positive_edges_with_relation(graph);
+    let mut positive = relation_balanced_edges(&positive_rel, adaptive_relation_cap(&positive_rel));
+    if positive.len() < (positive_all.len() / 3).max(8) {
+        positive = positive_all.clone();
+    }
     let initial_emb = embeddings_to_plain(&model.forward_embeddings(graph));
+    let mut negative = sample_temporal_hard_negative_edges(
+        graph,
+        &positive,
+        &initial_emb,
+        config.neg_ratio.max(1),
+        12,
+        0.65,
+        0.35,
+    );
+    if negative.is_empty() {
+        negative = sample_negative_edges(graph, &positive, config.neg_ratio.max(1));
+    }
     let initial_loss = crate::model::jepa::compute_jepa_loss(
         &initial_emb,
         &positive,
@@ -616,6 +979,320 @@ pub fn train_jepa_input_weights<B: Backend, M: JepaTrainable<B>>(
                     mean_emb_norm: final_mean_emb_norm,
                 };
             }
+        }
+
+        negative = sample_temporal_hard_negative_edges(
+            graph,
+            &positive,
+            &post_emb,
+            config.neg_ratio.max(1),
+            12,
+            0.65,
+            0.35,
+        );
+        if negative.is_empty() {
+            negative = sample_negative_edges(graph, &positive, config.neg_ratio.max(1));
+        }
+    }
+
+    TrainReport {
+        epochs_trained,
+        initial_loss,
+        final_loss,
+        initial_auc,
+        final_auc,
+        early_stopped: false,
+        weight_norm_sq: model_input_weight_norm_sq(model),
+        mean_emb_norm: final_mean_emb_norm,
+    }
+}
+
+fn hybrid_weighted_loss(
+    embeddings: &HashMap<String, Vec<Vec<f32>>>,
+    positive: &[(String, usize, String, usize)],
+    negative: &[(String, usize, String, usize)],
+    temperature: f32,
+    uniformity_weight: f32,
+    bpr_weight: f32,
+) -> f32 {
+    let bpr = compute_bpr_loss(embeddings, positive, negative);
+    let jepa = crate::model::jepa::compute_jepa_loss(
+        embeddings,
+        positive,
+        negative,
+        temperature,
+        uniformity_weight,
+    );
+    let bpr_w = bpr_weight.clamp(0.0, 1.0);
+    bpr_w * bpr + (1.0 - bpr_w) * jepa
+}
+
+/// Hybrid supervised (BPR) + JEPA training over model input projection weights.
+///
+/// Uses BPR as a direct link-prediction supervision signal and JEPA as latent
+/// regularizer. This tends to produce better predictive calibration than JEPA
+/// or BPR alone on temporally-shifted validation sets.
+pub fn train_hybrid_input_weights<B: Backend, M: JepaTrainable<B>>(
+    model: &mut M,
+    graph: &HeteroGraph<B>,
+    config: &TrainConfig,
+    temperature: f32,
+    uniformity_weight: f32,
+    bpr_weight: f32,
+    use_edge_predictor: bool,
+) -> TrainReport {
+    let positive_all = extract_positive_edges(graph);
+    let positive_rel = extract_positive_edges_with_relation(graph);
+    let mut positive = relation_balanced_edges(&positive_rel, adaptive_relation_cap(&positive_rel));
+    if positive.len() < (positive_all.len() / 3).max(8) {
+        positive = positive_all.clone();
+    }
+    let initial_emb = embeddings_to_plain(&model.forward_embeddings(graph));
+    let mut negative = sample_temporal_hard_negative_edges(
+        graph,
+        &positive,
+        &initial_emb,
+        config.neg_ratio.max(1),
+        12,
+        0.70,
+        0.40,
+    );
+    if negative.is_empty() {
+        negative = sample_negative_edges(graph, &positive, config.neg_ratio.max(1));
+    }
+    let initial_loss = hybrid_weighted_loss(
+        &initial_emb,
+        &positive,
+        &negative,
+        temperature,
+        uniformity_weight,
+        bpr_weight,
+    );
+    let initial_auc = link_prediction_auc(&initial_emb, &positive, &negative);
+
+    let hidden_dim = config_hidden_dim(&initial_emb);
+    let mut edge_pred = if use_edge_predictor {
+        Some(crate::model::jepa::EdgePredictor::new(
+            hidden_dim,
+            hidden_dim * 2,
+            hidden_dim,
+        ))
+    } else {
+        None
+    };
+
+    let mut best_loss = initial_loss;
+    let mut patience_counter = 0usize;
+    let mut final_loss = initial_loss;
+    let mut final_auc = initial_auc;
+    let mut final_mean_emb_norm = mean_embedding_norm(&initial_emb);
+    let mut epochs_trained = 0usize;
+    let lr = config.lr as f32;
+
+    for epoch in 0..config.epochs {
+        let epoch_temp = scheduled_temperature(temperature, epoch, config.epochs);
+
+        match config.mode {
+            TrainMode::Fast => {
+                let eps = 0.01f32;
+                for li in 0..model.num_input_weights() {
+                    let w = model.get_input_weight(li);
+                    let dims = w.dims();
+                    let device = w.device();
+                    let w_data: Vec<f32> =
+                        w.clone().into_data().as_slice::<f32>().unwrap().to_vec();
+                    if w_data.is_empty() {
+                        continue;
+                    }
+
+                    let mut seed: u64 = (epoch as u64 * 7919 + li as u64 * 31).wrapping_add(509);
+                    let delta: Vec<f32> = (0..w_data.len())
+                        .map(|_| {
+                            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                            if (seed >> 33) % 2 == 0 { 1.0 } else { -1.0 }
+                        })
+                        .collect();
+
+                    let w_plus: Vec<f32> = w_data
+                        .iter()
+                        .zip(&delta)
+                        .map(|(w, d)| w + eps * d)
+                        .collect();
+                    let wp_tensor = Tensor::<B, 1>::from_data(w_plus.as_slice(), &device)
+                        .reshape([dims[0], dims[1]]);
+                    model.set_input_weight(li, wp_tensor);
+                    let emb_plus = embeddings_to_plain(&model.forward_embeddings(graph));
+                    let loss_plus = hybrid_weighted_loss(
+                        &emb_plus,
+                        &positive,
+                        &negative,
+                        epoch_temp,
+                        uniformity_weight,
+                        bpr_weight,
+                    );
+
+                    let w_minus: Vec<f32> = w_data
+                        .iter()
+                        .zip(&delta)
+                        .map(|(w, d)| w - eps * d)
+                        .collect();
+                    let wm_tensor = Tensor::<B, 1>::from_data(w_minus.as_slice(), &device)
+                        .reshape([dims[0], dims[1]]);
+                    model.set_input_weight(li, wm_tensor);
+                    let emb_minus = embeddings_to_plain(&model.forward_embeddings(graph));
+                    let loss_minus = hybrid_weighted_loss(
+                        &emb_minus,
+                        &positive,
+                        &negative,
+                        epoch_temp,
+                        uniformity_weight,
+                        bpr_weight,
+                    );
+
+                    let grad_scalar = (loss_plus - loss_minus) / (2.0 * eps);
+                    let w_updated: Vec<f32> = w_data
+                        .iter()
+                        .zip(&delta)
+                        .map(|(w, d)| w - lr * grad_scalar * d)
+                        .collect();
+                    let wu_tensor = Tensor::<B, 1>::from_data(w_updated.as_slice(), &device)
+                        .reshape([dims[0], dims[1]]);
+                    model.set_input_weight(li, wu_tensor);
+
+                    if config.weight_decay > 0.0 {
+                        let wd = 1.0 - config.weight_decay as f32;
+                        let w_decayed = model.get_input_weight(li) * wd;
+                        model.set_input_weight(li, w_decayed);
+                    }
+                }
+            }
+            TrainMode::Full => {
+                let eps = 0.005f32;
+                let base_emb = embeddings_to_plain(&model.forward_embeddings(graph));
+                let base_loss = hybrid_weighted_loss(
+                    &base_emb,
+                    &positive,
+                    &negative,
+                    epoch_temp,
+                    uniformity_weight,
+                    bpr_weight,
+                );
+
+                for li in 0..model.num_input_weights() {
+                    let w = model.get_input_weight(li);
+                    let dims = w.dims();
+                    let device = w.device();
+                    let mut w_data: Vec<f32> =
+                        w.clone().into_data().as_slice::<f32>().unwrap().to_vec();
+                    let total = w_data.len();
+                    if total == 0 {
+                        continue;
+                    }
+
+                    let count = ((total as f64 * config.perturb_frac) as usize).max(1);
+                    let mut seed: u64 = (epoch as u64).wrapping_mul(31) + li as u64 + 17;
+
+                    for _ in 0..count {
+                        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        let idx = (seed >> 33) as usize % total;
+                        let orig = w_data[idx];
+
+                        w_data[idx] = orig + eps;
+                        let pw = Tensor::<B, 1>::from_data(w_data.as_slice(), &device)
+                            .reshape([dims[0], dims[1]]);
+                        model.set_input_weight(li, pw);
+                        let p_emb = embeddings_to_plain(&model.forward_embeddings(graph));
+                        let p_loss = hybrid_weighted_loss(
+                            &p_emb,
+                            &positive,
+                            &negative,
+                            epoch_temp,
+                            uniformity_weight,
+                            bpr_weight,
+                        );
+                        let grad = (p_loss - base_loss) / eps;
+                        w_data[idx] = orig - lr * grad;
+                    }
+
+                    let fw = Tensor::<B, 1>::from_data(w_data.as_slice(), &device)
+                        .reshape([dims[0], dims[1]]);
+                    model.set_input_weight(li, fw);
+
+                    if config.weight_decay > 0.0 {
+                        let wd = 1.0 - config.weight_decay as f32;
+                        let w_decayed = model.get_input_weight(li) * wd;
+                        model.set_input_weight(li, w_decayed);
+                    }
+                }
+            }
+        }
+
+        let post_emb = embeddings_to_plain(&model.forward_embeddings(graph));
+        let post_loss = hybrid_weighted_loss(
+            &post_emb,
+            &positive,
+            &negative,
+            epoch_temp,
+            uniformity_weight,
+            bpr_weight,
+        );
+        let post_auc = link_prediction_auc(&post_emb, &positive, &negative);
+        let uniform = crate::model::jepa::compute_uniformity_loss(&post_emb);
+        let bpr = compute_bpr_loss(&post_emb, &positive, &negative);
+
+        if let Some(ref mut pred) = edge_pred {
+            pred.spsa_step(
+                &post_emb,
+                &positive,
+                &negative,
+                config.lr as f32,
+                epoch_temp,
+                epoch,
+            );
+        }
+
+        final_loss = post_loss;
+        final_auc = post_auc;
+        final_mean_emb_norm = mean_embedding_norm(&post_emb);
+        epochs_trained = epoch + 1;
+
+        if epoch % 5 == 0 || epoch == config.epochs.saturating_sub(1) {
+            eprintln!(
+                "  [train:hybrid] epoch {}: total={:.4}, bpr={:.4}, auc={:.4}, uniform={:.4}, temp={:.3}",
+                epoch, post_loss, bpr, post_auc, uniform, epoch_temp
+            );
+        }
+
+        if post_loss < best_loss - 0.001 {
+            best_loss = post_loss;
+            patience_counter = 0;
+        } else {
+            patience_counter += 1;
+            if patience_counter >= config.patience {
+                return TrainReport {
+                    epochs_trained,
+                    initial_loss,
+                    final_loss,
+                    initial_auc,
+                    final_auc,
+                    early_stopped: true,
+                    weight_norm_sq: model_input_weight_norm_sq(model),
+                    mean_emb_norm: final_mean_emb_norm,
+                };
+            }
+        }
+
+        negative = sample_temporal_hard_negative_edges(
+            graph,
+            &positive,
+            &post_emb,
+            config.neg_ratio.max(1),
+            12,
+            0.70,
+            0.40,
+        );
+        if negative.is_empty() {
+            negative = sample_negative_edges(graph, &positive, config.neg_ratio.max(1));
         }
     }
 
@@ -1459,14 +2136,16 @@ fn adapter_distill_objective(
     positive: &[(String, usize, String, usize)],
     negative: &[(String, usize, String, usize)],
     all_edges: &[(String, usize, String, usize)],
-    teacher_scores_scaled: &[f32],
+    teacher_scores_raw: &[f32],
+    temperature: f32,
     distill: &AdapterDistillConfig,
 ) -> (f32, f32, f32, f32) {
     let bpr = compute_bpr_loss(student_emb, positive, negative);
     let student_scores = crate::model::lora::compute_link_scores(student_emb, all_edges);
-    let temp = distill.temperature.max(1e-3);
+    let temp = temperature.max(1e-3);
+    let teacher_scaled: Vec<f32> = teacher_scores_raw.iter().map(|s| *s / temp).collect();
     let student_scaled: Vec<f32> = student_scores.iter().map(|s| *s / temp).collect();
-    let kl = crate::model::lora::kl_divergence(teacher_scores_scaled, &student_scaled);
+    let kl = crate::model::lora::kl_divergence(&teacher_scaled, &student_scaled);
     let cosine = crate::model::lora::avg_cosine_similarity(teacher_emb, student_emb);
     let cosine_penalty = (1.0 - cosine).max(0.0);
     let total = bpr + distill.kl_weight * kl + distill.cosine_weight * cosine_penalty;
@@ -1491,22 +2170,33 @@ pub fn train_adapter_with_distillation<B: Backend>(
     let base = train_adapter(model, graph, config);
 
     let positive = extract_positive_edges(graph);
-    let negative = sample_negative_edges(graph, &positive, config.neg_ratio);
-    let all_edges: Vec<(String, usize, String, usize)> =
-        positive.iter().chain(negative.iter()).cloned().collect();
-
-    let temp = distill.temperature.max(1e-3);
-    let teacher_scores = crate::model::lora::compute_link_scores(teacher_embeddings, &all_edges);
-    let teacher_scores_scaled: Vec<f32> = teacher_scores.iter().map(|s| *s / temp).collect();
-
     let mut post_emb = embeddings_to_plain(&model.forward(graph));
+    let mut negative = sample_temporal_hard_negative_edges(
+        graph,
+        &positive,
+        &post_emb,
+        config.neg_ratio.max(1),
+        12,
+        0.65,
+        0.20,
+    );
+    if negative.is_empty() {
+        negative = sample_negative_edges(graph, &positive, config.neg_ratio.max(1));
+    }
+    let mut all_edges: Vec<(String, usize, String, usize)> =
+        positive.iter().chain(negative.iter()).cloned().collect();
+    let mut teacher_scores_raw =
+        crate::model::lora::compute_link_scores(teacher_embeddings, &all_edges);
+    let base_temp = distill.temperature.max(1e-3);
+
     let (mut best_loss, _, mut best_kl, mut best_cos) = adapter_distill_objective(
         &post_emb,
         teacher_embeddings,
         &positive,
         &negative,
         &all_edges,
-        &teacher_scores_scaled,
+        &teacher_scores_raw,
+        base_temp,
         distill,
     );
     let mut final_auc = link_prediction_auc(&post_emb, &positive, &negative);
@@ -1518,6 +2208,13 @@ pub fn train_adapter_with_distillation<B: Backend>(
     let lr = (config.lr as f32) * 0.8;
 
     for epoch in 0..distill_epochs {
+        let progress = if distill_epochs <= 1 {
+            1.0
+        } else {
+            epoch as f32 / (distill_epochs - 1) as f32
+        };
+        let epoch_temp = (base_temp * (1.15 - 0.35 * progress)).clamp(0.7, 1.6);
+
         // Distill blend weights.
         {
             let blend_val = model.input_adapters.as_ref().unwrap().blend_weights.val();
@@ -1560,7 +2257,8 @@ pub fn train_adapter_with_distillation<B: Backend>(
                 &positive,
                 &negative,
                 &all_edges,
-                &teacher_scores_scaled,
+                &teacher_scores_raw,
+                epoch_temp,
                 distill,
             );
 
@@ -1585,7 +2283,8 @@ pub fn train_adapter_with_distillation<B: Backend>(
                 &positive,
                 &negative,
                 &all_edges,
-                &teacher_scores_scaled,
+                &teacher_scores_raw,
+                epoch_temp,
                 distill,
             );
 
@@ -1648,7 +2347,8 @@ pub fn train_adapter_with_distillation<B: Backend>(
                 &positive,
                 &negative,
                 &all_edges,
-                &teacher_scores_scaled,
+                &teacher_scores_raw,
+                epoch_temp,
                 distill,
             );
 
@@ -1673,7 +2373,8 @@ pub fn train_adapter_with_distillation<B: Backend>(
                 &positive,
                 &negative,
                 &all_edges,
-                &teacher_scores_scaled,
+                &teacher_scores_raw,
+                epoch_temp,
                 distill,
             );
 
@@ -1702,7 +2403,8 @@ pub fn train_adapter_with_distillation<B: Backend>(
             &positive,
             &negative,
             &all_edges,
-            &teacher_scores_scaled,
+            &teacher_scores_raw,
+            epoch_temp,
             distill,
         );
         final_auc = link_prediction_auc(&post_emb, &positive, &negative);
@@ -1731,6 +2433,24 @@ pub fn train_adapter_with_distillation<B: Backend>(
                 break;
             }
         }
+
+        // Refresh negatives using current student embeddings so distillation keeps
+        // focusing on difficult mistakes as training progresses.
+        negative = sample_temporal_hard_negative_edges(
+            graph,
+            &positive,
+            &post_emb,
+            config.neg_ratio.max(1),
+            12,
+            0.65,
+            0.20,
+        );
+        if negative.is_empty() {
+            negative = sample_negative_edges(graph, &positive, config.neg_ratio.max(1));
+        }
+        all_edges = positive.iter().chain(negative.iter()).cloned().collect();
+        teacher_scores_raw =
+            crate::model::lora::compute_link_scores(teacher_embeddings, &all_edges);
     }
 
     TrainReport {

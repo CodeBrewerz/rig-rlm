@@ -128,6 +128,63 @@ pub fn list_checkpoints() -> Vec<WeightMeta> {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Relation head persistence
+// ═══════════════════════════════════════════════════════════════
+
+/// Persisted relation-channel stats used by inference-time relation blending.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelationHeadMeta {
+    pub version: u32,
+    pub graph_hash: u64,
+    pub hidden_dim: usize,
+    pub pairs: Vec<RelationPairMeta>,
+}
+
+/// Persisted stats for one `(src_type, dst_type)` pair.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelationPairMeta {
+    pub src_type: String,
+    pub dst_type: String,
+    pub channels: Vec<RelationChannelMeta>,
+}
+
+/// Persisted relation channel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelationChannelMeta {
+    pub relation: String,
+    pub count: usize,
+    pub weight: f32,
+    pub proto: Vec<f32>,
+    pub proto_norm: f32,
+    /// Indexed by `src_id`; each entry is sorted unique candidate `dst_id`s.
+    pub direct_targets_by_src: Vec<Vec<usize>>,
+}
+
+/// Path for relation-head metadata.
+pub fn relation_head_path(graph_hash: u64) -> PathBuf {
+    weight_dir().join(format!("relation_head_{}.json", graph_hash))
+}
+
+/// Save relation-head stats as JSON.
+pub fn save_relation_head(meta: &RelationHeadMeta) -> Result<(), String> {
+    std::fs::create_dir_all(weight_dir()).map_err(|e| format!("mkdir: {}", e))?;
+    let path = relation_head_path(meta.graph_hash);
+    let json = serde_json::to_string(meta).map_err(|e| format!("json: {}", e))?;
+    std::fs::write(&path, json).map_err(|e| format!("write: {}", e))?;
+    Ok(())
+}
+
+/// Load relation-head stats if available.
+pub fn load_relation_head(graph_hash: u64) -> Option<RelationHeadMeta> {
+    let path = relation_head_path(graph_hash);
+    if !path.exists() {
+        return None;
+    }
+    let json = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+// ═══════════════════════════════════════════════════════════════
 // LearnableScorer persistence
 // ═══════════════════════════════════════════════════════════════
 

@@ -32,8 +32,8 @@ pub fn compute_infonce_loss(
     temperature: f32,
 ) -> f32 {
     let temperature = temperature.max(1e-3);
-    let n = positive.len().min(negative.len());
-    if n == 0 {
+    let n = positive.len();
+    if n == 0 || negative.is_empty() {
         return 0.0;
     }
 
@@ -288,7 +288,7 @@ impl EdgePredictor {
             .collect();
 
         // Loss with +ε*δ
-        let mut flat_plus: Vec<f32> = flat.iter().zip(&delta).map(|(w, d)| w + eps * d).collect();
+        let flat_plus: Vec<f32> = flat.iter().zip(&delta).map(|(w, d)| w + eps * d).collect();
         self.unflatten(&flat_plus);
         let loss_plus = self.predictor_infonce_loss(embeddings, positive, negative, temperature);
 
@@ -316,8 +316,8 @@ impl EdgePredictor {
         temperature: f32,
     ) -> f32 {
         let temperature = temperature.max(1e-3);
-        let n = positive.len().min(negative.len());
-        if n == 0 {
+        let n = positive.len();
+        if n == 0 || negative.is_empty() {
             return 0.0;
         }
 

@@ -1035,7 +1035,7 @@ pub fn recommend(ctx: &FiduciaryContext, mut pc_state: Option<&mut PcState>) -> 
     // ── PC Circuit: train/resume from graph features and enrich recommendations ──
     use crate::model::pc::{
         bridge,
-        em::{EmConfig, train_em},
+        em::{train_em, EmConfig},
         fiduciary_pc,
     };
     let training_data = bridge::generate_training_data(
@@ -1045,7 +1045,7 @@ pub fn recommend(ctx: &FiduciaryContext, mut pc_state: Option<&mut PcState>) -> 
         &ctx.node_counts,
         ctx.user_emb,
     );
-    let (pc_trained, pc_em_ll) = if training_data.len() >= 5 {
+    let (pc_trained, pc_em_ll) = {
         // Convert to evidence format for EM
         let evidence: Vec<Vec<Option<usize>>> = training_data
             .iter()
@@ -1092,8 +1092,6 @@ pub fn recommend(ctx: &FiduciaryContext, mut pc_state: Option<&mut PcState>) -> 
         }
 
         (true, Some(final_ll))
-    } else {
-        (false, None)
     };
 
     // ── PC Risk Blending: merge calibrated PC risk into fiduciary score ──
@@ -1262,7 +1260,11 @@ fn count_edges(
 }
 
 fn sanitize_score(v: f32) -> f32 {
-    if v.is_finite() { v } else { 0.0 }
+    if v.is_finite() {
+        v
+    } else {
+        0.0
+    }
 }
 
 fn normalize_action_name(s: &str) -> String {

@@ -9,7 +9,6 @@
 
 use burn::backend::NdArray;
 use burn::prelude::*;
-use std::collections::HashMap;
 use std::time::Instant;
 
 use hehrgnn::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
@@ -96,7 +95,7 @@ fn test_adapter_zero_init() {
         dropout: 0.0,
     }
     .init::<B>(&node_types, &edge_types, &device);
-    let emb_base = embeddings_to_plain(&model_base.forward(&graph));
+    let _emb_base = embeddings_to_plain(&model_base.forward(&graph));
 
     // Same model with adapter (B init to zeros → zero contribution)
     let mut model_adapter = GraphSageModelConfig {
@@ -122,7 +121,7 @@ fn test_adapter_zero_init() {
         &device,
     );
     model_adapter.attach_adapter(adapter);
-    let emb_with_adapter = embeddings_to_plain(&model_adapter.forward(&graph));
+    let _emb_with_adapter = embeddings_to_plain(&model_adapter.forward(&graph));
 
     // With zero-init B, adapter model should produce same embeddings
     // (but different from base due to different random init of base weights)

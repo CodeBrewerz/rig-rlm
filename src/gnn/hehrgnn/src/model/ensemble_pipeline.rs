@@ -16,7 +16,7 @@ use burn::prelude::*;
 use std::collections::HashMap;
 
 use crate::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
-use crate::data::hetero_graph::{EdgeType, HeteroGraph};
+use crate::data::hetero_graph::EdgeType;
 use crate::eval::learnable_scorer::{LearnableScorer, ScorerConfig};
 use crate::model::backbone::NodeEmbeddings;
 use crate::model::gat::GatConfig;
@@ -24,7 +24,9 @@ use crate::model::graph_transformer::GraphTransformerConfig;
 use crate::model::graphsage::GraphSageModelConfig;
 use crate::model::lora::{LoraConfig, init_hetero_basis_adapter};
 use crate::model::mhc::MhcRgcnConfig;
-use crate::model::rgcn::RgcnConfig;
+use crate::model::temporal_selector::{
+    BackboneKind, ObjectiveKind, TemporalPolicyReport, select_temporal_policy,
+};
 use crate::model::trainer::*;
 use crate::model::weights::*;
 
@@ -66,6 +68,14 @@ pub struct PipelineReport {
     pub train_report: Option<TrainReport>,
     pub pre_train_auc: f32,
     pub post_train_auc: f32,
+    /// Selected objective used for this run (`jepa` or `hybrid`).
+    pub selected_objective: String,
+    /// Selected backbone from temporal validation policy.
+    pub selected_backbone: String,
+    /// Full temporal selection report (if selector had enough data).
+    pub temporal_policy: Option<TemporalPolicyReport>,
+    /// Objective selected for each backbone (`graphsage`,`rgcn_mhc`,`gat`,`gps`).
+    pub selected_objectives_by_backbone: HashMap<String, String>,
     pub models_saved: Vec<String>,
     pub scorer_saved: bool,
     /// GEPA auto-tune report (if tuning ran this cycle).
@@ -86,13 +96,77 @@ impl PlainEmbeddings {
     }
 }
 
+fn train_with_objective<M: JepaTrainable<B>>(
+    model: &mut M,
+    graph: &crate::data::hetero_graph::HeteroGraph<B>,
+    config: &TrainConfig,
+    objective: ObjectiveKind,
+    uniformity_weight: f32,
+) -> TrainReport {
+    match objective {
+        ObjectiveKind::Jepa => train_jepa_input_weights(
+            model,
+            graph,
+            config,
+            0.12, // base temperature τ (scheduled internally)
+            uniformity_weight,
+            true, // edge predictor on
+        ),
+        ObjectiveKind::Hybrid => train_hybrid_input_weights(
+            model,
+            graph,
+            config,
+            0.12, // base temperature τ (scheduled internally)
+            uniformity_weight,
+            0.60, // supervised BPR blend
+            true, // edge predictor on
+        ),
+    }
+}
+
+fn embedding_key_for_backbone(backbone: BackboneKind) -> &'static str {
+    match backbone {
+        BackboneKind::GraphSage => "graphsage",
+        BackboneKind::RgcnMhc => "rgcn",
+        BackboneKind::Gat => "gat",
+        BackboneKind::Gps => "gps",
+    }
+}
+
+fn objective_for_backbone(
+    policy: Option<&TemporalPolicyReport>,
+    fallback: ObjectiveKind,
+    backbone: BackboneKind,
+) -> ObjectiveKind {
+    policy
+        .map(|p| p.objective_for(backbone))
+        .unwrap_or(fallback)
+}
+
+fn objective_map(
+    policy: Option<&TemporalPolicyReport>,
+    fallback: ObjectiveKind,
+) -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    for backbone in [
+        BackboneKind::GraphSage,
+        BackboneKind::RgcnMhc,
+        BackboneKind::Gat,
+        BackboneKind::Gps,
+    ] {
+        let obj = objective_for_backbone(policy, fallback, backbone);
+        m.insert(backbone.as_str().to_string(), obj.as_str().to_string());
+    }
+    m
+}
+
 /// Run the full ensemble pipeline on a set of graph facts.
 ///
-/// Per-model optimal feature combos (from combo_features_test):
-/// - GraphSAGE: DoRA adapter + JEPA training (+7.9% AUC)
-/// - RGCN: mHC 8-layer + JEPA training (+4.2% AUC)
-/// - GAT: JEPA training (+9.9% AUC)
-/// - GPS: JEPA training (+3.8% AUC)
+/// Per-model architecture defaults:
+/// - GraphSAGE: DoRA adapter + objective-selected training
+/// - RGCN: mHC 8-layer + objective-selected training
+/// - GAT: objective-selected training
+/// - GPS: objective-selected training
 ///
 /// Returns the pipeline report and the combined embeddings.
 pub fn run_pipeline(
@@ -109,7 +183,50 @@ pub fn run_pipeline(
     let graph = build_hetero_graph::<B>(facts, &build_config, &device);
     let node_types: Vec<String> = graph.node_types().iter().map(|s| s.to_string()).collect();
     let edge_types: Vec<EdgeType> = graph.edge_types().iter().map(|e| (*e).clone()).collect();
+    let input_dim = graph
+        .node_features
+        .values()
+        .next()
+        .map(|t| t.dims()[1])
+        .unwrap_or(config.hidden_dim);
     let gh = config.graph_hash;
+    let temporal_policy = select_temporal_policy(facts, config.hidden_dim, &config.train_config);
+    let global_objective = temporal_policy
+        .as_ref()
+        .map(|p| p.selected_objective)
+        .unwrap_or(ObjectiveKind::Jepa);
+    let selected_backbone = temporal_policy
+        .as_ref()
+        .map(|p| p.selected_backbone)
+        .unwrap_or(BackboneKind::GraphSage);
+    let selected_objectives_by_backbone = objective_map(temporal_policy.as_ref(), global_objective);
+    let objective_label = {
+        let mut uniq: Vec<&str> = selected_objectives_by_backbone
+            .values()
+            .map(|s| s.as_str())
+            .collect();
+        uniq.sort_unstable();
+        uniq.dedup();
+        if uniq.len() <= 1 {
+            global_objective.as_str().to_string()
+        } else {
+            "mixed".to_string()
+        }
+    };
+
+    if let Some(policy) = &temporal_policy {
+        eprintln!(
+            "  [pipeline] Temporal selector: objective={}, backbone={}, val_auc={:.4}, warm_val_edges={}",
+            policy.selected_objective.as_str(),
+            policy.selected_backbone.as_str(),
+            policy.selected_val_auc,
+            policy.warm_val_edges
+        );
+    } else {
+        eprintln!(
+            "  [pipeline] Temporal selector skipped (insufficient facts/warm edges); using objective=jepa, backbone=graphsage"
+        );
+    }
 
     let mut report = PipelineReport {
         models_loaded_from_checkpoint: Vec::new(),
@@ -117,6 +234,10 @@ pub fn run_pipeline(
         train_report: None,
         pre_train_auc: 0.0,
         post_train_auc: 0.0,
+        selected_objective: objective_label,
+        selected_backbone: selected_backbone.as_str().to_string(),
+        temporal_policy: temporal_policy.clone(),
+        selected_objectives_by_backbone: selected_objectives_by_backbone.clone(),
         models_saved: Vec::new(),
         scorer_saved: false,
         gepa_auto_tune: None,
@@ -124,9 +245,9 @@ pub fn run_pipeline(
 
     let mut all_embeddings: HashMap<String, PlainEmbeddings> = HashMap::new();
 
-    // ── 1. GraphSAGE + DoRA + JEPA (best combo: +7.9% AUC) ──
+    // ── 1. GraphSAGE + DoRA + objective-selected training ──
     let mut sage_model = GraphSageModelConfig {
-        in_dim: config.hidden_dim,
+        in_dim: input_dim,
         hidden_dim: config.hidden_dim,
         num_layers: 2,
         dropout: 0.0,
@@ -135,7 +256,7 @@ pub fn run_pipeline(
 
     if let Some((loaded, _meta)) = load_model(
         GraphSageModelConfig {
-            in_dim: config.hidden_dim,
+            in_dim: input_dim,
             hidden_dim: config.hidden_dim,
             num_layers: 2,
             dropout: 0.0,
@@ -154,7 +275,7 @@ pub fn run_pipeline(
 
     // Attach HeteroDoRA adapter for added expressiveness
     let sage_adapter = init_hetero_basis_adapter(
-        config.hidden_dim,
+        input_dim,
         config.hidden_dim,
         &LoraConfig::default(),
         node_types.clone(),
@@ -168,21 +289,29 @@ pub fn run_pipeline(
     let pre_emb = embeddings_to_plain(&sage_model.forward(&graph));
     report.pre_train_auc = link_prediction_auc(&pre_emb, &positive, &negative);
 
-    // Train adapter first, then JEPA directly on persistent input projection weights.
+    // Train adapter first, then objective-selected update on persistent input projection weights.
     let _adapter_report = train_adapter(&mut sage_model, &graph, &config.train_config);
-    let train_report = train_jepa_input_weights(
+    let sage_objective = objective_for_backbone(
+        temporal_policy.as_ref(),
+        global_objective,
+        BackboneKind::GraphSage,
+    );
+    let train_report = train_with_objective(
         &mut sage_model,
         &graph,
         &config.train_config,
-        0.12, // base temperature τ (scheduled internally)
-        0.35, // uniformity weight λ
-        true, // edge predictor on
+        sage_objective,
+        0.35, // GraphSAGE favors slightly stronger uniformity regularization
     );
-    report.post_train_auc = train_report.final_auc;
+    // Evaluate post-train AUC on the same fixed benchmark negatives as pre-train AUC
+    // so run-to-run checkpoint comparisons are stable.
+    let post_emb_eval = embeddings_to_plain(&sage_model.forward(&graph));
+    report.post_train_auc = link_prediction_auc(&post_emb_eval, &positive, &negative);
     report.train_report = Some(train_report.clone());
     eprintln!(
-        "  [pipeline] GraphSAGE trained: auc={:.4} (DoRA+JEPA)",
-        train_report.final_auc
+        "  [pipeline] GraphSAGE trained: auc={:.4} (DoRA+{})",
+        report.post_train_auc,
+        sage_objective.as_str().to_uppercase()
     );
 
     // Save GraphSAGE
@@ -202,11 +331,11 @@ pub fn run_pipeline(
     let sage_emb = PlainEmbeddings::from_burn(&sage_model.forward(&graph));
     all_embeddings.insert("graphsage".into(), sage_emb);
 
-    // ── 2. RGCN + mHC + JEPA (best combo: +4.2% AUC) ──
+    // ── 2. RGCN + mHC + objective-selected training ──
     // Use mHC-enhanced RGCN with 8 layers + 4 streams for depth without over-smoothing
     let mut mhc_rgcn_model = {
         let fresh = MhcRgcnConfig {
-            in_dim: config.hidden_dim,
+            in_dim: input_dim,
             hidden_dim: config.hidden_dim,
             num_layers: 8,
             num_bases: 4,
@@ -217,7 +346,7 @@ pub fn run_pipeline(
 
         if let Some((loaded, _)) = load_model(
             MhcRgcnConfig {
-                in_dim: config.hidden_dim,
+                in_dim: input_dim,
                 hidden_dim: config.hidden_dim,
                 num_layers: 8,
                 num_bases: 4,
@@ -237,18 +366,23 @@ pub fn run_pipeline(
         }
     };
 
-    // Train with JEPA on persistent weights
-    let rgcn_train = train_jepa_input_weights(
+    // Train with objective-selected update on persistent weights.
+    let rgcn_objective = objective_for_backbone(
+        temporal_policy.as_ref(),
+        global_objective,
+        BackboneKind::RgcnMhc,
+    );
+    let rgcn_train = train_with_objective(
         &mut mhc_rgcn_model,
         &graph,
         &config.train_config,
-        0.12,
+        rgcn_objective,
         0.30,
-        true,
     );
     eprintln!(
-        "  [pipeline] RGCN trained: auc={:.4} (mHC+JEPA, 8 layers)",
-        rgcn_train.final_auc
+        "  [pipeline] RGCN trained: auc={:.4} (mHC+{}, 8 layers)",
+        rgcn_train.final_auc,
+        rgcn_objective.as_str().to_uppercase()
     );
     let rgcn_emb = PlainEmbeddings::from_burn(&mhc_rgcn_model.forward(&graph));
     let rgcn_meta = WeightMeta {
@@ -268,7 +402,7 @@ pub fn run_pipeline(
     // ── 3. GAT: load or init ──
     let mut gat_model = {
         let fresh = GatConfig {
-            in_dim: config.hidden_dim,
+            in_dim: input_dim,
             hidden_dim: config.hidden_dim,
             num_heads: 4,
             num_layers: 2,
@@ -278,7 +412,7 @@ pub fn run_pipeline(
 
         if let Some((loaded, _)) = load_model(
             GatConfig {
-                in_dim: config.hidden_dim,
+                in_dim: input_dim,
                 hidden_dim: config.hidden_dim,
                 num_heads: 4,
                 num_layers: 2,
@@ -296,18 +430,23 @@ pub fn run_pipeline(
             fresh
         }
     };
-    // Train GAT with JEPA on persistent weights.
-    let gat_train = train_jepa_input_weights(
+    // Train GAT with objective-selected update on persistent weights.
+    let gat_objective = objective_for_backbone(
+        temporal_policy.as_ref(),
+        global_objective,
+        BackboneKind::Gat,
+    );
+    let gat_train = train_with_objective(
         &mut gat_model,
         &graph,
         &config.train_config,
-        0.12,
+        gat_objective,
         0.30,
-        true,
     );
     eprintln!(
-        "  [pipeline] GAT trained: auc={:.4} (JEPA)",
-        gat_train.final_auc
+        "  [pipeline] GAT trained: auc={:.4} ({})",
+        gat_train.final_auc,
+        gat_objective.as_str().to_uppercase()
     );
     let gat_emb = PlainEmbeddings::from_burn(&gat_model.forward(&graph));
     let gat_meta = WeightMeta {
@@ -327,7 +466,7 @@ pub fn run_pipeline(
     // ── 4. GPS Transformer: load or init ──
     let mut gps_model = {
         let fresh = GraphTransformerConfig {
-            in_dim: config.hidden_dim,
+            in_dim: input_dim,
             hidden_dim: config.hidden_dim,
             num_heads: 4,
             num_layers: 2,
@@ -338,7 +477,7 @@ pub fn run_pipeline(
 
         if let Some((loaded, _)) = load_model(
             GraphTransformerConfig {
-                in_dim: config.hidden_dim,
+                in_dim: input_dim,
                 hidden_dim: config.hidden_dim,
                 num_heads: 4,
                 num_layers: 2,
@@ -357,18 +496,23 @@ pub fn run_pipeline(
             fresh
         }
     };
-    // Train GPS with JEPA on persistent weights.
-    let gps_train = train_jepa_input_weights(
+    // Train GPS with objective-selected update on persistent weights.
+    let gps_objective = objective_for_backbone(
+        temporal_policy.as_ref(),
+        global_objective,
+        BackboneKind::Gps,
+    );
+    let gps_train = train_with_objective(
         &mut gps_model,
         &graph,
         &config.train_config,
-        0.12,
+        gps_objective,
         0.30,
-        true,
     );
     eprintln!(
-        "  [pipeline] GPS trained: auc={:.4} (JEPA)",
-        gps_train.final_auc
+        "  [pipeline] GPS trained: auc={:.4} ({})",
+        gps_train.final_auc,
+        gps_objective.as_str().to_uppercase()
     );
     let gps_emb = PlainEmbeddings::from_burn(&gps_model.forward(&graph));
     let gps_meta = WeightMeta {
@@ -485,30 +629,71 @@ pub fn run_pipeline(
 
         let weights_path = gepa::GEPA_WEIGHTS_PATH;
 
-        // Use SAGE embeddings (primary model) for fiduciary evaluation
-        if let Some(sage_embs) = all_embeddings.get("graphsage") {
-            // Build anomaly scores from SAGE embeddings (use embedding norms as proxy)
+        // Use selected backbone embeddings for fiduciary evaluation.
+        let primary_key = embedding_key_for_backbone(selected_backbone);
+        let model_label = selected_backbone.as_str().to_ascii_uppercase();
+        if let Some(primary_embs) = all_embeddings.get(primary_key) {
+            // Build anomaly scores from a cross-backbone consensus (embedding norms as proxy).
+            let mut anomaly_sum: HashMap<String, Vec<f32>> = HashMap::new();
+            let mut anomaly_count: HashMap<String, Vec<f32>> = HashMap::new();
+            for key in ["graphsage", "rgcn", "gat", "gps"] {
+                if let Some(model_embs) = all_embeddings.get(key) {
+                    for (node_type, vecs) in &model_embs.data {
+                        let sums = anomaly_sum
+                            .entry(node_type.clone())
+                            .or_insert_with(|| vec![0.0; vecs.len()]);
+                        let counts = anomaly_count
+                            .entry(node_type.clone())
+                            .or_insert_with(|| vec![0.0; vecs.len()]);
+                        if sums.len() < vecs.len() {
+                            sums.resize(vecs.len(), 0.0);
+                            counts.resize(vecs.len(), 0.0);
+                        }
+                        for (i, v) in vecs.iter().enumerate() {
+                            let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                            let score = (norm / (config.hidden_dim as f32).sqrt()).clamp(0.0, 1.0);
+                            sums[i] += score;
+                            counts[i] += 1.0;
+                        }
+                    }
+                }
+            }
             let mut anomaly_map: HashMap<String, Vec<f32>> = HashMap::new();
-            for (node_type, vecs) in &sage_embs.data {
-                let scores: Vec<f32> = vecs
+            for (node_type, sums) in anomaly_sum {
+                let counts = anomaly_count
+                    .remove(&node_type)
+                    .unwrap_or_else(|| vec![1.0; sums.len()]);
+                let avg: Vec<f32> = sums
                     .iter()
-                    .map(|v| {
-                        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-                        // Normalize to [0, 1] — higher norm → more anomalous
-                        (norm / (config.hidden_dim as f32).sqrt()).clamp(0.0, 1.0)
+                    .enumerate()
+                    .map(|(i, s)| {
+                        let c = counts.get(i).copied().unwrap_or(1.0).max(1e-6);
+                        (s / c).clamp(0.0, 1.0)
                     })
                     .collect();
-                anomaly_map.insert(node_type.clone(), scores);
+                anomaly_map.insert(node_type, avg);
+            }
+            if anomaly_map.is_empty() {
+                for (node_type, vecs) in &primary_embs.data {
+                    let scores: Vec<f32> = vecs
+                        .iter()
+                        .map(|v| {
+                            let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                            (norm / (config.hidden_dim as f32).sqrt()).clamp(0.0, 1.0)
+                        })
+                        .collect();
+                    anomaly_map.insert(node_type.clone(), scores);
+                }
             }
             let mut anomaly_scores_map: HashMap<String, HashMap<String, Vec<f32>>> = HashMap::new();
-            anomaly_scores_map.insert("SAGE".to_string(), anomaly_map.clone());
+            anomaly_scores_map.insert(model_label, anomaly_map.clone());
 
             // Build node names/counts from embeddings
             let mut emb_data: HashMap<String, Vec<Vec<f32>>> = HashMap::new();
             let mut node_names_map: HashMap<String, Vec<String>> = HashMap::new();
             let mut node_counts_map: HashMap<String, usize> = HashMap::new();
 
-            for (node_type, vecs) in &sage_embs.data {
+            for (node_type, vecs) in &primary_embs.data {
                 emb_data.insert(node_type.clone(), vecs.clone());
                 let type_names: Vec<String> = (0..vecs.len())
                     .map(|i| format!("{}_{}", node_type, i))
@@ -588,7 +773,7 @@ pub fn run_pipeline(
 
                     impl gepa::Evaluator for PipelineEvaluator {
                         fn evaluate(&self, candidate: &gepa::Candidate) -> gepa::EvalResult {
-                            let weights = [
+                            let _weights = [
                                 candidate.get_f32("cost_weight", 0.25),
                                 candidate.get_f32("risk_weight", 0.25),
                                 candidate.get_f32("goal_weight", 0.15),

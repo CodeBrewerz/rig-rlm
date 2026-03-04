@@ -153,15 +153,14 @@ pub struct AppState {
     pub embeddings: RwLock<PlainEmbeddings>,
 
     /// **Precomputed** per-model anomaly scores and normalization parameters.
-    /// Computed once at startup over ALL nodes — makes API scoring O(1) per node
-    /// and deterministic regardless of batch size.
+    /// Built over ALL nodes for O(1) scoring and refreshed after live updates.
     pub precomputed: PrecomputedScores,
 
-    /// Graph metadata.
-    pub graph_meta: GraphMeta,
+    /// Graph metadata (kept live with graph mutations).
+    pub graph_meta: RwLock<GraphMeta>,
 
-    /// Node type → list of instance names.
-    pub node_names: HashMap<String, Vec<String>>,
+    /// Node type → list of instance names (kept live with graph mutations).
+    pub node_names: RwLock<HashMap<String, Vec<String>>>,
 
     /// Model configuration metadata.
     pub hidden_dim: usize,
@@ -170,8 +169,10 @@ pub struct AppState {
     /// Names of all models that were run.
     pub model_names: Vec<String>,
 
-    /// Graph edges for neighborhood influence lookups.
-    pub graph_edges: GraphEdges,
+    /// Graph edges for neighborhood influence lookups (live-updated on mutations).
+    pub graph_edges: RwLock<GraphEdges>,
+    /// Precomputed relation-conditioned translation channels for fast scoring.
+    pub relation_head: RwLock<RelationHeadCache>,
 
     /// Audit provenance metadata.
     pub audit: AuditInfo,
@@ -181,16 +182,16 @@ pub struct AppState {
     pub pca_coords: HashMap<String, Vec<(f32, f32)>>,
 
     /// Neural activation probing results.
-    pub probe_results: ProbeResults,
+    pub probe_results: RwLock<ProbeResults>,
 
     /// Ground-truth concept labels per node.
-    pub concept_labels: ConceptLabels,
+    pub concept_labels: RwLock<ConceptLabels>,
 
     /// Per-model per-layer activations: model → [layer][node_type → Vec<Vec<f32>>].
-    pub layer_activations: HashMap<String, Vec<HashMap<String, Vec<Vec<f32>>>>>,
+    pub layer_activations: RwLock<HashMap<String, Vec<HashMap<String, Vec<Vec<f32>>>>>>,
 
     /// Trained SAE for embedding interpretability (if available).
-    pub sae_state: Option<SaeState>,
+    pub sae_state: RwLock<Option<SaeState>>,
 
     /// Learnable scorer for fiduciary recommendations (thread-safe for reward feedback).
     /// Uses asymmetric RL rewards: miss_penalty_multiplier=3.0 (paper 2402.18246).
@@ -349,6 +350,380 @@ impl GraphEdges {
     }
 }
 
+/// One relation-specific translation channel used by inference-time scoring.
+#[derive(Debug, Clone)]
+pub struct RelationHeadChannel {
+    pub relation: String,
+    pub count: usize,
+    pub weight: f32,
+    pub proto: Vec<f32>,
+    pub proto_norm: f32,
+    /// Indexed by `src_id`; each entry is sorted unique candidate `dst_id`s.
+    pub direct_targets_by_src: Vec<Vec<usize>>,
+}
+
+/// Precomputed relation-conditioned channels for `(src_type, dst_type)` pairs.
+#[derive(Debug, Clone)]
+pub struct RelationHeadCache {
+    pub hidden_dim: usize,
+    pub pair_channels: HashMap<String, HashMap<String, Vec<RelationHeadChannel>>>,
+}
+
+impl RelationHeadCache {
+    /// Build relation channels from graph edges and current embeddings.
+    pub fn build(
+        edge_map: &HashMap<(String, String, String), Vec<(usize, usize)>>,
+        embeddings: &PlainEmbeddings,
+        hidden_dim: usize,
+    ) -> Self {
+        let dim = hidden_dim.min(embeddings.hidden_dim);
+        let mut pair_channels: HashMap<String, HashMap<String, Vec<RelationHeadChannel>>> =
+            HashMap::new();
+
+        if dim == 0 {
+            return Self {
+                hidden_dim: dim,
+                pair_channels,
+            };
+        }
+
+        for ((src_type, relation, dst_type), edges) in edge_map {
+            if edges.is_empty() {
+                continue;
+            }
+
+            let Some(src_vecs) = embeddings.data.get(src_type) else {
+                continue;
+            };
+            let Some(dst_vecs) = embeddings.data.get(dst_type) else {
+                continue;
+            };
+
+            let mut direct_targets_by_src = vec![Vec::<usize>::new(); src_vecs.len()];
+            let mut proto = vec![0.0f32; dim];
+            let mut proto_count = 0usize;
+
+            for &(src, dst) in edges {
+                if src < direct_targets_by_src.len() {
+                    direct_targets_by_src[src].push(dst);
+                }
+
+                let Some(src_emb) = src_vecs.get(src) else {
+                    continue;
+                };
+                let Some(dst_emb) = dst_vecs.get(dst) else {
+                    continue;
+                };
+                if src_emb.len() < dim || dst_emb.len() < dim {
+                    continue;
+                }
+
+                for j in 0..dim {
+                    let src_v = src_emb[j];
+                    let dst_v = dst_emb[j];
+                    if src_v.is_finite() && dst_v.is_finite() {
+                        proto[j] += dst_v - src_v;
+                    }
+                }
+                proto_count += 1;
+            }
+
+            if proto_count == 0 {
+                continue;
+            }
+            for v in &mut proto {
+                *v /= proto_count as f32;
+            }
+
+            let proto_norm = proto.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if !proto_norm.is_finite() || proto_norm < 1e-6 {
+                continue;
+            }
+
+            for targets in &mut direct_targets_by_src {
+                targets.sort_unstable();
+                targets.dedup();
+            }
+
+            pair_channels
+                .entry(src_type.clone())
+                .or_default()
+                .entry(dst_type.clone())
+                .or_default()
+                .push(RelationHeadChannel {
+                    relation: relation.clone(),
+                    count: edges.len(),
+                    weight: 0.0,
+                    proto,
+                    proto_norm,
+                    direct_targets_by_src,
+                });
+        }
+
+        for by_dst in pair_channels.values_mut() {
+            for channels in by_dst.values_mut() {
+                channels.sort_by(|a, b| {
+                    b.count
+                        .cmp(&a.count)
+                        .then_with(|| a.relation.cmp(&b.relation))
+                });
+                channels.truncate(4);
+                Self::normalize_channel_weights(channels);
+            }
+        }
+
+        Self {
+            hidden_dim: dim,
+            pair_channels,
+        }
+    }
+
+    /// Restore from persisted JSON metadata.
+    pub fn from_persisted(meta: crate::model::weights::RelationHeadMeta) -> Self {
+        let mut pair_channels: HashMap<String, HashMap<String, Vec<RelationHeadChannel>>> =
+            HashMap::new();
+
+        for pair in meta.pairs {
+            if pair.src_type.is_empty() || pair.dst_type.is_empty() {
+                continue;
+            }
+
+            let mut channels: Vec<RelationHeadChannel> = pair
+                .channels
+                .into_iter()
+                .filter_map(|ch| {
+                    if ch.proto.is_empty() {
+                        return None;
+                    }
+                    let mut direct_targets_by_src = ch.direct_targets_by_src;
+                    for targets in &mut direct_targets_by_src {
+                        targets.sort_unstable();
+                        targets.dedup();
+                    }
+                    let computed_norm = ch.proto.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    let proto_norm = if ch.proto_norm.is_finite() && ch.proto_norm > 1e-6 {
+                        ch.proto_norm
+                    } else {
+                        computed_norm
+                    };
+                    if !proto_norm.is_finite() || proto_norm < 1e-6 {
+                        return None;
+                    }
+
+                    Some(RelationHeadChannel {
+                        relation: ch.relation,
+                        count: ch.count.max(1),
+                        weight: ch.weight,
+                        proto: ch.proto,
+                        proto_norm,
+                        direct_targets_by_src,
+                    })
+                })
+                .collect();
+
+            if channels.is_empty() {
+                continue;
+            }
+
+            channels.sort_by(|a, b| {
+                b.count
+                    .cmp(&a.count)
+                    .then_with(|| a.relation.cmp(&b.relation))
+            });
+            channels.truncate(4);
+            Self::normalize_channel_weights(&mut channels);
+
+            pair_channels
+                .entry(pair.src_type)
+                .or_default()
+                .entry(pair.dst_type)
+                .or_default()
+                .extend(channels);
+        }
+
+        for by_dst in pair_channels.values_mut() {
+            for channels in by_dst.values_mut() {
+                channels.sort_by(|a, b| {
+                    b.count
+                        .cmp(&a.count)
+                        .then_with(|| a.relation.cmp(&b.relation))
+                });
+                channels.truncate(4);
+                Self::normalize_channel_weights(channels);
+            }
+        }
+
+        Self {
+            hidden_dim: meta.hidden_dim,
+            pair_channels,
+        }
+    }
+
+    /// Convert runtime cache into persisted metadata.
+    pub fn to_persisted(&self, graph_hash: u64) -> crate::model::weights::RelationHeadMeta {
+        let mut src_types: Vec<&String> = self.pair_channels.keys().collect();
+        src_types.sort();
+
+        let mut pairs = Vec::new();
+        for src_type in src_types {
+            if let Some(by_dst) = self.pair_channels.get(src_type) {
+                let mut dst_types: Vec<&String> = by_dst.keys().collect();
+                dst_types.sort();
+                for dst_type in dst_types {
+                    let mut channels = by_dst.get(dst_type).cloned().unwrap_or_default();
+                    channels.sort_by(|a, b| {
+                        b.count
+                            .cmp(&a.count)
+                            .then_with(|| a.relation.cmp(&b.relation))
+                    });
+                    channels.truncate(4);
+                    Self::normalize_channel_weights(&mut channels);
+
+                    pairs.push(crate::model::weights::RelationPairMeta {
+                        src_type: src_type.clone(),
+                        dst_type: dst_type.clone(),
+                        channels: channels
+                            .into_iter()
+                            .map(|ch| crate::model::weights::RelationChannelMeta {
+                                relation: ch.relation,
+                                count: ch.count,
+                                weight: ch.weight,
+                                proto: ch.proto,
+                                proto_norm: ch.proto_norm,
+                                direct_targets_by_src: ch.direct_targets_by_src,
+                            })
+                            .collect(),
+                    });
+                }
+            }
+        }
+
+        crate::model::weights::RelationHeadMeta {
+            version: 1,
+            graph_hash,
+            hidden_dim: self.hidden_dim,
+            pairs,
+        }
+    }
+
+    /// Number of `(src_type, dst_type)` pair entries.
+    pub fn pair_count(&self) -> usize {
+        self.pair_channels.values().map(|m| m.len()).sum()
+    }
+
+    /// Number of relation channels across all pairs.
+    pub fn channel_count(&self) -> usize {
+        self.pair_channels
+            .values()
+            .flat_map(|m| m.values())
+            .map(|channels| channels.len())
+            .sum()
+    }
+
+    /// Score candidates with the precomputed relation-conditioned channels.
+    pub fn score_candidates(
+        &self,
+        src_type: &str,
+        src_id: usize,
+        dst_type: &str,
+        source_embedding: &[f32],
+        candidate_ids: &[usize],
+        candidate_embeddings: &[Vec<f32>],
+    ) -> (Vec<f32>, usize) {
+        let n = candidate_ids.len().min(candidate_embeddings.len());
+        if n == 0 || source_embedding.is_empty() {
+            return (vec![0.0; n], 0);
+        }
+
+        let Some(channels) = self
+            .pair_channels
+            .get(src_type)
+            .and_then(|by_dst| by_dst.get(dst_type))
+        else {
+            return (vec![0.0; n], 0);
+        };
+        if channels.is_empty() {
+            return (vec![0.0; n], 0);
+        }
+
+        let dim = self.hidden_dim.min(source_embedding.len());
+        if dim == 0 {
+            return (vec![0.0; n], 0);
+        }
+
+        let mut out = vec![0.0f32; n];
+        for i in 0..n {
+            let dst = &candidate_embeddings[i];
+            if dst.len() < dim {
+                continue;
+            }
+
+            let mut delta = vec![0.0f32; dim];
+            for j in 0..dim {
+                delta[j] = dst[j] - source_embedding[j];
+            }
+            let delta_norm = delta.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
+
+            let mut score = 0.0f32;
+            for ch in channels {
+                let rel_dim = dim.min(ch.proto.len());
+                if rel_dim == 0 {
+                    continue;
+                }
+                let dot: f32 = delta
+                    .iter()
+                    .take(rel_dim)
+                    .zip(ch.proto.iter().take(rel_dim))
+                    .map(|(a, b)| a * b)
+                    .sum();
+                let cos = (dot / (delta_norm * ch.proto_norm.max(1e-6))).clamp(-1.0, 1.0);
+                let trans = (cos + 1.0) * 0.5;
+                let direct = ch
+                    .direct_targets_by_src
+                    .get(src_id)
+                    .map(|targets| targets.binary_search(&candidate_ids[i]).is_ok())
+                    .unwrap_or(false);
+                let direct = if direct { 1.0 } else { 0.0 };
+                score += ch.weight * (0.85 * trans + 0.15 * direct);
+            }
+            out[i] = score.clamp(0.0, 1.0);
+        }
+
+        let mean = out.iter().sum::<f32>() / n as f32;
+        let var = out.iter().map(|s| (s - mean).powi(2)).sum::<f32>() / n as f32;
+        let std = var.sqrt().max(1e-5);
+        let normalized = out
+            .into_iter()
+            .map(|s| Self::sigmoid_f32((s - mean) / std))
+            .collect::<Vec<_>>();
+        (normalized, channels.len())
+    }
+
+    fn normalize_channel_weights(channels: &mut [RelationHeadChannel]) {
+        if channels.is_empty() {
+            return;
+        }
+        let sum = channels
+            .iter()
+            .map(|ch| (ch.count as f32 + 1.0).ln())
+            .sum::<f32>();
+        if sum <= 1e-6 {
+            let w = 1.0 / channels.len() as f32;
+            for ch in channels {
+                ch.weight = w;
+            }
+            return;
+        }
+        for ch in channels {
+            ch.weight = ((ch.count as f32 + 1.0).ln() / sum).clamp(0.0, 1.0);
+        }
+    }
+
+    fn sigmoid_f32(x: f32) -> f32 {
+        1.0 / (1.0 + (-x.clamp(-20.0, 20.0)).exp())
+    }
+}
+
 /// A neighbor node found via an edge.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Neighbor {
@@ -388,10 +763,10 @@ pub struct AuditInfo {
 /// - Single-node queries produce the same result as batch queries
 /// - No centroid recomputation per request
 /// - Normalized scores are globally consistent
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PrecomputedScores {
     /// `(model, node_type)` → { raw L2 scores for all nodes, min, max, mean, std }.
-    pub scores: HashMap<(String, String), ModelTypeScores>,
+    scores: RwLock<HashMap<(String, String), ModelTypeScores>>,
 }
 
 /// Pre-computed L2 anomaly scores for one model + one node type.
@@ -458,6 +833,37 @@ impl ModelTypeScores {
 impl PrecomputedScores {
     /// Build from model embeddings — computes centroid + L2 for every model × node type.
     fn build(model_names: &[String], model_embeddings: &HashMap<String, PlainEmbeddings>) -> Self {
+        let scores = Self::compute_scores(model_names, model_embeddings);
+        Self {
+            scores: RwLock::new(scores),
+        }
+    }
+
+    /// Rebuild in place from current model embeddings.
+    pub fn rebuild_from_embeddings(
+        &self,
+        model_names: &[String],
+        model_embeddings: &HashMap<String, PlainEmbeddings>,
+    ) -> Result<usize, String> {
+        let fresh = Self::compute_scores(model_names, model_embeddings);
+        let len = fresh.len();
+        let mut guard = self
+            .scores
+            .write()
+            .map_err(|e| format!("precomputed write lock poisoned: {}", e))?;
+        *guard = fresh;
+        Ok(len)
+    }
+
+    /// Number of `(model, node_type)` distributions currently cached.
+    pub fn len(&self) -> usize {
+        self.scores.read().map(|s| s.len()).unwrap_or(0)
+    }
+
+    fn compute_scores(
+        model_names: &[String],
+        model_embeddings: &HashMap<String, PlainEmbeddings>,
+    ) -> HashMap<(String, String), ModelTypeScores> {
         let mut scores = HashMap::new();
 
         for model_name in model_names {
@@ -491,7 +897,11 @@ impl PrecomputedScores {
                         .iter()
                         .map(|e| {
                             let d = PlainEmbeddings::l2_distance(e, &centroid);
-                            if d.is_finite() { d.max(0.0) } else { 0.0 }
+                            if d.is_finite() {
+                                d.max(0.0)
+                            } else {
+                                0.0
+                            }
                         })
                         .collect();
 
@@ -523,12 +933,16 @@ impl PrecomputedScores {
             }
         }
 
-        Self { scores }
+        scores
     }
 
     /// Lookup precomputed scores for a model + node type.
-    pub fn get(&self, model: &str, node_type: &str) -> Option<&ModelTypeScores> {
-        self.scores.get(&(model.to_string(), node_type.to_string()))
+    pub fn get(&self, model: &str, node_type: &str) -> Option<ModelTypeScores> {
+        self.scores
+            .read()
+            .ok()?
+            .get(&(model.to_string(), node_type.to_string()))
+            .cloned()
     }
 }
 
@@ -559,11 +973,11 @@ impl Default for ServerConfig {
 impl AppState {
     /// Initialize: build graph → run ALL GNN models → extract plain embeddings.
     pub fn init(config: &ServerConfig) -> Arc<Self> {
-        use crate::data::graph_builder::{GraphBuildConfig, build_from_schema};
+        use crate::data::graph_builder::{build_from_schema, GraphBuildConfig};
         use crate::data::synthetic::{SyntheticDataConfig, TqlSchema};
         use crate::model::gat::GatConfig;
         use crate::model::graph_transformer::GraphTransformerConfig;
-        use crate::model::lora::{LoraConfig, init_hetero_basis_adapter};
+        use crate::model::lora::{init_hetero_basis_adapter, LoraConfig};
         use crate::model::mhc::MhcRgcnConfig;
         use crate::model::trainer::*;
 
@@ -915,7 +1329,7 @@ impl AppState {
         let precomputed = PrecomputedScores::build(&model_names, &model_embeddings);
         println!(
             "  ✅ Precomputed {} model×type score distributions",
-            precomputed.scores.len()
+            precomputed.len()
         );
 
         // Build graph metadata
@@ -960,8 +1374,75 @@ impl AppState {
         let graph_edges_data = GraphEdges { edges: edge_map };
         println!("  ✅ Extracted {} edge types", graph_edges_data.edges.len());
 
+        // ── Load or build relation-conditioned cache (persistent by graph hash) ──
+        let graph_hash_u64 = graph_hash; // save u64 for all per-graph checkpoints
+        println!("  Initializing relation-conditioned cache...");
+        let relation_head = {
+            let loaded = crate::model::weights::load_relation_head(graph_hash_u64);
+            if let Some(meta) = loaded {
+                if meta.version == 1 && meta.hidden_dim == config.hidden_dim {
+                    let cache = RelationHeadCache::from_persisted(meta);
+                    if cache.channel_count() > 0 {
+                        println!(
+                            "  ✅ Relation cache loaded (pairs={}, channels={})",
+                            cache.pair_count(),
+                            cache.channel_count()
+                        );
+                        cache
+                    } else {
+                        eprintln!(
+                            "  ⚠ Relation cache was empty after load, rebuilding from graph edges"
+                        );
+                        let cache = RelationHeadCache::build(
+                            &graph_edges_data.edges,
+                            &sage_emb,
+                            config.hidden_dim,
+                        );
+                        let persisted = cache.to_persisted(graph_hash_u64);
+                        if let Err(e) = crate::model::weights::save_relation_head(&persisted) {
+                            eprintln!("  ⚠ Failed to persist relation cache: {}", e);
+                        } else {
+                            println!("  💾 Relation cache checkpoint saved");
+                        }
+                        cache
+                    }
+                } else {
+                    eprintln!(
+                        "  ⚠ Relation cache version/dim mismatch (version={}, dim={}), rebuilding",
+                        meta.version, meta.hidden_dim
+                    );
+                    let cache = RelationHeadCache::build(
+                        &graph_edges_data.edges,
+                        &sage_emb,
+                        config.hidden_dim,
+                    );
+                    let persisted = cache.to_persisted(graph_hash_u64);
+                    if let Err(e) = crate::model::weights::save_relation_head(&persisted) {
+                        eprintln!("  ⚠ Failed to persist relation cache: {}", e);
+                    } else {
+                        println!("  💾 Relation cache checkpoint saved");
+                    }
+                    cache
+                }
+            } else {
+                let cache =
+                    RelationHeadCache::build(&graph_edges_data.edges, &sage_emb, config.hidden_dim);
+                println!(
+                    "  ✅ Relation cache built (pairs={}, channels={})",
+                    cache.pair_count(),
+                    cache.channel_count()
+                );
+                let persisted = cache.to_persisted(graph_hash_u64);
+                if let Err(e) = crate::model::weights::save_relation_head(&persisted) {
+                    eprintln!("  ⚠ Failed to persist relation cache: {}", e);
+                } else {
+                    println!("  💾 Relation cache checkpoint saved");
+                }
+                cache
+            }
+        };
+
         // ── Build audit provenance ──
-        let graph_hash_u64 = graph_hash; // save u64 for scorer checkpoint
         let graph_hash = format!(
             "N{}_E{}_NT{}_ET{}_D{}",
             graph.total_nodes(),
@@ -1166,18 +1647,19 @@ impl AppState {
             embeddings: RwLock::new(sage_emb),
             model_embeddings: RwLock::new(model_embeddings),
             precomputed,
-            graph_meta,
-            node_names,
+            graph_meta: RwLock::new(graph_meta),
+            node_names: RwLock::new(node_names),
             hidden_dim: config.hidden_dim,
             num_classes: config.num_classes,
             model_names,
-            graph_edges: graph_edges_data,
+            graph_edges: RwLock::new(graph_edges_data),
+            relation_head: RwLock::new(relation_head),
             audit,
             pca_coords,
-            probe_results,
-            concept_labels,
-            layer_activations: all_layer_activations,
-            sae_state,
+            probe_results: RwLock::new(probe_results),
+            concept_labels: RwLock::new(concept_labels),
+            layer_activations: RwLock::new(all_layer_activations),
+            sae_state: RwLock::new(sae_state),
             scorer,
             scorer_graph_hash: graph_hash_u64,
             pc_state: Arc::new(Mutex::new(crate::eval::fiduciary::PcState::new())),
@@ -1193,12 +1675,336 @@ impl AppState {
         })
     }
 
+    /// Apply graph edge insert/delete events to the in-memory edge index.
+    pub fn apply_graph_events_to_edges(
+        &self,
+        events: &[crate::data::graph_mutation::GraphEvent],
+    ) -> Result<usize, String> {
+        use crate::data::graph_mutation::GraphEvent;
+
+        let mut graph_edges = self
+            .graph_edges
+            .write()
+            .map_err(|e| format!("graph_edges write lock poisoned: {}", e))?;
+        let mut changed = 0usize;
+
+        for event in events {
+            match event {
+                GraphEvent::InsertEdge {
+                    src_type,
+                    src_id,
+                    dst_type,
+                    dst_id,
+                    relation,
+                } => {
+                    let key = (src_type.clone(), relation.clone(), dst_type.clone());
+                    let edge_list = graph_edges.edges.entry(key).or_default();
+                    if !edge_list
+                        .iter()
+                        .any(|(s, d)| *s == *src_id && *d == *dst_id)
+                    {
+                        edge_list.push((*src_id, *dst_id));
+                        changed += 1;
+                    }
+                    if relation != "self_loop" && !relation.starts_with("rev_") {
+                        let rev_key = (
+                            dst_type.clone(),
+                            format!("rev_{}", relation),
+                            src_type.clone(),
+                        );
+                        let rev_list = graph_edges.edges.entry(rev_key).or_default();
+                        if !rev_list.iter().any(|(s, d)| *s == *dst_id && *d == *src_id) {
+                            rev_list.push((*dst_id, *src_id));
+                        }
+                    }
+                }
+                GraphEvent::DeleteEdge {
+                    src_type,
+                    src_id,
+                    dst_type,
+                    dst_id,
+                    relation,
+                } => {
+                    let key = (src_type.clone(), relation.clone(), dst_type.clone());
+                    let mut remove_key = false;
+                    if let Some(edge_list) = graph_edges.edges.get_mut(&key) {
+                        let before = edge_list.len();
+                        edge_list.retain(|(s, d)| !(*s == *src_id && *d == *dst_id));
+                        let after = edge_list.len();
+                        if after < before {
+                            changed += before - after;
+                        }
+                        if edge_list.is_empty() {
+                            remove_key = true;
+                        }
+                    }
+                    if remove_key {
+                        graph_edges.edges.remove(&key);
+                    }
+                    if relation != "self_loop" && !relation.starts_with("rev_") {
+                        let rev_key = (
+                            dst_type.clone(),
+                            format!("rev_{}", relation),
+                            src_type.clone(),
+                        );
+                        let mut remove_rev = false;
+                        if let Some(rev_list) = graph_edges.edges.get_mut(&rev_key) {
+                            rev_list.retain(|(s, d)| !(*s == *dst_id && *d == *src_id));
+                            if rev_list.is_empty() {
+                                remove_rev = true;
+                            }
+                        }
+                        if remove_rev {
+                            graph_edges.edges.remove(&rev_key);
+                        }
+                    }
+                }
+                GraphEvent::InsertNode { .. } => {}
+                GraphEvent::UpdateFeatures { .. } => {}
+            }
+        }
+
+        drop(graph_edges);
+        self.refresh_graph_metadata_from_live()?;
+        Ok(changed)
+    }
+
+    /// Rebuild relation-conditioned channels from current embeddings + edge index.
+    ///
+    /// When `persist` is true, also writes a per-graph checkpoint to disk.
+    pub fn refresh_relation_head_cache(&self, persist: bool) -> Result<(usize, usize), String> {
+        let sage_embeddings = self
+            .embeddings
+            .read()
+            .map_err(|e| format!("embeddings read lock poisoned: {}", e))?
+            .clone();
+        let edge_map = self
+            .graph_edges
+            .read()
+            .map_err(|e| format!("graph_edges read lock poisoned: {}", e))?
+            .edges
+            .clone();
+
+        let cache = RelationHeadCache::build(&edge_map, &sage_embeddings, self.hidden_dim);
+        let pairs = cache.pair_count();
+        let channels = cache.channel_count();
+
+        if persist {
+            let meta = cache.to_persisted(self.scorer_graph_hash);
+            if let Err(e) = crate::model::weights::save_relation_head(&meta) {
+                eprintln!("  ⚠ Failed to persist refreshed relation cache: {}", e);
+            }
+        }
+
+        let mut relation_head = self
+            .relation_head
+            .write()
+            .map_err(|e| format!("relation_head write lock poisoned: {}", e))?;
+        *relation_head = cache;
+
+        Ok((pairs, channels))
+    }
+
+    /// Recompute anomaly normalization distributions from current live model embeddings.
+    pub fn refresh_precomputed_cache(&self) -> Result<usize, String> {
+        let model_embeddings = self
+            .model_embeddings
+            .read()
+            .map_err(|e| format!("model_embeddings read lock poisoned: {}", e))?;
+        self.precomputed
+            .rebuild_from_embeddings(&self.model_names, &model_embeddings)
+    }
+
+    /// Sync graph metadata and node-name indexes from current live state.
+    pub fn refresh_graph_metadata_from_live(&self) -> Result<(), String> {
+        let embeddings = self
+            .embeddings
+            .read()
+            .map_err(|e| format!("embeddings read lock poisoned: {}", e))?;
+        let graph_edges = self
+            .graph_edges
+            .read()
+            .map_err(|e| format!("graph_edges read lock poisoned: {}", e))?;
+
+        let mut node_types: Vec<String> = embeddings.data.keys().cloned().collect();
+        node_types.sort();
+        let node_counts: HashMap<String, usize> = embeddings
+            .data
+            .iter()
+            .map(|(nt, vecs)| (nt.clone(), vecs.len()))
+            .collect();
+
+        let total_nodes = node_counts.values().sum();
+        let edge_counts: HashMap<(String, String, String), usize> = graph_edges
+            .edges
+            .iter()
+            .map(|(k, v)| (k.clone(), v.len()))
+            .collect();
+        let mut edge_types: Vec<(String, String, String)> = edge_counts.keys().cloned().collect();
+        edge_types.sort();
+        let total_edges = edge_counts.values().sum();
+
+        drop(embeddings);
+        drop(graph_edges);
+
+        {
+            let mut meta = self
+                .graph_meta
+                .write()
+                .map_err(|e| format!("graph_meta write lock poisoned: {}", e))?;
+            meta.node_types = node_types.clone();
+            meta.node_counts = node_counts.clone();
+            meta.edge_types = edge_types;
+            meta.edge_counts = edge_counts;
+            meta.total_nodes = total_nodes;
+            meta.total_edges = total_edges;
+        }
+
+        let mut node_names = self
+            .node_names
+            .write()
+            .map_err(|e| format!("node_names write lock poisoned: {}", e))?;
+        for (nt, &count) in &node_counts {
+            let names = node_names.entry(nt.clone()).or_default();
+            if names.len() < count {
+                for i in names.len()..count {
+                    names.push(format!("{}_{}", nt, i));
+                }
+            } else if names.len() > count {
+                names.truncate(count);
+            }
+        }
+        node_names.retain(|nt, _| node_counts.contains_key(nt));
+
+        Ok(())
+    }
+
+    /// Recompute probing + SAE interpretability caches from current live state.
+    pub fn refresh_interpretability_cache(&self) -> Result<(usize, usize), String> {
+        use crate::eval::probing::{ConceptLabels, ProbeResults};
+        use crate::eval::sae::*;
+
+        let model_embeddings = self
+            .model_embeddings
+            .read()
+            .map_err(|e| format!("model_embeddings read lock poisoned: {}", e))?
+            .clone();
+        let edge_map = self
+            .graph_edges
+            .read()
+            .map_err(|e| format!("graph_edges read lock poisoned: {}", e))?
+            .edges
+            .clone();
+
+        let mut layer_activations: HashMap<String, Vec<HashMap<String, Vec<Vec<f32>>>>> =
+            HashMap::new();
+        for model in &self.model_names {
+            if let Some(emb) = model_embeddings.get(model) {
+                layer_activations.insert(model.clone(), vec![emb.data.clone()]);
+            }
+        }
+
+        let node_counts_map: HashMap<String, usize> = model_embeddings
+            .get("SAGE")
+            .map(|emb| {
+                emb.data
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.len()))
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
+
+        let mut anomaly_scores_map: HashMap<String, Vec<f32>> = HashMap::new();
+        for (nt, &count) in &node_counts_map {
+            if let Some(scores) = self.precomputed.get("SAGE", nt) {
+                let norm_scores: Vec<f32> = (0..count).map(|i| scores.normalized(i)).collect();
+                anomaly_scores_map.insert(nt.clone(), norm_scores);
+            }
+        }
+
+        let concept_labels =
+            ConceptLabels::compute(&edge_map, &node_counts_map, &anomaly_scores_map);
+        let probe_results =
+            ProbeResults::train(&layer_activations, &concept_labels, self.hidden_dim);
+        let total_probed = probe_results
+            .models
+            .values()
+            .map(|m| m.top_alignments.len())
+            .sum::<usize>();
+
+        let sae_state = if let Some(sage_emb) = model_embeddings.get("SAGE") {
+            let all_embs: Vec<Vec<f32>> = sage_emb
+                .data
+                .values()
+                .flat_map(|v| v.iter().cloned())
+                .collect();
+            if all_embs.len() >= 10 {
+                let sae_cfg = SaeConfig {
+                    expansion_factor: 4,
+                    l1_coeff: 0.01,
+                    lr: 0.005,
+                    epochs: 12,
+                };
+                let sae = SparseAutoencoder::train(&all_embs, &sae_cfg);
+                let mut all_concept_labels: Vec<Vec<f32>> = Vec::new();
+                let mut anomaly_for_sae: HashMap<String, HashMap<String, Vec<f32>>> =
+                    HashMap::new();
+                anomaly_for_sae.insert("SAGE".into(), anomaly_scores_map.clone());
+                for (nt, vecs) in &sage_emb.data {
+                    let nt_labels =
+                        compute_concept_labels(&edge_map, &anomaly_for_sae, nt, vecs.len());
+                    all_concept_labels.extend(nt_labels);
+                }
+                let feature_labels = label_features(&sae, &all_embs, &all_concept_labels);
+                Some(SaeState {
+                    sae,
+                    feature_labels,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        {
+            let mut layer_guard = self
+                .layer_activations
+                .write()
+                .map_err(|e| format!("layer_activations write lock poisoned: {}", e))?;
+            *layer_guard = layer_activations;
+        }
+        {
+            let mut concept_guard = self
+                .concept_labels
+                .write()
+                .map_err(|e| format!("concept_labels write lock poisoned: {}", e))?;
+            *concept_guard = concept_labels;
+        }
+        {
+            let mut probe_guard = self
+                .probe_results
+                .write()
+                .map_err(|e| format!("probe_results write lock poisoned: {}", e))?;
+            *probe_guard = probe_results;
+        }
+        {
+            let mut sae_guard = self
+                .sae_state
+                .write()
+                .map_err(|e| format!("sae_state write lock poisoned: {}", e))?;
+            *sae_guard = sae_state;
+        }
+
+        Ok((total_probed, node_counts_map.len()))
+    }
+
     /// Get human-readable name for a node.
     pub fn node_name(&self, node_type: &str, node_id: usize) -> String {
         self.node_names
-            .get(node_type)
-            .and_then(|n| n.get(node_id))
-            .cloned()
+            .read()
+            .ok()
+            .and_then(|names| names.get(node_type).and_then(|n| n.get(node_id)).cloned())
             .unwrap_or_else(|| format!("{}_{}", node_type, node_id))
     }
 
