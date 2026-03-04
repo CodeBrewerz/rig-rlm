@@ -11,7 +11,7 @@ use burn::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
+use crate::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
 use crate::data::hetero_graph::HeteroGraph;
 
 /// A raw entity record from JSON input.
@@ -226,7 +226,8 @@ mod tests {
         let config = GraphBuildConfig {
             node_feat_dim: 8,
             add_reverse_edges: true,
-            add_self_loops: false, add_positional_encoding: true,
+            add_self_loops: false,
+            add_positional_encoding: true,
         };
 
         let graph = build_graph_from_export::<TestBackend>(&export, &config, &device);

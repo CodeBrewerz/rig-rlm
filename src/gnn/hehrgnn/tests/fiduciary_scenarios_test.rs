@@ -48,13 +48,7 @@ impl ScenarioBuilder {
     }
 
     /// Add a target entity connected to user via a TQL relation.
-    fn add_entity(
-        &mut self,
-        node_type: &str,
-        name: &str,
-        relation: &str,
-        anomaly_score: f32,
-    ) {
+    fn add_entity(&mut self, node_type: &str, name: &str, relation: &str, anomaly_score: f32) {
         let dim = self.user_emb.len();
         let node_id = self.node_counts.get(node_type).copied().unwrap_or(0);
 
@@ -136,29 +130,53 @@ fn scenario_high_interest_debt() {
     let mut s = ScenarioBuilder::new();
 
     // High-interest credit card obligation (anomalous because high for this user)
-    s.add_entity("obligation", "CreditCard_24APR", "obligation-has-interest-term", 0.65);
+    s.add_entity(
+        "obligation",
+        "CreditCard_24APR",
+        "obligation-has-interest-term",
+        0.65,
+    );
 
     // Car loan (normal — lower rate, not anomalous)
-    s.add_entity("obligation", "CarLoan_6APR", "obligation-has-interest-term", 0.15);
+    s.add_entity(
+        "obligation",
+        "CarLoan_6APR",
+        "obligation-has-interest-term",
+        0.15,
+    );
 
     // Savings goal (underfunded)
-    s.add_entity("goal", "EmergencyFund_Goal", "subledger-holds-goal-funds", 0.1);
+    s.add_entity(
+        "goal",
+        "EmergencyFund_Goal",
+        "subledger-holds-goal-funds",
+        0.1,
+    );
 
     // Bank account (for transfer)
-    s.add_entity("instrument", "Checking_Account", "user-has-instrument", 0.05);
+    s.add_entity(
+        "instrument",
+        "Checking_Account",
+        "user-has-instrument",
+        0.05,
+    );
 
     let ctx = s.build();
     let resp = recommend(&ctx, None);
     print_recommendations("SCENARIO 1: High-Interest Debt", &resp);
 
     // The credit card should trigger refinance + investigate + avoid (high anomaly)
-    let top_5_types: Vec<&str> = resp.recommendations.iter()
+    let top_5_types: Vec<&str> = resp
+        .recommendations
+        .iter()
         .take(5)
         .map(|r| r.action_type.as_str())
         .collect();
 
     // Debt-related actions should rank ABOVE fund_goal
-    let first_debt_rank = resp.recommendations.iter()
+    let first_debt_rank = resp
+        .recommendations
+        .iter()
         .position(|r| {
             r.domain == "debt_obligations"
                 || (r.action_type == "should_pay" && r.target_node_type == "obligation")
@@ -166,7 +184,9 @@ fn scenario_high_interest_debt() {
         })
         .unwrap_or(999);
 
-    let first_goal_rank = resp.recommendations.iter()
+    let first_goal_rank = resp
+        .recommendations
+        .iter()
         .position(|r| r.action_type == "should_fund_goal")
         .unwrap_or(999);
 
@@ -182,9 +202,14 @@ fn scenario_high_interest_debt() {
     );
 
     // High-interest obligation should trigger refinance
-    let has_refinance = resp.recommendations.iter()
+    let has_refinance = resp
+        .recommendations
+        .iter()
         .any(|r| r.action_type == "should_refinance" && r.target_name == "CreditCard_24APR");
-    assert!(has_refinance, "Should recommend refinancing the high-interest credit card");
+    assert!(
+        has_refinance,
+        "Should recommend refinancing the high-interest credit card"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -201,16 +226,36 @@ fn scenario_tax_deadline() {
     let mut s = ScenarioBuilder::new();
 
     // Tax due event (approaching — urgent)
-    s.add_entity("tax-due-event", "Q4_2025_TaxDue", "tax-liability-has-due-event", 0.2);
+    s.add_entity(
+        "tax-due-event",
+        "Q4_2025_TaxDue",
+        "tax-liability-has-due-event",
+        0.2,
+    );
 
     // Tax sinking fund (underfunded)
-    s.add_entity("tax-sinking-fund", "FederalTaxReserve", "tax-sinking-fund-backed-by-account", 0.1);
+    s.add_entity(
+        "tax-sinking-fund",
+        "FederalTaxReserve",
+        "tax-sinking-fund-backed-by-account",
+        0.1,
+    );
 
     // Tax exemption not yet applied
-    s.add_entity("tax-exemption-certificate", "HomeOffice_Exemption", "tax-party-has-exemption-certificate", 0.05);
+    s.add_entity(
+        "tax-exemption-certificate",
+        "HomeOffice_Exemption",
+        "tax-party-has-exemption-certificate",
+        0.05,
+    );
 
     // Tax scenario available
-    s.add_entity("tax-scenario", "WhatIf_MaxContrib", "tax-scenario-for-period", 0.05);
+    s.add_entity(
+        "tax-scenario",
+        "WhatIf_MaxContrib",
+        "tax-scenario-for-period",
+        0.05,
+    );
 
     // Regular checking account
     s.add_entity("instrument", "Checking", "user-has-instrument", 0.05);
@@ -227,10 +272,14 @@ fn scenario_tax_deadline() {
     );
 
     // fund_tax_sinking should appear before run_tax_scenario
-    let sinking_rank = resp.recommendations.iter()
+    let sinking_rank = resp
+        .recommendations
+        .iter()
         .position(|r| r.action_type == "should_fund_tax_sinking")
         .unwrap_or(999);
-    let scenario_rank = resp.recommendations.iter()
+    let scenario_rank = resp
+        .recommendations
+        .iter()
         .position(|r| r.action_type == "should_run_tax_scenario")
         .unwrap_or(999);
 
@@ -246,10 +295,15 @@ fn scenario_tax_deadline() {
     );
 
     // Tax domain should be the dominant domain
-    let tax_count = resp.recommendations.iter()
+    let tax_count = resp
+        .recommendations
+        .iter()
         .filter(|r| r.domain == "tax_optimization")
         .count();
-    assert!(tax_count >= 3, "Tax domain should have at least 3 recommendations");
+    assert!(
+        tax_count >= 3,
+        "Tax domain should have at least 3 recommendations"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -282,7 +336,9 @@ fn scenario_anomalous_merchant() {
     print_recommendations("SCENARIO 3: Anomalous Merchant", &resp);
 
     // Top actions should be investigate + avoid for the sketchy merchant
-    let top_3_targets: Vec<(&str, &str)> = resp.recommendations.iter()
+    let top_3_targets: Vec<(&str, &str)> = resp
+        .recommendations
+        .iter()
         .take(3)
         .map(|r| (r.action_type.as_str(), r.target_name.as_str()))
         .collect();
@@ -290,7 +346,9 @@ fn scenario_anomalous_merchant() {
     println!("  Top 3: {:?}", top_3_targets);
 
     // The sketchy merchant should appear in top actions
-    let sketchy_in_top_3 = resp.recommendations.iter()
+    let sketchy_in_top_3 = resp
+        .recommendations
+        .iter()
         .take(3)
         .any(|r| r.target_name == "SketchyOnline_Store");
     assert!(
@@ -299,10 +357,16 @@ fn scenario_anomalous_merchant() {
     );
 
     // Investigate should rank above fund_goal for anomalous merchant
-    let investigate_sketchy = resp.recommendations.iter()
-        .position(|r| r.action_type == "should_investigate" && r.target_name == "SketchyOnline_Store")
+    let investigate_sketchy = resp
+        .recommendations
+        .iter()
+        .position(|r| {
+            r.action_type == "should_investigate" && r.target_name == "SketchyOnline_Store"
+        })
         .unwrap_or(999);
-    let fund_goal = resp.recommendations.iter()
+    let fund_goal = resp
+        .recommendations
+        .iter()
         .position(|r| r.action_type == "should_fund_goal")
         .unwrap_or(999);
 
@@ -315,7 +379,9 @@ fn scenario_anomalous_merchant() {
     );
 
     // Normal merchant (Whole_Foods) should NOT be flagged for avoidance
-    let avoid_whole_foods = resp.recommendations.iter()
+    let avoid_whole_foods = resp
+        .recommendations
+        .iter()
         .any(|r| r.action_type == "should_avoid" && r.target_name == "Whole_Foods");
     assert!(
         !avoid_whole_foods,
@@ -337,32 +403,62 @@ fn scenario_unused_subscription_redirect_to_goal() {
     let mut s = ScenarioBuilder::new();
 
     // Active Netflix subscription (user engages → low anomaly)
-    s.add_entity("recurring-pattern", "Netflix_Monthly", "pattern-owned-by", 0.05);
+    s.add_entity(
+        "recurring-pattern",
+        "Netflix_Monthly",
+        "pattern-owned-by",
+        0.05,
+    );
 
     // Unused gym membership (no engagement → flagged)
-    s.add_entity("recurring-pattern", "GymMembership_Unused", "pattern-owned-by", 0.35);
+    s.add_entity(
+        "recurring-pattern",
+        "GymMembership_Unused",
+        "pattern-owned-by",
+        0.35,
+    );
 
     // Unused magazine subscription
-    s.add_entity("recurring-pattern", "Magazine_Sub_Unused", "pattern-owned-by", 0.30);
+    s.add_entity(
+        "recurring-pattern",
+        "Magazine_Sub_Unused",
+        "pattern-owned-by",
+        0.30,
+    );
 
     // Emergency fund goal (critical, underfunded)
-    s.add_entity("goal", "EmergencyFund_5000", "subledger-holds-goal-funds", 0.1);
+    s.add_entity(
+        "goal",
+        "EmergencyFund_5000",
+        "subledger-holds-goal-funds",
+        0.1,
+    );
 
     let ctx = s.build();
     let resp = recommend(&ctx, None);
     print_recommendations("SCENARIO 4: Cancel Unused → Fund Goal", &resp);
 
     // Cancel actions should appear
-    let cancel_count = resp.recommendations.iter()
+    let cancel_count = resp
+        .recommendations
+        .iter()
         .filter(|r| r.action_type == "should_cancel")
         .count();
-    assert!(cancel_count >= 2, "Should recommend cancelling unused subscriptions, got {}", cancel_count);
+    assert!(
+        cancel_count >= 2,
+        "Should recommend cancelling unused subscriptions, got {}",
+        cancel_count
+    );
 
     // Cancel unused should rank above fund_goal (free up money first)
-    let first_cancel = resp.recommendations.iter()
+    let first_cancel = resp
+        .recommendations
+        .iter()
         .position(|r| r.action_type == "should_cancel")
         .unwrap_or(999);
-    let first_goal = resp.recommendations.iter()
+    let first_goal = resp
+        .recommendations
+        .iter()
         .position(|r| r.action_type == "should_fund_goal")
         .unwrap_or(999);
 
@@ -388,13 +484,28 @@ fn scenario_reconcile_and_revalue() {
     let mut s = ScenarioBuilder::new();
 
     // Unreconciled checking account
-    s.add_entity("reconciliation-case", "Checking_Recon_Dec", "reconciliation-for-instrument", 0.3);
+    s.add_entity(
+        "reconciliation-case",
+        "Checking_Recon_Dec",
+        "reconciliation-for-instrument",
+        0.3,
+    );
 
     // Unreconciled savings
-    s.add_entity("reconciliation-case", "Savings_Recon_Dec", "reconciliation-for-instrument", 0.2);
+    s.add_entity(
+        "reconciliation-case",
+        "Savings_Recon_Dec",
+        "reconciliation-for-instrument",
+        0.2,
+    );
 
     // Stale asset valuation
-    s.add_entity("asset-valuation", "House_Valuation_2023", "asset-has-valuation", 0.1);
+    s.add_entity(
+        "asset-valuation",
+        "House_Valuation_2023",
+        "asset-has-valuation",
+        0.1,
+    );
 
     // Normal checking
     s.add_entity("instrument", "Checking_Acct", "user-has-instrument", 0.05);
@@ -404,10 +515,14 @@ fn scenario_reconcile_and_revalue() {
     print_recommendations("SCENARIO 5: Reconcile + Revalue", &resp);
 
     // Reconcile should rank above revalue (accuracy before informational)
-    let first_reconcile = resp.recommendations.iter()
+    let first_reconcile = resp
+        .recommendations
+        .iter()
         .position(|r| r.action_type == "should_reconcile")
         .unwrap_or(999);
-    let first_revalue = resp.recommendations.iter()
+    let first_revalue = resp
+        .recommendations
+        .iter()
         .position(|r| r.action_type == "should_revalue_asset")
         .unwrap_or(999);
 
@@ -446,30 +561,49 @@ fn scenario_lien_and_dispute() {
     s.add_entity("obligation", "Mortgage_Normal", "has-obligation", 0.08);
 
     // Budget for tracking
-    s.add_entity("budget-estimation", "Monthly_Budget", "records-budget-estimation", 0.1);
+    s.add_entity(
+        "budget-estimation",
+        "Monthly_Budget",
+        "records-budget-estimation",
+        0.1,
+    );
 
     let ctx = s.build();
     let resp = recommend(&ctx, None);
     print_recommendations("SCENARIO 6: Lien + Dispute", &resp);
 
     // Dispute should appear for the suspicious fee
-    let has_dispute = resp.recommendations.iter()
+    let has_dispute = resp
+        .recommendations
+        .iter()
         .any(|r| r.action_type == "should_dispute" && r.target_name == "SuspiciousFee_Charge");
-    assert!(has_dispute, "Should recommend disputing the suspicious fee charge");
+    assert!(
+        has_dispute,
+        "Should recommend disputing the suspicious fee charge"
+    );
 
     // Pay down lien should appear
-    let has_paydown = resp.recommendations.iter()
+    let has_paydown = resp
+        .recommendations
+        .iter()
         .any(|r| r.action_type == "should_pay_down_lien");
-    assert!(has_paydown, "Should recommend paying down the lien on the house");
+    assert!(
+        has_paydown,
+        "Should recommend paying down the lien on the house"
+    );
 
     // Investigate suspicious should rank above adjust_budget
-    let investigate_rank = resp.recommendations.iter()
+    let investigate_rank = resp
+        .recommendations
+        .iter()
         .position(|r| {
             (r.action_type == "should_investigate" || r.action_type == "should_dispute")
                 && r.target_name == "SuspiciousFee_Charge"
         })
         .unwrap_or(999);
-    let budget_rank = resp.recommendations.iter()
+    let budget_rank = resp
+        .recommendations
+        .iter()
         .position(|r| r.action_type == "should_adjust_budget")
         .unwrap_or(999);
 
@@ -504,19 +638,39 @@ fn scenario_complete_financial_health() {
     s.add_entity("merchant", "Fraud_Merchant", "transacts-at", 0.90);
 
     // 2. High-interest debt (financial urgency)
-    s.add_entity("obligation", "HighRate_CreditCard", "obligation-has-interest-term", 0.55);
+    s.add_entity(
+        "obligation",
+        "HighRate_CreditCard",
+        "obligation-has-interest-term",
+        0.55,
+    );
 
     // 3. Tax deadline approaching
-    s.add_entity("tax-due-event", "April15_TaxDue", "tax-liability-has-due-event", 0.2);
+    s.add_entity(
+        "tax-due-event",
+        "April15_TaxDue",
+        "tax-liability-has-due-event",
+        0.2,
+    );
 
     // 4. Unused subscription
-    s.add_entity("recurring-pattern", "Unused_Streaming", "pattern-owned-by", 0.3);
+    s.add_entity(
+        "recurring-pattern",
+        "Unused_Streaming",
+        "pattern-owned-by",
+        0.3,
+    );
 
     // 5. Underfunded goal
     s.add_entity("goal", "Retirement_401k", "subledger-holds-goal-funds", 0.1);
 
     // 6. Stale reconciliation
-    s.add_entity("reconciliation-case", "Jan_Recon", "reconciliation-for-instrument", 0.15);
+    s.add_entity(
+        "reconciliation-case",
+        "Jan_Recon",
+        "reconciliation-for-instrument",
+        0.15,
+    );
 
     // 7. Normal checking
     s.add_entity("instrument", "Main_Checking", "user-has-instrument", 0.03);
@@ -527,22 +681,25 @@ fn scenario_complete_financial_health() {
 
     // Extract ranks for key action types
     let find_rank = |action: &str| -> usize {
-        resp.recommendations.iter()
+        resp.recommendations
+            .iter()
             .position(|r| r.action_type == action)
             .unwrap_or(999)
     };
 
-    let fraud_rank = resp.recommendations.iter()
+    let fraud_rank = resp
+        .recommendations
+        .iter()
         .position(|r| {
             (r.action_type == "should_investigate" || r.action_type == "should_avoid")
                 && r.target_name == "Fraud_Merchant"
         })
         .unwrap_or(999);
     let tax_rank = find_rank("should_prepare_tax");
-    let debt_rank = resp.recommendations.iter()
-        .position(|r| {
-            r.domain == "debt_obligations" && r.target_name == "HighRate_CreditCard"
-        })
+    let debt_rank = resp
+        .recommendations
+        .iter()
+        .position(|r| r.domain == "debt_obligations" && r.target_name == "HighRate_CreditCard")
         .unwrap_or(999);
     let cancel_rank = find_rank("should_cancel");
     let goal_rank = find_rank("should_fund_goal");

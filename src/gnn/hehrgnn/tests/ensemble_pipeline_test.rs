@@ -5,10 +5,21 @@
 //! The key assertion: Run 2 starts with Run 1's knowledge.
 
 use hehrgnn::data::graph_builder::GraphFact;
-use hehrgnn::eval::learnable_scorer::{LearnableScorer, ScorerConfig};
+use hehrgnn::eval::learnable_scorer::ScorerConfig;
 use hehrgnn::model::ensemble_pipeline::*;
 use hehrgnn::model::trainer::*;
 use hehrgnn::model::weights::*;
+
+fn cleanup_graph_artifacts(graph_hash: u64) {
+    let model_keys = ["graphsage", "rgcn_mhc", "gat", "gps", "hehrgnn"];
+    for model in model_keys {
+        let base = weight_path(model, graph_hash);
+        let bin = format!("{}.bin", base.display());
+        let _ = std::fs::remove_file(bin);
+        let _ = std::fs::remove_file(meta_path(model, graph_hash));
+    }
+    let _ = std::fs::remove_file(weight_dir().join(format!("scorer_{}.json", graph_hash)));
+}
 
 fn gf(ht: &str, h: &str, r: &str, tt: &str, t: &str) -> GraphFact {
     GraphFact {
@@ -64,11 +75,19 @@ fn financial_facts() -> Vec<GraphFact> {
 /// Test the full pipeline: load → forward → train → save → reload → verify
 #[test]
 fn test_ensemble_pipeline_learns_across_runs() {
-    // Clean slate
-    let _ = std::fs::remove_dir_all(weight_dir());
-
     let facts = financial_facts();
-    let graph_hash = hash_graph_facts("pipeline_e2e_test");
+    // Use a unique graph hash per test process run to avoid cross-test contamination
+    // from other integration tests that may run in parallel and share /tmp/gnn_weights.
+    let run_nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let graph_hash = hash_graph_facts(&format!(
+        "pipeline_e2e_test_{}_{}",
+        std::process::id(),
+        run_nonce
+    ));
+    cleanup_graph_artifacts(graph_hash);
 
     println!("\n  ╔═══════════════════════════════════════════════════════════╗");
     println!("  ║  ENSEMBLE PIPELINE: PROVING LEARNING ACROSS RUNS         ║");
@@ -237,4 +256,6 @@ fn test_ensemble_pipeline_learns_across_runs() {
 
     println!("\n  ✅ FULL ENSEMBLE PIPELINE: everything learns across runs!");
     println!("     GNN models, scorer, fiduciary, SAE, probing — all improve!");
+
+    cleanup_graph_artifacts(graph_hash);
 }

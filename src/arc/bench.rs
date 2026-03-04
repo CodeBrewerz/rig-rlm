@@ -8,7 +8,7 @@ use dspy_rs::*;
 use std::time::Instant;
 
 use super::agent::ArcAgentModule;
-use super::data::{load_arc_dataset, tasks_to_examples, ArcTask, Grid};
+use super::data::{ArcTask, Grid, load_arc_dataset, tasks_to_examples};
 use crate::monad::provider::ProviderConfig;
 use crate::sandbox::ExecutorKind;
 
@@ -75,7 +75,14 @@ impl BenchmarkReport {
         println!("\n{}", "=".repeat(60));
         println!("ARC-AGI Benchmark Report");
         println!("{}", "=".repeat(60));
-        println!("Mode:     {}", if self.optimized { "Optimized (GEPA)" } else { "Baseline" });
+        println!(
+            "Mode:     {}",
+            if self.optimized {
+                "Optimized (GEPA)"
+            } else {
+                "Baseline"
+            }
+        );
         println!("Tasks:    {}/{} correct", self.correct, self.total);
         println!("Accuracy: {:.1}%", self.accuracy_pct());
         println!("Time:     {:.1}s", self.elapsed_seconds);
@@ -121,7 +128,8 @@ pub async fn run_baseline(config: &BenchmarkConfig) -> Result<BenchmarkReport> {
     let module = ArcAgentModule::new(
         &crate::arc::prompt::ARC_INITIAL_PROMPT,
         config.provider.clone(),
-    ).with_executor(config.executor_kind.clone());
+    )
+    .with_executor(config.executor_kind.clone());
 
     let start = Instant::now();
     let mut report = BenchmarkReport {
@@ -178,12 +186,16 @@ pub async fn run_optimized(config: &BenchmarkConfig) -> Result<BenchmarkReport> 
 
     let (train_tasks, eval_tasks) = tasks.split_at(config.train_split);
 
-    println!("=== Phase 1: GEPA Optimization on {} training tasks ===", train_tasks.len());
+    println!(
+        "=== Phase 1: GEPA Optimization on {} training tasks ===",
+        train_tasks.len()
+    );
 
     let mut module = ArcAgentModule::new(
         &crate::arc::prompt::ARC_INITIAL_PROMPT,
         config.provider.clone(),
-    ).with_executor(config.executor_kind.clone());
+    )
+    .with_executor(config.executor_kind.clone());
 
     let trainset = tasks_to_examples(train_tasks);
 
@@ -193,7 +205,9 @@ pub async fn run_optimized(config: &BenchmarkConfig) -> Result<BenchmarkReport> 
         .max_lm_calls(500)
         .build();
 
-    let opt_report = optimizer.compile_with_feedback(&mut module, trainset).await?;
+    let opt_report = optimizer
+        .compile_with_feedback(&mut module, trainset)
+        .await?;
 
     println!(
         "Optimization complete: best score = {:.1}%",
@@ -205,7 +219,10 @@ pub async fn run_optimized(config: &BenchmarkConfig) -> Result<BenchmarkReport> 
     );
 
     // Phase 2: Evaluate on held-out set
-    println!("\n=== Phase 2: Evaluation on {} held-out tasks ===", eval_tasks.len());
+    println!(
+        "\n=== Phase 2: Evaluation on {} held-out tasks ===",
+        eval_tasks.len()
+    );
 
     let limited = if config.max_tasks > 0 && config.max_tasks < eval_tasks.len() {
         &eval_tasks[..config.max_tasks]
@@ -269,15 +286,10 @@ async fn evaluate_single_task(
         "task_id".to_string(),
         serde_json::Value::String(task_id.to_string()),
     );
-    data.insert(
-        "examples".to_string(),
-        serde_json::to_value(&task.train)?,
-    );
+    data.insert("examples".to_string(), serde_json::to_value(&task.train)?);
     data.insert(
         "challenges".to_string(),
-        serde_json::to_value(
-            &task.test.iter().map(|p| &p.input).collect::<Vec<_>>(),
-        )?,
+        serde_json::to_value(&task.test.iter().map(|p| &p.input).collect::<Vec<_>>())?,
     );
 
     let example = Example::new(
@@ -294,16 +306,15 @@ async fn evaluate_single_task(
     let prediction = module.forward(example.clone()).await?;
 
     // Check accuracy
-    let predicted_outputs = prediction.get("outputs", None)
+    let predicted_outputs = prediction
+        .get("outputs", None)
         .as_str()
         .unwrap_or("")
         .to_string();
     let predicted_grids: std::result::Result<Vec<Grid>, _> =
         serde_json::from_str(&predicted_outputs);
 
-    let expected_grids: Vec<Grid> = task.test.iter()
-        .map(|p| p.output.clone())
-        .collect();
+    let expected_grids: Vec<Grid> = task.test.iter().map(|p| p.output.clone()).collect();
 
     let (correct, score, feedback) = match predicted_grids {
         Ok(pred) => {

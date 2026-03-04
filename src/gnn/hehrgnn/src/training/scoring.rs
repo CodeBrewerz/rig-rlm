@@ -17,7 +17,7 @@ pub trait Scorer<B: Backend> {
     /// # Returns
     /// Scores: `[batch_size]` — higher means more plausible.
     fn score(&self, head: Tensor<B, 2>, relation: Tensor<B, 2>, tail: Tensor<B, 2>)
-        -> Tensor<B, 1>;
+    -> Tensor<B, 1>;
 }
 
 /// TransE-style scoring: `score = -||h + r - t||_p`.

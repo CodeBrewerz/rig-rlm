@@ -25,18 +25,48 @@ fn build_all_scenarios() -> Vec<BenchmarkScenario> {
             "Over-Leveraged Debtor",
             "User with $45K high-interest debt should prioritize debt paydown over discretionary goals",
         );
-        s.add_entity("obligation", "CreditCard_24APR_45K", "obligation-has-interest-term", 0.55);
-        s.add_entity("obligation", "CarLoan_5APR", "obligation-has-interest-term", 0.1);
+        s.add_entity(
+            "obligation",
+            "CreditCard_24APR_45K",
+            "obligation-has-interest-term",
+            0.55,
+        );
+        s.add_entity(
+            "obligation",
+            "CarLoan_5APR",
+            "obligation-has-interest-term",
+            0.1,
+        );
         s.add_entity("goal", "Vacation_Fund", "subledger-holds-goal-funds", 0.05);
         s.add_entity("instrument", "Checking", "user-has-instrument", 0.05);
 
-        scenarios.push(s
-            .require("should_refinance", "CreditCard_24APR", "High-interest debt must be refinanced")
-            .require("should_avoid", "CreditCard_24APR", "Anomalous high-rate debt flagged for avoidance")
-            .forbid("should_fund_goal", "Vacation", "MUST NOT fund vacation while drowning in debt")
-            .priority("should_refinance", "should_fund_goal", "Debt paydown before discretionary goals")
-            .priority("should_refinance", "should_consolidate", "Refinancing saves more than consolidation")
-            .build()
+        scenarios.push(
+            s.require(
+                "should_refinance",
+                "CreditCard_24APR",
+                "High-interest debt must be refinanced",
+            )
+            .require(
+                "should_avoid",
+                "CreditCard_24APR",
+                "Anomalous high-rate debt flagged for avoidance",
+            )
+            .forbid(
+                "should_fund_goal",
+                "Vacation",
+                "MUST NOT fund vacation while drowning in debt",
+            )
+            .priority(
+                "should_refinance",
+                "should_fund_goal",
+                "Debt paydown before discretionary goals",
+            )
+            .priority(
+                "should_refinance",
+                "should_consolidate",
+                "Refinancing saves more than consolidation",
+            )
+            .build(),
         );
     }
 
@@ -53,19 +83,58 @@ fn build_all_scenarios() -> Vec<BenchmarkScenario> {
             "Tax Deadline Crunch",
             "Tax due in 3 days — preparation mandatory, scenarios are too late",
         );
-        s.add_entity("tax-due-event", "Q4_TaxDue_3Days", "tax-liability-has-due-event", 0.3);
-        s.add_entity("tax-sinking-fund", "Federal_TaxReserve", "tax-sinking-fund-backed-by-account", 0.15);
-        s.add_entity("tax-exemption-certificate", "HomeOffice_Exempt", "tax-party-has-exemption-certificate", 0.05);
+        s.add_entity(
+            "tax-due-event",
+            "Q4_TaxDue_3Days",
+            "tax-liability-has-due-event",
+            0.3,
+        );
+        s.add_entity(
+            "tax-sinking-fund",
+            "Federal_TaxReserve",
+            "tax-sinking-fund-backed-by-account",
+            0.15,
+        );
+        s.add_entity(
+            "tax-exemption-certificate",
+            "HomeOffice_Exempt",
+            "tax-party-has-exemption-certificate",
+            0.05,
+        );
         s.add_entity("instrument", "Savings", "user-has-instrument", 0.05);
 
-        scenarios.push(s
-            .require("should_prepare_tax", "Q4_TaxDue", "Tax deadline is imminent")
-            .require("should_fund_tax_sinking", "Federal_TaxReserve", "Sinking fund needs funding for payment")
-            .require("should_claim_exemption", "HomeOffice", "Exemption reduces liability")
-            .priority("should_prepare_tax", "should_fund_tax_sinking", "Prepare before funding")
-            .priority("should_prepare_tax", "should_claim_exemption", "Preparation is most urgent")
-            .priority("should_fund_tax_sinking", "should_transfer", "Tax sinking more important than transfers")
-            .build()
+        scenarios.push(
+            s.require(
+                "should_prepare_tax",
+                "Q4_TaxDue",
+                "Tax deadline is imminent",
+            )
+            .require(
+                "should_fund_tax_sinking",
+                "Federal_TaxReserve",
+                "Sinking fund needs funding for payment",
+            )
+            .require(
+                "should_claim_exemption",
+                "HomeOffice",
+                "Exemption reduces liability",
+            )
+            .priority(
+                "should_prepare_tax",
+                "should_fund_tax_sinking",
+                "Prepare before funding",
+            )
+            .priority(
+                "should_prepare_tax",
+                "should_claim_exemption",
+                "Preparation is most urgent",
+            )
+            .priority(
+                "should_fund_tax_sinking",
+                "should_transfer",
+                "Tax sinking more important than transfers",
+            )
+            .build(),
         );
     }
 
@@ -84,17 +153,46 @@ fn build_all_scenarios() -> Vec<BenchmarkScenario> {
         );
         s.add_entity("merchant", "SketchyOnline_0x9F", "transacts-at", 0.90);
         s.add_entity("merchant", "Whole_Foods_Normal", "transacts-at", 0.05);
-        s.add_entity("goal", "Retirement_401k", "subledger-holds-goal-funds", 0.05);
+        s.add_entity(
+            "goal",
+            "Retirement_401k",
+            "subledger-holds-goal-funds",
+            0.05,
+        );
         s.add_entity("instrument", "Checking", "user-has-instrument", 0.05);
 
-        scenarios.push(s
-            .require("should_investigate", "SketchyOnline", "Fraud must be investigated immediately")
-            .require("should_avoid", "SketchyOnline", "Must avoid suspicious merchant")
-            .forbid("should_avoid", "Whole_Foods", "MUST NOT flag normal grocery for avoidance")
-            .forbid("should_investigate", "Whole_Foods", "MUST NOT investigate normal merchant")
-            .priority("should_investigate", "should_fund_goal", "Safety before wealth building")
-            .priority("should_avoid", "should_fund_goal", "Risk reduction before goals")
-            .build()
+        scenarios.push(
+            s.require(
+                "should_investigate",
+                "SketchyOnline",
+                "Fraud must be investigated immediately",
+            )
+            .require(
+                "should_avoid",
+                "SketchyOnline",
+                "Must avoid suspicious merchant",
+            )
+            .forbid(
+                "should_avoid",
+                "Whole_Foods",
+                "MUST NOT flag normal grocery for avoidance",
+            )
+            .forbid(
+                "should_investigate",
+                "Whole_Foods",
+                "MUST NOT investigate normal merchant",
+            )
+            .priority(
+                "should_investigate",
+                "should_fund_goal",
+                "Safety before wealth building",
+            )
+            .priority(
+                "should_avoid",
+                "should_fund_goal",
+                "Risk reduction before goals",
+            )
+            .build(),
         );
     }
 
@@ -112,16 +210,47 @@ fn build_all_scenarios() -> Vec<BenchmarkScenario> {
             "No emergency fund — cancel wasteful subscriptions to fund it",
         );
         s.add_entity("recurring-pattern", "Gym_Unused", "pattern-owned-by", 0.35);
-        s.add_entity("recurring-pattern", "Magazine_Unused", "pattern-owned-by", 0.32);
-        s.add_entity("recurring-pattern", "Netflix_Active", "pattern-owned-by", 0.05);
-        s.add_entity("goal", "Emergency_Fund_0", "subledger-holds-goal-funds", 0.1);
+        s.add_entity(
+            "recurring-pattern",
+            "Magazine_Unused",
+            "pattern-owned-by",
+            0.32,
+        );
+        s.add_entity(
+            "recurring-pattern",
+            "Netflix_Active",
+            "pattern-owned-by",
+            0.05,
+        );
+        s.add_entity(
+            "goal",
+            "Emergency_Fund_0",
+            "subledger-holds-goal-funds",
+            0.1,
+        );
 
-        scenarios.push(s
-            .require("should_cancel", "Gym_Unused", "Unused gym should be cancelled")
-            .require("should_cancel", "Magazine_Unused", "Unused magazine should be cancelled")
-            .require("should_fund_goal", "Emergency_Fund", "Emergency fund critically underfunded")
-            .priority("should_cancel", "should_fund_goal", "Free up money before funding")
-            .build()
+        scenarios.push(
+            s.require(
+                "should_cancel",
+                "Gym_Unused",
+                "Unused gym should be cancelled",
+            )
+            .require(
+                "should_cancel",
+                "Magazine_Unused",
+                "Unused magazine should be cancelled",
+            )
+            .require(
+                "should_fund_goal",
+                "Emergency_Fund",
+                "Emergency fund critically underfunded",
+            )
+            .priority(
+                "should_cancel",
+                "should_fund_goal",
+                "Free up money before funding",
+            )
+            .build(),
         );
     }
 
@@ -139,15 +268,40 @@ fn build_all_scenarios() -> Vec<BenchmarkScenario> {
         );
         s.add_entity("obligation", "SuspiciousFee_2300", "has-obligation", 0.75);
         s.add_entity("obligation", "Mortgage_Normal", "has-obligation", 0.05);
-        s.add_entity("budget-estimation", "Monthly_Budget", "records-budget-estimation", 0.05);
+        s.add_entity(
+            "budget-estimation",
+            "Monthly_Budget",
+            "records-budget-estimation",
+            0.05,
+        );
 
-        scenarios.push(s
-            .require("should_dispute", "SuspiciousFee", "Anomalous charge must be disputed")
-            .require("should_investigate", "SuspiciousFee", "Must investigate anomalous charge")
-            .forbid("should_pay", "SuspiciousFee", "MUST NOT pay a disputed charge!")
-            .priority("should_dispute", "should_adjust_budget", "Dispute before administrative tasks")
-            .priority("should_investigate", "should_adjust_budget", "Investigation before budget admin")
-            .build()
+        scenarios.push(
+            s.require(
+                "should_dispute",
+                "SuspiciousFee",
+                "Anomalous charge must be disputed",
+            )
+            .require(
+                "should_investigate",
+                "SuspiciousFee",
+                "Must investigate anomalous charge",
+            )
+            .forbid(
+                "should_pay",
+                "SuspiciousFee",
+                "MUST NOT pay a disputed charge!",
+            )
+            .priority(
+                "should_dispute",
+                "should_adjust_budget",
+                "Dispute before administrative tasks",
+            )
+            .priority(
+                "should_investigate",
+                "should_adjust_budget",
+                "Investigation before budget admin",
+            )
+            .build(),
         );
     }
 
@@ -164,13 +318,30 @@ fn build_all_scenarios() -> Vec<BenchmarkScenario> {
         );
         s.add_entity("asset", "House_Primary", "lien-on-asset", 0.1);
         s.add_entity("instrument", "Savings", "user-has-instrument", 0.05);
-        s.add_entity("asset-valuation", "House_Val_2023", "asset-has-valuation", 0.1);
+        s.add_entity(
+            "asset-valuation",
+            "House_Val_2023",
+            "asset-has-valuation",
+            0.1,
+        );
 
-        scenarios.push(s
-            .require("should_pay_down_lien", "House", "Lien should be paid down to increase equity")
-            .require("should_revalue_asset", "House_Val", "2-year-old valuation should be updated")
-            .priority("should_pay_down_lien", "should_revalue_asset", "Action before information gathering")
-            .build()
+        scenarios.push(
+            s.require(
+                "should_pay_down_lien",
+                "House",
+                "Lien should be paid down to increase equity",
+            )
+            .require(
+                "should_revalue_asset",
+                "House_Val",
+                "2-year-old valuation should be updated",
+            )
+            .priority(
+                "should_pay_down_lien",
+                "should_revalue_asset",
+                "Action before information gathering",
+            )
+            .build(),
         );
     }
 
@@ -185,15 +356,42 @@ fn build_all_scenarios() -> Vec<BenchmarkScenario> {
             "Unreconciled Accounts",
             "Accounts need reconciliation before other housekeeping",
         );
-        s.add_entity("reconciliation-case", "Checking_Recon_Jan", "reconciliation-for-instrument", 0.3);
-        s.add_entity("reconciliation-case", "Savings_Recon_Jan", "reconciliation-for-instrument", 0.2);
-        s.add_entity("asset-valuation", "Car_Val_Stale", "asset-has-valuation", 0.1);
+        s.add_entity(
+            "reconciliation-case",
+            "Checking_Recon_Jan",
+            "reconciliation-for-instrument",
+            0.3,
+        );
+        s.add_entity(
+            "reconciliation-case",
+            "Savings_Recon_Jan",
+            "reconciliation-for-instrument",
+            0.2,
+        );
+        s.add_entity(
+            "asset-valuation",
+            "Car_Val_Stale",
+            "asset-has-valuation",
+            0.1,
+        );
 
-        scenarios.push(s
-            .require("should_reconcile", "Checking_Recon", "Checking account needs reconciliation")
-            .require("should_reconcile", "Savings_Recon", "Savings account needs reconciliation")
-            .priority("should_reconcile", "should_revalue_asset", "Accuracy before informational updates")
-            .build()
+        scenarios.push(
+            s.require(
+                "should_reconcile",
+                "Checking_Recon",
+                "Checking account needs reconciliation",
+            )
+            .require(
+                "should_reconcile",
+                "Savings_Recon",
+                "Savings account needs reconciliation",
+            )
+            .priority(
+                "should_reconcile",
+                "should_revalue_asset",
+                "Accuracy before informational updates",
+            )
+            .build(),
         );
     }
 
@@ -209,15 +407,33 @@ fn build_all_scenarios() -> Vec<BenchmarkScenario> {
             "Healthy Finances — Maintenance Mode",
             "Well-managed finances need only light optimization, no urgent actions",
         );
-        s.add_entity("instrument", "Checking_Healthy", "user-has-instrument", 0.03);
+        s.add_entity(
+            "instrument",
+            "Checking_Healthy",
+            "user-has-instrument",
+            0.03,
+        );
         s.add_entity("instrument", "Savings_Healthy", "user-has-instrument", 0.02);
-        s.add_entity("goal", "Vacation_Funded", "subledger-holds-goal-funds", 0.02);
+        s.add_entity(
+            "goal",
+            "Vacation_Funded",
+            "subledger-holds-goal-funds",
+            0.02,
+        );
 
-        scenarios.push(s
-            .forbid("should_investigate", "", "No anomalies — nothing to investigate")
+        scenarios.push(
+            s.forbid(
+                "should_investigate",
+                "",
+                "No anomalies — nothing to investigate",
+            )
             .forbid("should_avoid", "", "No risky entities — nothing to avoid")
-            .forbid("should_dispute", "", "No disputes needed — everything is normal")
-            .build()
+            .forbid(
+                "should_dispute",
+                "",
+                "No disputes needed — everything is normal",
+            )
+            .build(),
         );
     }
 
@@ -234,15 +450,37 @@ fn build_all_scenarios() -> Vec<BenchmarkScenario> {
             "Tax Scenario Planning",
             "Non-urgent tax optimization — exemption before speculative analysis",
         );
-        s.add_entity("tax-exemption-certificate", "Charity_Deduction", "tax-party-has-exemption-certificate", 0.05);
-        s.add_entity("tax-scenario", "MaxContrib_WhatIf", "tax-scenario-for-period", 0.05);
+        s.add_entity(
+            "tax-exemption-certificate",
+            "Charity_Deduction",
+            "tax-party-has-exemption-certificate",
+            0.05,
+        );
+        s.add_entity(
+            "tax-scenario",
+            "MaxContrib_WhatIf",
+            "tax-scenario-for-period",
+            0.05,
+        );
         s.add_entity("instrument", "Checking", "user-has-instrument", 0.05);
 
-        scenarios.push(s
-            .require("should_claim_exemption", "Charity", "Exemption provides concrete savings")
-            .require("should_run_tax_scenario", "MaxContrib", "Scenario helps plan future savings")
-            .priority("should_claim_exemption", "should_run_tax_scenario", "Concrete savings before speculative")
-            .build()
+        scenarios.push(
+            s.require(
+                "should_claim_exemption",
+                "Charity",
+                "Exemption provides concrete savings",
+            )
+            .require(
+                "should_run_tax_scenario",
+                "MaxContrib",
+                "Scenario helps plan future savings",
+            )
+            .priority(
+                "should_claim_exemption",
+                "should_run_tax_scenario",
+                "Concrete savings before speculative",
+            )
+            .build(),
         );
     }
 
@@ -254,7 +492,7 @@ fn build_all_scenarios() -> Vec<BenchmarkScenario> {
     // - High-rate obligation (anomaly 0.6) → refinance
     // - Tax deadline → prepare tax
     // - Unused subscription → cancel
-    // - Underfunded goal → fund  
+    // - Underfunded goal → fund
     // - Stale reconciliation → reconcile
     //
     // Priority: Safety → Deadlines → Debt → Save Money → Build Wealth → Housekeeping
@@ -267,34 +505,109 @@ fn build_all_scenarios() -> Vec<BenchmarkScenario> {
         // Safety
         s.add_entity("merchant", "Fraud_Merchant_X", "transacts-at", 0.85);
         // Debt
-        s.add_entity("obligation", "HighRate_CC_22APR", "obligation-has-interest-term", 0.55);
+        s.add_entity(
+            "obligation",
+            "HighRate_CC_22APR",
+            "obligation-has-interest-term",
+            0.55,
+        );
         // Tax deadline
-        s.add_entity("tax-due-event", "April15_TaxDue", "tax-liability-has-due-event", 0.2);
+        s.add_entity(
+            "tax-due-event",
+            "April15_TaxDue",
+            "tax-liability-has-due-event",
+            0.2,
+        );
         // Unused subscription
-        s.add_entity("recurring-pattern", "Unused_Streaming_X", "pattern-owned-by", 0.3);
+        s.add_entity(
+            "recurring-pattern",
+            "Unused_Streaming_X",
+            "pattern-owned-by",
+            0.3,
+        );
         // Goal
-        s.add_entity("goal", "Emergency_Fund_Need", "subledger-holds-goal-funds", 0.1);
+        s.add_entity(
+            "goal",
+            "Emergency_Fund_Need",
+            "subledger-holds-goal-funds",
+            0.1,
+        );
         // Reconciliation
-        s.add_entity("reconciliation-case", "Jan_Recon_Case", "reconciliation-for-instrument", 0.15);
+        s.add_entity(
+            "reconciliation-case",
+            "Jan_Recon_Case",
+            "reconciliation-for-instrument",
+            0.15,
+        );
         // Account
-        s.add_entity("instrument", "Main_Checking_Acct", "user-has-instrument", 0.03);
+        s.add_entity(
+            "instrument",
+            "Main_Checking_Acct",
+            "user-has-instrument",
+            0.03,
+        );
 
-        scenarios.push(s
-            // Required
-            .require("should_investigate", "Fraud_Merchant", "Must investigate fraud")
-            .require("should_avoid", "Fraud_Merchant", "Must avoid fraud merchant")
-            .require("should_prepare_tax", "April15", "Must prepare for tax deadline")
-            .require("should_refinance", "HighRate_CC", "Must refinance high-rate debt")
-            .require("should_cancel", "Unused_Streaming", "Must cancel unused subscription")
-            .require("should_fund_goal", "Emergency_Fund", "Must fund emergency fund")
-            .require("should_reconcile", "Jan_Recon", "Must reconcile accounts")
-            // Priority: Safety → Tax → Debt → Cancel → Goals → Housekeeping
-            .priority("should_investigate", "should_fund_goal", "Safety before wealth building")
-            .priority("should_prepare_tax", "should_fund_goal", "Tax deadlines before goals")
-            .priority("should_avoid", "should_fund_goal", "Risk reduction before goals")
-            .priority("should_cancel", "should_fund_goal", "Free money before investing")
-            .priority("should_investigate", "should_consolidate", "Safety before convenience")
-            .build()
+        scenarios.push(
+            s
+                // Required
+                .require(
+                    "should_investigate",
+                    "Fraud_Merchant",
+                    "Must investigate fraud",
+                )
+                .require(
+                    "should_avoid",
+                    "Fraud_Merchant",
+                    "Must avoid fraud merchant",
+                )
+                .require(
+                    "should_prepare_tax",
+                    "April15",
+                    "Must prepare for tax deadline",
+                )
+                .require(
+                    "should_refinance",
+                    "HighRate_CC",
+                    "Must refinance high-rate debt",
+                )
+                .require(
+                    "should_cancel",
+                    "Unused_Streaming",
+                    "Must cancel unused subscription",
+                )
+                .require(
+                    "should_fund_goal",
+                    "Emergency_Fund",
+                    "Must fund emergency fund",
+                )
+                .require("should_reconcile", "Jan_Recon", "Must reconcile accounts")
+                // Priority: Safety → Tax → Debt → Cancel → Goals → Housekeeping
+                .priority(
+                    "should_investigate",
+                    "should_fund_goal",
+                    "Safety before wealth building",
+                )
+                .priority(
+                    "should_prepare_tax",
+                    "should_fund_goal",
+                    "Tax deadlines before goals",
+                )
+                .priority(
+                    "should_avoid",
+                    "should_fund_goal",
+                    "Risk reduction before goals",
+                )
+                .priority(
+                    "should_cancel",
+                    "should_fund_goal",
+                    "Free money before investing",
+                )
+                .priority(
+                    "should_investigate",
+                    "should_consolidate",
+                    "Safety before convenience",
+                )
+                .build(),
         );
     }
 
@@ -311,8 +624,13 @@ fn fiduciary_alignment_benchmark() {
     println!("  ╚══════════════════════════════════════════════════════════════════╝\n");
 
     for result in &report.scenarios {
-        let status = if result.passed { "✅ PASS" } else { "❌ FAIL" };
-        println!("  {} │ {} │ align={:.0}% │ recall={:.0}% │ misalign={:.0}% │ P@5={:.0}% │ NDCG={:.2} │ prio_viol={}",
+        let status = if result.passed {
+            "✅ PASS"
+        } else {
+            "❌ FAIL"
+        };
+        println!(
+            "  {} │ {} │ align={:.0}% │ recall={:.0}% │ misalign={:.0}% │ P@5={:.0}% │ NDCG={:.2} │ prio_viol={}",
             status,
             result.name,
             result.alignment_score * 100.0,
@@ -332,13 +650,29 @@ fn fiduciary_alignment_benchmark() {
 
     println!("\n  ────────────────────────────────────────────────────────────────");
     println!("  AGGREGATE METRICS:");
-    println!("    Mean Alignment Score:   {:.1}%", report.mean_alignment * 100.0);
-    println!("    Mean Precision@5:       {:.1}%", report.mean_precision_at_5 * 100.0);
-    println!("    Mean Recall:            {:.1}%", report.mean_recall * 100.0);
+    println!(
+        "    Mean Alignment Score:   {:.1}%",
+        report.mean_alignment * 100.0
+    );
+    println!(
+        "    Mean Precision@5:       {:.1}%",
+        report.mean_precision_at_5 * 100.0
+    );
+    println!(
+        "    Mean Recall:            {:.1}%",
+        report.mean_recall * 100.0
+    );
     println!("    Mean NDCG:              {:.3}", report.mean_ndcg);
-    println!("    Overall Misalignment:   {:.1}%", report.overall_misalignment_rate * 100.0);
-    println!("    Priority Violations:    {}", report.total_priority_violations);
-    println!("    Pass Rate:              {:.0}% ({}/{})",
+    println!(
+        "    Overall Misalignment:   {:.1}%",
+        report.overall_misalignment_rate * 100.0
+    );
+    println!(
+        "    Priority Violations:    {}",
+        report.total_priority_violations
+    );
+    println!(
+        "    Pass Rate:              {:.0}% ({}/{})",
         report.pass_rate * 100.0,
         report.scenarios.iter().filter(|s| s.passed).count(),
         report.scenarios.len()

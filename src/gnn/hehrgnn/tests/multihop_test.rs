@@ -25,7 +25,7 @@ mod tests {
 
     type B = NdArray;
 
-    use hehrgnn::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
+    use hehrgnn::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
     use hehrgnn::data::hetero_graph::EdgeType;
     use hehrgnn::model::graphsage::GraphSageModelConfig;
     use hehrgnn::server::state::PlainEmbeddings;
@@ -45,10 +45,10 @@ mod tests {
     struct GroundTruth {
         facts: Vec<GraphFact>,
         tx_to_account: HashMap<usize, usize>,    // 1-hop
-        tx_to_user: HashMap<usize, usize>,        // 2-hop
-        tx_to_category: HashMap<usize, usize>,    // 3-hop (tx→merchant→category)
-        user_to_merchant: HashMap<usize, usize>,  // 3-hop (user→account→tx→merchant)
-        user_to_category: HashMap<usize, usize>,  // 4-hop
+        tx_to_user: HashMap<usize, usize>,       // 2-hop
+        tx_to_category: HashMap<usize, usize>,   // 3-hop (tx→merchant→category)
+        user_to_merchant: HashMap<usize, usize>, // 3-hop (user→account→tx→merchant)
+        user_to_category: HashMap<usize, usize>, // 4-hop
     }
 
     fn build_multihop_graph() -> GroundTruth {
@@ -143,12 +143,22 @@ mod tests {
         let mut mrr_sum = 0.0f64;
         let mut count = 0;
         let total = ground_truth.len();
-        let step = if total <= sample_size { 1 } else { total / sample_size };
+        let step = if total <= sample_size {
+            1
+        } else {
+            total / sample_size
+        };
 
         for (&src_id, &gt_dst_id) in ground_truth.iter() {
-            if count >= sample_size { break; }
-            if src_id % step != 0 { continue; }
-            if src_id >= src_embs.len() || gt_dst_id >= dst_embs.len() { continue; }
+            if count >= sample_size {
+                break;
+            }
+            if src_id % step != 0 {
+                continue;
+            }
+            if src_id >= src_embs.len() || gt_dst_id >= dst_embs.len() {
+                continue;
+            }
 
             let src_emb = &src_embs[src_id];
 
@@ -161,12 +171,24 @@ mod tests {
 
             scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-            let rank = scores.iter().position(|(id, _)| *id == gt_dst_id).unwrap_or(999) + 1;
+            let rank = scores
+                .iter()
+                .position(|(id, _)| *id == gt_dst_id)
+                .unwrap_or(999)
+                + 1;
 
-            if rank == 1 { hit_at_1 += 1; }
-            if rank <= 3 { hit_at_3 += 1; }
-            if rank <= 5 { hit_at_5 += 1; }
-            if rank <= 10 { hit_at_10 += 1; }
+            if rank == 1 {
+                hit_at_1 += 1;
+            }
+            if rank <= 3 {
+                hit_at_3 += 1;
+            }
+            if rank <= 5 {
+                hit_at_5 += 1;
+            }
+            if rank <= 10 {
+                hit_at_10 += 1;
+            }
             mrr_sum += 1.0 / rank as f64;
             count += 1;
         }
@@ -196,12 +218,33 @@ mod tests {
     impl HopResults {
         fn print(&self, label: &str) {
             let random = 1.0 / self.candidates.max(1) as f64;
-            println!("    {} ({} queries, {} candidates, random={:.1}%)",
-                label, self.queries, self.candidates, random * 100.0);
-            println!("      Hit@1:  {:.1}%  ({:.1}× random)", self.hit_at_1 * 100.0, self.hit_at_1 / random.max(1e-8));
-            println!("      Hit@3:  {:.1}%  ({:.1}× random)", self.hit_at_3 * 100.0, self.hit_at_3 / random.max(1e-8));
-            println!("      Hit@5:  {:.1}%  ({:.1}× random)", self.hit_at_5 * 100.0, self.hit_at_5 / random.max(1e-8));
-            println!("      Hit@10: {:.1}%  ({:.1}× random)", self.hit_at_10 * 100.0, self.hit_at_10 / random.max(1e-8));
+            println!(
+                "    {} ({} queries, {} candidates, random={:.1}%)",
+                label,
+                self.queries,
+                self.candidates,
+                random * 100.0
+            );
+            println!(
+                "      Hit@1:  {:.1}%  ({:.1}× random)",
+                self.hit_at_1 * 100.0,
+                self.hit_at_1 / random.max(1e-8)
+            );
+            println!(
+                "      Hit@3:  {:.1}%  ({:.1}× random)",
+                self.hit_at_3 * 100.0,
+                self.hit_at_3 / random.max(1e-8)
+            );
+            println!(
+                "      Hit@5:  {:.1}%  ({:.1}× random)",
+                self.hit_at_5 * 100.0,
+                self.hit_at_5 / random.max(1e-8)
+            );
+            println!(
+                "      Hit@10: {:.1}%  ({:.1}× random)",
+                self.hit_at_10 * 100.0,
+                self.hit_at_10 / random.max(1e-8)
+            );
             println!("      MRR:    {:.4}", self.mrr);
         }
     }
@@ -213,20 +256,30 @@ mod tests {
 
         println!("\n  ════════════════════════════════════════════════");
         println!("   MULTI-HOP REASONING TEST");
-        println!("   {} users, {} tx, {} categories, {} receipts",
-            NUM_USERS, NUM_USERS * TX_PER_USER, NUM_CATEGORIES, NUM_USERS * TX_PER_USER);
+        println!(
+            "   {} users, {} tx, {} categories, {} receipts",
+            NUM_USERS,
+            NUM_USERS * TX_PER_USER,
+            NUM_CATEGORIES,
+            NUM_USERS * TX_PER_USER
+        );
         println!("  ════════════════════════════════════════════════\n");
 
         // Build graph with 2-layer GNN (reaches 2-hop neighbors)
         let config = GraphBuildConfig {
             node_feat_dim: 16,
             add_reverse_edges: true,
-            add_self_loops: true, add_positional_encoding: true,
+            add_self_loops: true,
+            add_positional_encoding: true,
         };
         let graph = build_hetero_graph::<B>(&gt.facts, &config, &device);
 
-        println!("  Graph: {} nodes, {} edges, {} types",
-            graph.total_nodes(), graph.total_edges(), graph.node_types().len());
+        println!(
+            "  Graph: {} nodes, {} edges, {} types",
+            graph.total_nodes(),
+            graph.total_edges(),
+            graph.node_types().len()
+        );
         for nt in graph.node_types() {
             println!("    {}: {} nodes", nt, graph.node_counts[nt]);
         }
@@ -238,7 +291,10 @@ mod tests {
         println!("\n  ── GNN with 2 layers (receptive field = 2 hops) ──\n");
 
         let sage_2layer = GraphSageModelConfig {
-            in_dim: 16, hidden_dim: 64, num_layers: 2, dropout: 0.0,
+            in_dim: 16,
+            hidden_dim: 64,
+            num_layers: 2,
+            dropout: 0.0,
         };
         let model_2 = sage_2layer.init::<B>(&node_types, &edge_types, &device);
         let emb_2 = PlainEmbeddings::from_burn(&model_2.forward(&graph));
@@ -275,7 +331,10 @@ mod tests {
         println!("\n  ── GNN with 3 layers (receptive field = 3 hops) ──\n");
 
         let sage_3layer = GraphSageModelConfig {
-            in_dim: 16, hidden_dim: 64, num_layers: 3, dropout: 0.0,
+            in_dim: 16,
+            hidden_dim: 64,
+            num_layers: 3,
+            dropout: 0.0,
         };
         let model_3 = sage_3layer.init::<B>(&node_types, &edge_types, &device);
         let emb_3 = PlainEmbeddings::from_burn(&model_3.forward(&graph));
@@ -307,16 +366,31 @@ mod tests {
         println!("  ───────────────────────────────────────────────────────────");
         println!("   Hops │ Query                  │ 2-Layer │ 3-Layer │ Harder?");
         println!("  ──────┼────────────────────────┼─────────┼─────────┼────────");
-        println!("    1   │ tx → account            │ {:>5.1}%  │ {:>5.1}%  │",
-            r1.hit_at_10 * 100.0, r1_3.hit_at_10 * 100.0);
-        println!("    2   │ tx → user               │ {:>5.1}%  │ {:>5.1}%  │",
-            r2.hit_at_10 * 100.0, r2_3.hit_at_10 * 100.0);
-        println!("    3   │ tx → category            │ {:>5.1}%  │ {:>5.1}%  │ ← concept",
-            r3a.hit_at_10 * 100.0, r3a_3.hit_at_10 * 100.0);
-        println!("    3   │ user → merchant          │ {:>5.1}%  │ {:>5.1}%  │ ← cross-type",
-            r3b.hit_at_10 * 100.0, r3b_3.hit_at_10 * 100.0);
-        println!("    4   │ user → category          │ {:>5.1}%  │ {:>5.1}%  │ ← hardest",
-            r4.hit_at_10 * 100.0, r4_3.hit_at_10 * 100.0);
+        println!(
+            "    1   │ tx → account            │ {:>5.1}%  │ {:>5.1}%  │",
+            r1.hit_at_10 * 100.0,
+            r1_3.hit_at_10 * 100.0
+        );
+        println!(
+            "    2   │ tx → user               │ {:>5.1}%  │ {:>5.1}%  │",
+            r2.hit_at_10 * 100.0,
+            r2_3.hit_at_10 * 100.0
+        );
+        println!(
+            "    3   │ tx → category            │ {:>5.1}%  │ {:>5.1}%  │ ← concept",
+            r3a.hit_at_10 * 100.0,
+            r3a_3.hit_at_10 * 100.0
+        );
+        println!(
+            "    3   │ user → merchant          │ {:>5.1}%  │ {:>5.1}%  │ ← cross-type",
+            r3b.hit_at_10 * 100.0,
+            r3b_3.hit_at_10 * 100.0
+        );
+        println!(
+            "    4   │ user → category          │ {:>5.1}%  │ {:>5.1}%  │ ← hardest",
+            r4.hit_at_10 * 100.0,
+            r4_3.hit_at_10 * 100.0
+        );
         println!("  ═══════════════════════════════════════════════════════════\n");
 
         // Assertions

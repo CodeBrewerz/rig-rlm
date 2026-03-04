@@ -15,7 +15,7 @@ use burn::backend::NdArray;
 use burn::prelude::*;
 use std::collections::HashMap;
 
-use hehrgnn::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
+use hehrgnn::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
 use hehrgnn::data::hetero_graph::EdgeType;
 use hehrgnn::eval::fiduciary::*;
 use hehrgnn::model::graphsage::GraphSageModelConfig;
@@ -284,7 +284,8 @@ fn test_pc_circuit_predicts_all_fiduciary_actions() {
         &GraphBuildConfig {
             node_feat_dim: 16,
             add_reverse_edges: true,
-            add_self_loops: true, add_positional_encoding: true,
+            add_self_loops: true,
+            add_positional_encoding: true,
         },
         &device,
     );
@@ -588,8 +589,10 @@ fn test_pc_circuit_predicts_all_fiduciary_actions() {
             avg_high, avg_low
         );
     } else {
-        println!("  ║  ⚠️  Check 4: High-anomaly avg risk ({:.4}) < low-anomaly avg risk ({:.4}) — may need more EM epochs",
-            avg_high, avg_low);
+        println!(
+            "  ║  ⚠️  Check 4: High-anomaly avg risk ({:.4}) < low-anomaly avg risk ({:.4}) — may need more EM epochs",
+            avg_high, avg_low
+        );
         checks_passed += 1; // soft pass — depends on training data
     }
 

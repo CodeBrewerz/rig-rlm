@@ -280,7 +280,7 @@ impl ProbeResults {
             }
 
             // Sort by R² descending
-            all_alignments.sort_by(|a, b| b.r_squared.partial_cmp(&a.r_squared).unwrap());
+            all_alignments.sort_by(|a, b| b.r_squared.total_cmp(&a.r_squared));
 
             // Build concept_detectors map
             let mut concept_detectors: HashMap<String, Vec<NeuronConceptAlignment>> =
@@ -294,7 +294,7 @@ impl ProbeResults {
 
             // Limit each concept to top-3 detectors
             for detectors in concept_detectors.values_mut() {
-                detectors.sort_by(|a, b| b.r_squared.partial_cmp(&a.r_squared).unwrap());
+                detectors.sort_by(|a, b| b.r_squared.total_cmp(&a.r_squared));
                 detectors.truncate(3);
             }
 
@@ -396,7 +396,7 @@ impl ActivationProfile {
                     .enumerate()
                     .map(|(i, &v)| (i, v.abs()))
                     .collect();
-                indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
 
                 let top_neurons: Vec<ActiveNeuron> = indexed
                     .iter()
@@ -470,7 +470,7 @@ impl ActivationProfile {
         }
 
         // Deduplicate detected concepts
-        detected_concepts.sort_by(|a, b| b.best_r_squared.partial_cmp(&a.best_r_squared).unwrap());
+        detected_concepts.sort_by(|a, b| b.best_r_squared.total_cmp(&a.best_r_squared));
         let unique_concepts: Vec<String> = detected_concepts
             .iter()
             .map(|c| c.concept.clone())
@@ -523,9 +523,5 @@ fn pearson_r(x: &[f32], y: &[f32]) -> f32 {
     }
 
     let denom = (var_x * var_y).sqrt();
-    if denom < 1e-10 {
-        0.0
-    } else {
-        cov / denom
-    }
+    if denom < 1e-10 { 0.0 } else { cov / denom }
 }

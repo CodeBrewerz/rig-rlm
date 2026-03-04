@@ -478,7 +478,7 @@ impl Evaluator for FiduciaryEvaluator {
                 if let Some(ref analysis) = rec.pc_analysis {
                     let pc_risk = analysis.risk_probability as f32;
                     let gnn_base = rec.fiduciary_score; // already blended with default weights
-                                                        // Re-blend with candidate weights (undo default 0.7/0.3, apply new)
+                    // Re-blend with candidate weights (undo default 0.7/0.3, apply new)
                     rec.fiduciary_score = alpha * gnn_base + beta * pc_risk;
                 }
             }
@@ -517,11 +517,15 @@ impl Evaluator for FiduciaryEvaluator {
 
 #[test]
 fn test_gepa_optimize_fiduciary_weights() {
-    println!("\n  ╔══════════════════════════════════════════════════════════════════════════════════════╗");
+    println!(
+        "\n  ╔══════════════════════════════════════════════════════════════════════════════════════╗"
+    );
     println!(
         "  ║  GEPA OPTIMIZER — Fiduciary Weight Optimization                                   ║"
     );
-    println!("  ╠══════════════════════════════════════════════════════════════════════════════════════╣");
+    println!(
+        "  ╠══════════════════════════════════════════════════════════════════════════════════════╣"
+    );
 
     let graph = build_test_graph();
     let evaluator = FiduciaryEvaluator::new(graph);
@@ -562,7 +566,9 @@ fn test_gepa_optimize_fiduciary_weights() {
             .get("risk_separation")
             .unwrap_or(&0.0),
     );
-    println!("  ╠══════════════════════════════════════════════════════════════════════════════════════╣");
+    println!(
+        "  ╠══════════════════════════════════════════════════════════════════════════════════════╣"
+    );
 
     // Run GEPA optimization
     let mutator = NumericMutator::new(0.15, 42);
@@ -577,7 +583,9 @@ fn test_gepa_optimize_fiduciary_weights() {
 
     let result = optimize(seed, &evaluator, &mutator, config);
 
-    println!("  ╠══════════════════════════════════════════════════════════════════════════════════════╣");
+    println!(
+        "  ╠══════════════════════════════════════════════════════════════════════════════════════╣"
+    );
     println!(
         "  ║  Best score: {:.6}  (after {} evaluations, frontier={})",
         result.best_score, result.total_evals, result.frontier_size
@@ -589,7 +597,9 @@ fn test_gepa_optimize_fiduciary_weights() {
 
     // Verify improvement
     let improvement = result.best_score - seed_eval.score;
-    println!("  ╠══════════════════════════════════════════════════════════════════════════════════════╣");
+    println!(
+        "  ╠══════════════════════════════════════════════════════════════════════════════════════╣"
+    );
     if improvement > 0.0 {
         println!(
             "  ║  ✅ GEPA improved score by {:.6} ({:.1}%)",
@@ -614,7 +624,9 @@ fn test_gepa_optimize_fiduciary_weights() {
         }
     }
 
-    println!("  ╚══════════════════════════════════════════════════════════════════════════════════════╝");
+    println!(
+        "  ╚══════════════════════════════════════════════════════════════════════════════════════╝"
+    );
 
     // Assert minimum quality
     assert!(
@@ -642,9 +654,15 @@ fn test_gepa_optimize_fiduciary_weights() {
 async fn test_gepa_llm_mutator_with_trinity() {
     let weights_path = "/tmp/gepa_weights.json";
 
-    println!("\n  ╔══════════════════════════════════════════════════════════════════════════════════════╗");
-    println!("  ║  GEPA + TRINITY — LLM-Guided Fiduciary Weight Optimization (feedback loop)       ║");
-    println!("  ╠══════════════════════════════════════════════════════════════════════════════════════╣");
+    println!(
+        "\n  ╔══════════════════════════════════════════════════════════════════════════════════════╗"
+    );
+    println!(
+        "  ║  GEPA + TRINITY — LLM-Guided Fiduciary Weight Optimization (feedback loop)       ║"
+    );
+    println!(
+        "  ╠══════════════════════════════════════════════════════════════════════════════════════╣"
+    );
 
     let objective = "Optimize fiduciary blending weights for a financial graph recommendation system. \
         The system scores entities by combining GNN anomaly detection (gnn_weight) with \
@@ -659,7 +677,9 @@ async fn test_gepa_llm_mutator_with_trinity() {
         Ok(m) => m,
         Err(e) => {
             println!("  ║  ⚠️  Skipping: {}", e);
-            println!("  ╚══════════════════════════════════════════════════════════════════════════════════════╝");
+            println!(
+                "  ╚══════════════════════════════════════════════════════════════════════════════════════╝"
+            );
             return;
         }
     };
@@ -667,8 +687,10 @@ async fn test_gepa_llm_mutator_with_trinity() {
     // ── FEEDBACK LOOP: Load previous best or use defaults ──
     let prev_weights = OptimizedWeights::load_or_default(weights_path);
     let seed = if prev_weights.total_evals > 0 {
-        println!("  ║  📂 Loaded previous best from {} (score={:.6}, evals={})",
-            weights_path, prev_weights.score, prev_weights.total_evals);
+        println!(
+            "  ║  📂 Loaded previous best from {} (score={:.6}, evals={})",
+            weights_path, prev_weights.score, prev_weights.total_evals
+        );
         prev_weights.to_candidate()
     } else {
         println!("  ║  🆕 No previous weights found — starting from defaults");
@@ -687,7 +709,9 @@ async fn test_gepa_llm_mutator_with_trinity() {
 
     let seed_eval = evaluator.evaluate(&seed);
     println!("  ║  Seed score: {:.6}", seed_eval.score);
-    println!("  ╠══════════════════════════════════════════════════════════════════════════════════════╣");
+    println!(
+        "  ╠══════════════════════════════════════════════════════════════════════════════════════╣"
+    );
 
     let config = OptimizeConfig {
         max_evals: 15,
@@ -699,16 +723,24 @@ async fn test_gepa_llm_mutator_with_trinity() {
     let result = optimize_async(seed, &evaluator, &llm_mutator, config).await;
 
     // ── FEEDBACK LOOP: Save best weights for next run ──
-    let mut best_weights = OptimizedWeights::from_candidate(&result.best_candidate, result.best_score);
+    let mut best_weights =
+        OptimizedWeights::from_candidate(&result.best_candidate, result.best_score);
     best_weights.total_evals = prev_weights.total_evals + result.total_evals;
     match best_weights.save(weights_path) {
-        Ok(()) => println!("  ║  💾 Saved best weights to {} (cumulative evals={})", weights_path, best_weights.total_evals),
+        Ok(()) => println!(
+            "  ║  💾 Saved best weights to {} (cumulative evals={})",
+            weights_path, best_weights.total_evals
+        ),
         Err(e) => println!("  ║  ⚠️  Save failed: {}", e),
     }
 
-    println!("  ╠══════════════════════════════════════════════════════════════════════════════════════╣");
-    println!("  ║  Best score: {:.6}  (after {} LLM-guided evaluations, {} cumulative)",
-        result.best_score, result.total_evals, best_weights.total_evals);
+    println!(
+        "  ╠══════════════════════════════════════════════════════════════════════════════════════╣"
+    );
+    println!(
+        "  ║  Best score: {:.6}  (after {} LLM-guided evaluations, {} cumulative)",
+        result.best_score, result.total_evals, best_weights.total_evals
+    );
     println!("  ║  Best weights (discovered by Trinity):");
     let mut params: Vec<_> = result.best_candidate.params.iter().collect();
     params.sort_by_key(|(k, _)| k.clone());
@@ -718,15 +750,23 @@ async fn test_gepa_llm_mutator_with_trinity() {
 
     let improvement = result.best_score - seed_eval.score;
     if improvement > 0.0 {
-        println!("  ║  ✅ Trinity improved score by {:.6} ({:.1}%)", improvement, improvement / seed_eval.score.abs().max(0.001) * 100.0);
+        println!(
+            "  ║  ✅ Trinity improved score by {:.6} ({:.1}%)",
+            improvement,
+            improvement / seed_eval.score.abs().max(0.001) * 100.0
+        );
     } else {
         println!("  ║  ℹ️  No improvement this run (exploring further needed)");
     }
     println!("  ║");
     println!("  ║  🔄 Run again to continue optimizing from this checkpoint!");
-    println!("  ╚══════════════════════════════════════════════════════════════════════════════════════╝");
+    println!(
+        "  ╚══════════════════════════════════════════════════════════════════════════════════════╝"
+    );
 
-    assert!(result.total_evals >= 5, "Should complete at least 5 LLM-guided evaluations");
+    assert!(
+        result.total_evals >= 5,
+        "Should complete at least 5 LLM-guided evaluations"
+    );
     assert!(result.best_score.is_finite(), "Best score should be finite");
 }
-

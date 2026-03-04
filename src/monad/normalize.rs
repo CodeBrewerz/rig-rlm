@@ -177,13 +177,18 @@ mod tests {
     #[test]
     fn truncate_only_affects_execution_role() {
         let long_msg = "x".repeat(10_000);
-        let mut msgs = vec![
-            msg(Role::User, &long_msg),
-            msg(Role::Assistant, &long_msg),
-        ];
+        let mut msgs = vec![msg(Role::User, &long_msg), msg(Role::Assistant, &long_msg)];
         truncate_execution_output(&mut msgs, 1000);
-        assert_eq!(msgs[0].content.len(), 10_000, "User msg should be untouched");
-        assert_eq!(msgs[1].content.len(), 10_000, "Assistant msg should be untouched");
+        assert_eq!(
+            msgs[0].content.len(),
+            10_000,
+            "User msg should be untouched"
+        );
+        assert_eq!(
+            msgs[1].content.len(),
+            10_000,
+            "Assistant msg should be untouched"
+        );
     }
 
     #[test]

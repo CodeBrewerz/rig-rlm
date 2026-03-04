@@ -200,6 +200,25 @@ impl RgcnConfig {
 }
 
 impl<B: Backend> RgcnModel<B> {
+    /// Align feature dimensionality to the expected linear input size.
+    ///
+    /// This keeps the model robust when graph builders append structural
+    /// features (e.g. positional encodings) and config `in_dim` lags behind.
+    fn align_feature_dim(features: Tensor<B, 2>, expected_dim: usize) -> Tensor<B, 2> {
+        let [num_nodes, in_dim] = features.dims();
+        if in_dim == expected_dim {
+            return features;
+        }
+
+        if in_dim > expected_dim {
+            features.slice([0..num_nodes, 0..expected_dim])
+        } else {
+            let device = features.device();
+            let pad = Tensor::<B, 2>::zeros([num_nodes, expected_dim - in_dim], &device);
+            Tensor::cat(vec![features, pad], 1)
+        }
+    }
+
     pub fn attach_adapter(&mut self, adapter: crate::model::lora::HeteroBasisAdapter<B>) {
         self.input_adapters = Some(adapter);
     }
@@ -220,11 +239,13 @@ impl<B: Backend> RgcnModel<B> {
         let mut embeddings = NodeEmbeddings::new();
         for (node_type, features) in &graph.node_features {
             if let Some(idx) = self.node_type_keys.iter().position(|k| k == node_type) {
-                let mut projected = self.input_linears[idx].forward(features.clone());
+                let expected_in = self.input_linears[idx].weight.val().dims()[0];
+                let aligned_features = Self::align_feature_dim(features.clone(), expected_in);
+                let mut projected = self.input_linears[idx].forward(aligned_features.clone());
 
                 // DoRA: y = m * normalize(base + adapter)
                 if let Some(ref adapter) = self.input_adapters {
-                    projected = adapter.dora_forward(projected, features.clone(), node_type);
+                    projected = adapter.dora_forward(projected, aligned_features, node_type);
                 }
 
                 embeddings.insert(node_type, projected);
@@ -239,10 +260,28 @@ impl<B: Backend> RgcnModel<B> {
     }
 }
 
+impl<B: Backend> crate::model::trainer::JepaTrainable<B> for RgcnModel<B> {
+    fn forward_embeddings(&self, graph: &HeteroGraph<B>) -> NodeEmbeddings<B> {
+        self.forward(graph)
+    }
+
+    fn num_input_weights(&self) -> usize {
+        self.input_linears.len()
+    }
+
+    fn get_input_weight(&self, idx: usize) -> Tensor<B, 2> {
+        self.input_linears[idx].weight.val()
+    }
+
+    fn set_input_weight(&mut self, idx: usize, weight: Tensor<B, 2>) {
+        self.input_linears[idx].weight = self.input_linears[idx].weight.clone().map(|_| weight);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
+    use crate::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
     use burn::backend::NdArray;
 
     type TestBackend = NdArray;
@@ -279,7 +318,8 @@ mod tests {
             &GraphBuildConfig {
                 node_feat_dim: 8,
                 add_reverse_edges: true,
-                add_self_loops: true, add_positional_encoding: true,
+                add_self_loops: true,
+                add_positional_encoding: true,
             },
             &device,
         );

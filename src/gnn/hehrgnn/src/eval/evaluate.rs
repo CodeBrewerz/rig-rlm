@@ -9,7 +9,7 @@ use burn::prelude::*;
 use crate::data::fact::HehrFact;
 use crate::model::hehrgnn::HehrgnnModel;
 
-use super::metrics::{filtered_rank, LinkPredictionMetrics};
+use super::metrics::{LinkPredictionMetrics, filtered_rank};
 
 /// Evaluate link prediction using vectorized scoring.
 ///

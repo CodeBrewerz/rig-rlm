@@ -5,10 +5,12 @@
 //! - `sample(circuit, evidence, n)` → n samples from P(missing | evidence)
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::circuit::{CompiledCircuit, Evidence};
-use super::distribution::Distribution;
 use super::node::NodeKind;
+
+static SAMPLE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Compute log P(evidence), marginalizing over unobserved variables.
 ///
@@ -121,15 +123,19 @@ pub fn sample(circuit: &mut CompiledCircuit, evidence: &Evidence, n: usize) -> V
             for x in 0..num_cats {
                 ev[var] = Some(x);
                 let log_p = circuit.forward(&ev);
-                probs.push((log_p - log_p_marg).exp());
+                let p = (log_p - log_p_marg).exp();
+                probs.push(if p.is_finite() && p >= 0.0 { p } else { 0.0 });
             }
 
             // Normalize
             let sum: f64 = probs.iter().sum();
-            if sum > 0.0 {
+            if sum.is_finite() && sum > 1e-15 {
                 for p in probs.iter_mut() {
                     *p /= sum;
                 }
+            } else {
+                let uniform = 1.0 / num_cats as f64;
+                probs.fill(uniform);
             }
 
             // Sample from categorical
@@ -166,12 +172,9 @@ fn find_var_categories(circuit: &CompiledCircuit, var: usize) -> usize {
 
 /// Simple deterministic pseudo-random for sampling (no rand crate dependency).
 fn simple_random(seed: u64) -> f64 {
-    // Splitmix64
-    static mut COUNTER: u64 = 0;
-    let s = unsafe {
-        COUNTER = COUNTER.wrapping_add(1);
-        seed.wrapping_add(COUNTER).wrapping_mul(0x9E3779B97F4A7C15)
-    };
+    // SplitMix64 with atomic counter for thread-safe deterministic evolution.
+    let ctr = SAMPLE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let s = seed.wrapping_add(ctr).wrapping_mul(0x9E3779B97F4A7C15);
     let s = (s ^ (s >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
     let s = (s ^ (s >> 27)).wrapping_mul(0x94D049BB133111EB);
     let s = s ^ (s >> 31);
@@ -190,32 +193,52 @@ pub fn lift(
     target_var: usize,
     target_val: usize,
 ) -> f64 {
-    let num_vars = circuit.num_vars;
+    // Respect existing evidence.
+    // Lift is contextual:
+    //   P(target | evidence, var=val) / P(target | evidence)
+    let mut base_evidence = evidence.clone();
+    let required_len = var.max(target_var) + 1;
+    if base_evidence.len() < required_len {
+        base_evidence.resize(required_len, None);
+    }
 
-    // P(target)
-    let mut ev_target_only: Evidence = vec![None; num_vars];
-    ev_target_only[target_var] = Some(target_val);
-    let log_p_target = circuit.forward(&ev_target_only);
+    // Contradictory evidence means impossible condition -> zero lift.
+    if let Some(Some(obs)) = base_evidence.get(var) {
+        if *obs != val {
+            return 0.0;
+        }
+    }
 
-    // P(target | var=val) via Bayes: P(target, var=val) / P(var=val)
-    let mut ev_both: Evidence = vec![None; num_vars];
-    ev_both[var] = Some(val);
-    ev_both[target_var] = Some(target_val);
-    let log_p_both = circuit.forward(&ev_both);
+    // Base probability P(target | evidence)
+    let base_cond = conditional(circuit, &base_evidence, &[target_var]);
+    let p_target_base = base_cond
+        .get(&target_var)
+        .and_then(|p| p.get(target_val))
+        .copied()
+        .unwrap_or(0.0);
+    if !p_target_base.is_finite() || p_target_base <= 1e-12 {
+        return 1.0;
+    }
 
-    let mut ev_var_only: Evidence = vec![None; num_vars];
-    ev_var_only[var] = Some(val);
-    let log_p_var = circuit.forward(&ev_var_only);
+    // Conditioned probability P(target | evidence, var=val)
+    let mut conditioned = base_evidence;
+    conditioned[var] = Some(val);
+    let cond = conditional(circuit, &conditioned, &[target_var]);
+    let p_target_given = cond
+        .get(&target_var)
+        .and_then(|p| p.get(target_val))
+        .copied()
+        .unwrap_or(0.0);
+    if !p_target_given.is_finite() {
+        return 1.0;
+    }
 
-    let log_p_target_given_var = log_p_both - log_p_var;
-
-    // Lift = P(target | var) / P(target)
-    let lift_val = (log_p_target_given_var - log_p_target).exp();
+    let lift_val = p_target_given / p_target_base;
     if lift_val.is_finite() {
-        lift_val
+        lift_val.max(0.0)
     } else {
         1.0
-    } // neutral if unseen
+    }
 }
 
 #[cfg(test)]
@@ -313,5 +336,18 @@ mod tests {
         println!("Lift(X0=1 → X1=1) = {:.4}", l);
         // X0=1 should decrease X1=1 probability (negative correlation in mixture)
         assert!(l < 1.0, "Lift should be < 1 (negative correlation)");
+    }
+
+    #[test]
+    fn test_lift_respects_evidence_conflicts() {
+        let mut b = CircuitBuilder::new();
+        let x0 = b.add_input(0, Distribution::bernoulli(0.8));
+        let x1 = b.add_input(1, Distribution::bernoulli(0.2));
+        b.add_product(vec![x0, x1]);
+        let mut c = CompiledCircuit::compile(&b);
+
+        // Evidence says X0=0. Asking lift for X0=1 should return 0 (impossible under evidence).
+        let l = lift(&mut c, &vec![Some(0), None], 0, 1, 1, 1);
+        assert_eq!(l, 0.0);
     }
 }

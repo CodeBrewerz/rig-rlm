@@ -23,7 +23,11 @@ use hehrgnn::optimizer::gepa::*;
 // ═══════════════════════════════════════════════════════════════
 
 #[derive(Clone, Copy)]
-enum Risk { High, Medium, Low }
+enum Risk {
+    High,
+    Medium,
+    Low,
+}
 
 struct GroundTruthUser {
     name: &'static str,
@@ -44,7 +48,11 @@ fn pseudo_random(seed: u64, i: usize, lo: f32, hi: f32) -> f32 {
 }
 
 fn make_embedding(risk: Risk, dim: usize, seed: u64, idx: usize) -> Vec<f32> {
-    let base = match risk { Risk::High => 0.85, Risk::Medium => 0.45, Risk::Low => 0.10 };
+    let base = match risk {
+        Risk::High => 0.85,
+        Risk::Medium => 0.45,
+        Risk::Low => 0.10,
+    };
     (0..dim)
         .map(|d| {
             let noise = pseudo_random(seed, idx * dim + d, -0.15, 0.15);
@@ -76,10 +84,30 @@ fn build_prediction_graph() -> PredictionTestGraph {
     let seed = 42u64;
 
     let ground_truth = vec![
-        GroundTruthUser { name: "HighRisk_Dave", risk: Risk::High, should_flag_count: 3, max_safe_recs: 2 },
-        GroundTruthUser { name: "MedRisk_Mike", risk: Risk::Medium, should_flag_count: 1, max_safe_recs: 4 },
-        GroundTruthUser { name: "LowRisk_Emma", risk: Risk::Low, should_flag_count: 0, max_safe_recs: 6 },
-        GroundTruthUser { name: "HighRisk_Zara", risk: Risk::High, should_flag_count: 2, max_safe_recs: 2 },
+        GroundTruthUser {
+            name: "HighRisk_Dave",
+            risk: Risk::High,
+            should_flag_count: 3,
+            max_safe_recs: 2,
+        },
+        GroundTruthUser {
+            name: "MedRisk_Mike",
+            risk: Risk::Medium,
+            should_flag_count: 1,
+            max_safe_recs: 4,
+        },
+        GroundTruthUser {
+            name: "LowRisk_Emma",
+            risk: Risk::Low,
+            should_flag_count: 0,
+            max_safe_recs: 6,
+        },
+        GroundTruthUser {
+            name: "HighRisk_Zara",
+            risk: Risk::High,
+            should_flag_count: 2,
+            max_safe_recs: 2,
+        },
     ];
 
     let mut emb: HashMap<String, Vec<Vec<f32>>> = HashMap::new();
@@ -101,8 +129,30 @@ fn build_prediction_graph() -> PredictionTestGraph {
     names.insert("user".into(), user_names);
 
     // Accounts (10): 3 high-risk, 3 medium, 4 low
-    let acct_risks = [Risk::High, Risk::High, Risk::High, Risk::Medium, Risk::Medium, Risk::Medium, Risk::Low, Risk::Low, Risk::Low, Risk::Low];
-    let acct_names_v: Vec<&str> = vec!["Dave_CreditLine", "Dave_Checking", "Zara_CreditLine", "Mike_Checking", "Mike_Brokerage", "Mike_Savings", "Emma_Checking", "Emma_Savings", "Emma_401k", "Emma_529"];
+    let acct_risks = [
+        Risk::High,
+        Risk::High,
+        Risk::High,
+        Risk::Medium,
+        Risk::Medium,
+        Risk::Medium,
+        Risk::Low,
+        Risk::Low,
+        Risk::Low,
+        Risk::Low,
+    ];
+    let acct_names_v: Vec<&str> = vec![
+        "Dave_CreditLine",
+        "Dave_Checking",
+        "Zara_CreditLine",
+        "Mike_Checking",
+        "Mike_Brokerage",
+        "Mike_Savings",
+        "Emma_Checking",
+        "Emma_Savings",
+        "Emma_401k",
+        "Emma_529",
+    ];
     let mut a_embs = Vec::new();
     let mut a_anom = Vec::new();
     let mut a_names = Vec::new();
@@ -115,16 +165,39 @@ fn build_prediction_graph() -> PredictionTestGraph {
     anomaly.insert("account".into(), a_anom);
     names.insert("account".into(), a_names);
 
-    edges.insert(("user".into(), "owns".into(), "account".into()), vec![
-        (0, 0), (0, 1),           // Dave → 2 high-risk accounts
-        (1, 3), (1, 4), (1, 5),   // Mike → 3 medium accounts
-        (2, 6), (2, 7), (2, 8), (2, 9), // Emma → 4 low-risk accounts
-        (3, 2),                    // Zara → 1 high-risk account
-    ]);
+    edges.insert(
+        ("user".into(), "owns".into(), "account".into()),
+        vec![
+            (0, 0),
+            (0, 1), // Dave → 2 high-risk accounts
+            (1, 3),
+            (1, 4),
+            (1, 5), // Mike → 3 medium accounts
+            (2, 6),
+            (2, 7),
+            (2, 8),
+            (2, 9), // Emma → 4 low-risk accounts
+            (3, 2), // Zara → 1 high-risk account
+        ],
+    );
 
     // Merchants (6): gambling, crypto = high; luxury = medium; grocery, utilities, insurance = low
-    let merch_risks = [Risk::High, Risk::High, Risk::Medium, Risk::Low, Risk::Low, Risk::Low];
-    let merch_names_v = vec!["OnlineGambling", "CryptoShady", "LuxuryGoods", "Grocery", "Utilities", "Insurance"];
+    let merch_risks = [
+        Risk::High,
+        Risk::High,
+        Risk::Medium,
+        Risk::Low,
+        Risk::Low,
+        Risk::Low,
+    ];
+    let merch_names_v = vec![
+        "OnlineGambling",
+        "CryptoShady",
+        "LuxuryGoods",
+        "Grocery",
+        "Utilities",
+        "Insurance",
+    ];
     let mut m_embs = Vec::new();
     let mut m_anom = Vec::new();
     let mut m_names = Vec::new();
@@ -137,18 +210,31 @@ fn build_prediction_graph() -> PredictionTestGraph {
     anomaly.insert("merchant".into(), m_anom);
     names.insert("merchant".into(), m_names);
 
-    edges.insert(("account".into(), "transacts".into(), "merchant".into()), vec![
-        (0, 0), (0, 1),           // Dave → gambling, crypto
-        (1, 2),                    // Dave → luxury
-        (3, 2), (3, 3),           // Mike → luxury, grocery
-        (6, 3), (6, 4),           // Emma → grocery, utilities
-        (7, 5),                    // Emma → insurance
-        (2, 0), (2, 1),           // Zara → gambling, crypto
-    ]);
+    edges.insert(
+        ("account".into(), "transacts".into(), "merchant".into()),
+        vec![
+            (0, 0),
+            (0, 1), // Dave → gambling, crypto
+            (1, 2), // Dave → luxury
+            (3, 2),
+            (3, 3), // Mike → luxury, grocery
+            (6, 3),
+            (6, 4), // Emma → grocery, utilities
+            (7, 5), // Emma → insurance
+            (2, 0),
+            (2, 1), // Zara → gambling, crypto
+        ],
+    );
 
     // Obligations (5): payday & collection = high; car loan = medium; mortgage = low
     let oblig_risks = [Risk::High, Risk::High, Risk::Medium, Risk::Low, Risk::Low];
-    let oblig_names_v = vec!["PaydayLoan_36pct", "CollectionDebt", "CarLoan_12pct", "Mortgage_4pct", "Mortgage_3pct"];
+    let oblig_names_v = vec![
+        "PaydayLoan_36pct",
+        "CollectionDebt",
+        "CarLoan_12pct",
+        "Mortgage_4pct",
+        "Mortgage_3pct",
+    ];
     let mut o_embs = Vec::new();
     let mut o_anom = Vec::new();
     let mut o_names = Vec::new();
@@ -161,19 +247,33 @@ fn build_prediction_graph() -> PredictionTestGraph {
     anomaly.insert("obligation".into(), o_anom);
     names.insert("obligation".into(), o_names);
 
-    edges.insert(("account".into(), "pays".into(), "obligation".into()), vec![
-        (0, 0), (1, 1),           // Dave → payday, collection
-        (3, 2),                    // Mike → car loan
-        (6, 3), (7, 4),           // Emma → mortgages
-        (2, 0),                    // Zara → payday
-    ]);
+    edges.insert(
+        ("account".into(), "pays".into(), "obligation".into()),
+        vec![
+            (0, 0),
+            (1, 1), // Dave → payday, collection
+            (3, 2), // Mike → car loan
+            (6, 3),
+            (7, 4), // Emma → mortgages
+            (2, 0), // Zara → payday
+        ],
+    );
 
     let mut node_counts: HashMap<String, usize> = HashMap::new();
-    for (nt, ns) in &names { node_counts.insert(nt.clone(), ns.len()); }
+    for (nt, ns) in &names {
+        node_counts.insert(nt.clone(), ns.len());
+    }
     let mut anomaly_scores: HashMap<String, HashMap<String, Vec<f32>>> = HashMap::new();
     anomaly_scores.insert("SAGE".into(), anomaly);
 
-    PredictionTestGraph { embeddings: emb, anomaly_scores, node_names: names, edges, node_counts, ground_truth }
+    PredictionTestGraph {
+        embeddings: emb,
+        anomaly_scores,
+        node_names: names,
+        edges,
+        node_counts,
+        ground_truth,
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -238,12 +338,14 @@ impl Evaluator for PredictionQualityEvaluator {
             }
 
             // Count flagged actions (investigate + avoid)
-            let flagged = recs.iter().filter(|r| {
-                r.is_recommended && (
-                    r.action_type == "should_investigate" ||
-                    r.action_type == "should_avoid"
-                )
-            }).count();
+            let flagged = recs
+                .iter()
+                .filter(|r| {
+                    r.is_recommended
+                        && (r.action_type == "should_investigate"
+                            || r.action_type == "should_avoid")
+                })
+                .count();
 
             let recommended = recs.iter().filter(|r| r.is_recommended).count();
 
@@ -251,40 +353,67 @@ impl Evaluator for PredictionQualityEvaluator {
             // High-risk users SHOULD have flagged actions
             let precision = match gt.risk {
                 Risk::High => {
-                    if flagged >= gt.should_flag_count { 1.0 }
-                    else { flagged as f64 / gt.should_flag_count.max(1) as f64 }
-                },
+                    if flagged >= gt.should_flag_count {
+                        1.0
+                    } else {
+                        flagged as f64 / gt.should_flag_count.max(1) as f64
+                    }
+                }
                 Risk::Medium => {
-                    if flagged >= 1 && flagged <= 3 { 1.0 }
-                    else if flagged == 0 { 0.5 } // Missing flags for medium risk
-                    else { 0.7 } // Over-flagging
-                },
+                    if flagged >= 1 && flagged <= 3 {
+                        1.0
+                    } else if flagged == 0 {
+                        0.5
+                    }
+                    // Missing flags for medium risk
+                    else {
+                        0.7
+                    } // Over-flagging
+                }
                 Risk::Low => {
-                    if flagged == 0 { 1.0 } // Correct: no flags for safe users
-                    else { (1.0 - flagged as f64 * 0.3).max(0.0) } // Penalize false alarms
-                },
+                    if flagged == 0 {
+                        1.0
+                    }
+                    // Correct: no flags for safe users
+                    else {
+                        (1.0 - flagged as f64 * 0.3).max(0.0)
+                    } // Penalize false alarms
+                }
             };
 
             // --- Metric 2: Safety (specificity) ---
             // Low-risk users should have limited recommendations
             let safety = match gt.risk {
                 Risk::Low => {
-                    if recommended <= gt.max_safe_recs { 1.0 }
-                    else { (gt.max_safe_recs as f64 / recommended as f64).min(1.0) }
-                },
+                    if recommended <= gt.max_safe_recs {
+                        1.0
+                    } else {
+                        (gt.max_safe_recs as f64 / recommended as f64).min(1.0)
+                    }
+                }
                 _ => 1.0, // Don't penalize high/medium risk for having many recs
             };
 
             // --- Metric 3: Ranking quality ---
             // Risk-relevant actions should rank above discretionary ones
-            let risk_actions = ["should_investigate", "should_avoid", "should_pay", "should_dispute"];
+            let risk_actions = [
+                "should_investigate",
+                "should_avoid",
+                "should_pay",
+                "should_dispute",
+            ];
             let risk_avg_rank: f64 = {
-                let risk_ranks: Vec<usize> = recs.iter().enumerate()
+                let risk_ranks: Vec<usize> = recs
+                    .iter()
+                    .enumerate()
                     .filter(|(_, r)| risk_actions.contains(&r.action_type.as_str()))
                     .map(|(i, _)| i + 1)
                     .collect();
-                if risk_ranks.is_empty() { recs.len() as f64 }
-                else { risk_ranks.iter().sum::<usize>() as f64 / risk_ranks.len() as f64 }
+                if risk_ranks.is_empty() {
+                    recs.len() as f64
+                } else {
+                    risk_ranks.iter().sum::<usize>() as f64 / risk_ranks.len() as f64
+                }
             };
             let total_recs = recs.len().max(1) as f64;
             let ranking = 1.0 - (risk_avg_rank / total_recs).min(1.0); // Higher = risk actions rank better
@@ -311,7 +440,8 @@ impl Evaluator for PredictionQualityEvaluator {
         let avg_ranking = total_ranking / n;
         let avg_coverage = total_coverage / n;
 
-        let score = avg_precision * 0.35 + avg_safety * 0.25 + avg_ranking * 0.25 + avg_coverage * 0.15;
+        let score =
+            avg_precision * 0.35 + avg_safety * 0.25 + avg_ranking * 0.25 + avg_coverage * 0.15;
 
         let mut side_info = SideInfo::new();
         side_info.score("precision", avg_precision);
@@ -335,9 +465,15 @@ impl Evaluator for PredictionQualityEvaluator {
 
 #[test]
 fn test_gepa_optimize_prediction_quality() {
-    println!("\n  ╔══════════════════════════════════════════════════════════════════════════════════════╗");
-    println!("  ║  GEPA — End-to-End Prediction Quality Optimization                                ║");
-    println!("  ╠══════════════════════════════════════════════════════════════════════════════════════╣");
+    println!(
+        "\n  ╔══════════════════════════════════════════════════════════════════════════════════════╗"
+    );
+    println!(
+        "  ║  GEPA — End-to-End Prediction Quality Optimization                                ║"
+    );
+    println!(
+        "  ╠══════════════════════════════════════════════════════════════════════════════════════╣"
+    );
 
     let graph = build_prediction_graph();
     let evaluator = PredictionQualityEvaluator::new(graph);
@@ -352,17 +488,23 @@ fn test_gepa_optimize_prediction_quality() {
     ]);
 
     let seed_eval = evaluator.evaluate(&seed);
-    println!("  ║  Seed: rec≥{}, investigate≥{}, avoid≥{}",
+    println!(
+        "  ║  Seed: rec≥{}, investigate≥{}, avoid≥{}",
         seed.params.get("recommend_threshold").unwrap(),
         seed.params.get("anomaly_investigate").unwrap(),
-        seed.params.get("anomaly_avoid").unwrap());
-    println!("  ║  Seed score: {:.6} (prec={:.3}, safe={:.3}, rank={:.3}, cov={:.3})",
+        seed.params.get("anomaly_avoid").unwrap()
+    );
+    println!(
+        "  ║  Seed score: {:.6} (prec={:.3}, safe={:.3}, rank={:.3}, cov={:.3})",
         seed_eval.score,
         seed_eval.side_info.scores.get("precision").unwrap_or(&0.0),
         seed_eval.side_info.scores.get("safety").unwrap_or(&0.0),
         seed_eval.side_info.scores.get("ranking").unwrap_or(&0.0),
-        seed_eval.side_info.scores.get("coverage").unwrap_or(&0.0));
-    println!("  ╠══════════════════════════════════════════════════════════════════════════════════════╣");
+        seed_eval.side_info.scores.get("coverage").unwrap_or(&0.0)
+    );
+    println!(
+        "  ╠══════════════════════════════════════════════════════════════════════════════════════╣"
+    );
 
     let mutator = NumericMutator::new(0.15, 42);
     let config = OptimizeConfig {
@@ -374,8 +516,13 @@ fn test_gepa_optimize_prediction_quality() {
 
     let result = optimize(seed, &evaluator, &mutator, config);
 
-    println!("  ╠══════════════════════════════════════════════════════════════════════════════════════╣");
-    println!("  ║  Best score: {:.6}  ({} evals, frontier={})", result.best_score, result.total_evals, result.frontier_size);
+    println!(
+        "  ╠══════════════════════════════════════════════════════════════════════════════════════╣"
+    );
+    println!(
+        "  ║  Best score: {:.6}  ({} evals, frontier={})",
+        result.best_score, result.total_evals, result.frontier_size
+    );
     println!("  ║  Best thresholds:");
     let mut params: Vec<_> = result.best_candidate.params.iter().collect();
     params.sort_by_key(|(k, _)| k.clone());
@@ -385,9 +532,15 @@ fn test_gepa_optimize_prediction_quality() {
 
     let improvement = result.best_score - seed_eval.score;
     if improvement > 0.0 {
-        println!("  ║  ✅ Improved by {:.6} ({:.1}%)", improvement, improvement / seed_eval.score.abs().max(0.001) * 100.0);
+        println!(
+            "  ║  ✅ Improved by {:.6} ({:.1}%)",
+            improvement,
+            improvement / seed_eval.score.abs().max(0.001) * 100.0
+        );
     }
-    println!("  ╚══════════════════════════════════════════════════════════════════════════════════════╝");
+    println!(
+        "  ╚══════════════════════════════════════════════════════════════════════════════════════╝"
+    );
 
     assert!(result.total_evals >= 20);
     assert!(result.best_score.is_finite());
@@ -405,9 +558,15 @@ fn test_gepa_optimize_prediction_quality() {
 async fn test_gepa_llm_prediction_quality_with_trinity() {
     let weights_path = "/tmp/gepa_prediction_config.json";
 
-    println!("\n  ╔══════════════════════════════════════════════════════════════════════════════════════╗");
-    println!("  ║  GEPA + TRINITY — End-to-End Prediction Quality Optimization (feedback loop)      ║");
-    println!("  ╠══════════════════════════════════════════════════════════════════════════════════════╣");
+    println!(
+        "\n  ╔══════════════════════════════════════════════════════════════════════════════════════╗"
+    );
+    println!(
+        "  ║  GEPA + TRINITY — End-to-End Prediction Quality Optimization (feedback loop)      ║"
+    );
+    println!(
+        "  ╠══════════════════════════════════════════════════════════════════════════════════════╣"
+    );
 
     let objective = "Optimize fiduciary prediction quality thresholds for a financial recommendation system. \
         Parameters control WHAT gets recommended to users: \
@@ -427,14 +586,19 @@ async fn test_gepa_llm_prediction_quality_with_trinity() {
         Ok(m) => m,
         Err(e) => {
             println!("  ║  ⚠️  Skipping: {}", e);
-            println!("  ╚══════════════════════════════════════════════════════════════════════════════════════╝");
+            println!(
+                "  ╚══════════════════════════════════════════════════════════════════════════════════════╝"
+            );
             return;
         }
     };
 
     let prev_weights = OptimizedWeights::load_or_default(weights_path);
     let seed = if prev_weights.total_evals > 0 {
-        println!("  ║  📂 Loaded previous best (score={:.6}, evals={})", prev_weights.score, prev_weights.total_evals);
+        println!(
+            "  ║  📂 Loaded previous best (score={:.6}, evals={})",
+            prev_weights.score, prev_weights.total_evals
+        );
         prev_weights.to_candidate()
     } else {
         println!("  ║  🆕 Starting from default thresholds");
@@ -451,13 +615,17 @@ async fn test_gepa_llm_prediction_quality_with_trinity() {
     let graph = build_prediction_graph();
     let evaluator = PredictionQualityEvaluator::new(graph);
     let seed_eval = evaluator.evaluate(&seed);
-    println!("  ║  Seed score: {:.6} (prec={:.3}, safe={:.3}, rank={:.3}, cov={:.3})",
+    println!(
+        "  ║  Seed score: {:.6} (prec={:.3}, safe={:.3}, rank={:.3}, cov={:.3})",
         seed_eval.score,
         seed_eval.side_info.scores.get("precision").unwrap_or(&0.0),
         seed_eval.side_info.scores.get("safety").unwrap_or(&0.0),
         seed_eval.side_info.scores.get("ranking").unwrap_or(&0.0),
-        seed_eval.side_info.scores.get("coverage").unwrap_or(&0.0));
-    println!("  ╠══════════════════════════════════════════════════════════════════════════════════════╣");
+        seed_eval.side_info.scores.get("coverage").unwrap_or(&0.0)
+    );
+    println!(
+        "  ╠══════════════════════════════════════════════════════════════════════════════════════╣"
+    );
 
     let config = OptimizeConfig {
         max_evals: 15,
@@ -468,16 +636,24 @@ async fn test_gepa_llm_prediction_quality_with_trinity() {
 
     let result = optimize_async(seed, &evaluator, &llm_mutator, config).await;
 
-    let mut best_weights = OptimizedWeights::from_candidate(&result.best_candidate, result.best_score);
+    let mut best_weights =
+        OptimizedWeights::from_candidate(&result.best_candidate, result.best_score);
     best_weights.total_evals = prev_weights.total_evals + result.total_evals;
     match best_weights.save(weights_path) {
-        Ok(()) => println!("  ║  💾 Saved to {} (cumulative evals={})", weights_path, best_weights.total_evals),
+        Ok(()) => println!(
+            "  ║  💾 Saved to {} (cumulative evals={})",
+            weights_path, best_weights.total_evals
+        ),
         Err(e) => println!("  ║  ⚠️  Save failed: {}", e),
     }
 
-    println!("  ╠══════════════════════════════════════════════════════════════════════════════════════╣");
-    println!("  ║  Best score: {:.6}  ({} evals, {} cumulative)",
-        result.best_score, result.total_evals, best_weights.total_evals);
+    println!(
+        "  ╠══════════════════════════════════════════════════════════════════════════════════════╣"
+    );
+    println!(
+        "  ║  Best score: {:.6}  ({} evals, {} cumulative)",
+        result.best_score, result.total_evals, best_weights.total_evals
+    );
     println!("  ║  Best thresholds (discovered by Trinity):");
     let mut params: Vec<_> = result.best_candidate.params.iter().collect();
     params.sort_by_key(|(k, _)| k.clone());
@@ -487,12 +663,18 @@ async fn test_gepa_llm_prediction_quality_with_trinity() {
 
     let improvement = result.best_score - seed_eval.score;
     if improvement > 0.0 {
-        println!("  ║  ✅ Trinity improved by {:.6} ({:.1}%)", improvement, improvement / seed_eval.score.abs().max(0.001) * 100.0);
+        println!(
+            "  ║  ✅ Trinity improved by {:.6} ({:.1}%)",
+            improvement,
+            improvement / seed_eval.score.abs().max(0.001) * 100.0
+        );
     } else {
         println!("  ║  ℹ️  No improvement this run");
     }
     println!("  ║  🔄 Run again to continue optimizing!");
-    println!("  ╚══════════════════════════════════════════════════════════════════════════════════════╝");
+    println!(
+        "  ╚══════════════════════════════════════════════════════════════════════════════════════╝"
+    );
 
     assert!(result.total_evals >= 5);
     assert!(result.best_score.is_finite());

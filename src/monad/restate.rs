@@ -501,32 +501,42 @@ async fn run_agent_loop(
         let db_path = std::env::var("RIG_RLM_DB").unwrap_or_else(|_| "agent.db".to_string());
         let recall_provider = super::provider::LlmProvider::new(provider_config.clone());
         let recalled = match recall_provider.embed(task).await {
-            Ok(query_emb) => {
-                match AgentStore::open(&db_path).await {
-                    Ok(store) => match store.recall_memories(&query_emb, 5).await {
-                        Ok(memories) if !memories.is_empty() => {
+            Ok(query_emb) => match AgentStore::open(&db_path).await {
+                Ok(store) => match store.recall_memories(&query_emb, 5).await {
+                    Ok(memories) if !memories.is_empty() => {
+                        eprintln!("\n• Recalled {} memories for task", memories.len());
+                        for m in &memories {
                             eprintln!(
-                                "\n• Recalled {} memories for task",
-                                memories.len()
+                                "  └ [{}] {}",
+                                m.category,
+                                &m.content[..m.content.len().min(80)]
                             );
-                            for m in &memories {
-                                eprintln!(
-                                    "  └ [{}] {}",
-                                    m.category,
-                                    &m.content[..m.content.len().min(80)]
-                                );
-                            }
-                            Some(AgentStore::format_memories_for_prompt(&memories))
                         }
-                        Ok(_) => None,
-                        Err(e) => { eprintln!("⚠️ recall query: {e}"); None }
-                    },
-                    Err(e) => { eprintln!("⚠️ recall db: {e}"); None }
+                        Some(AgentStore::format_memories_for_prompt(&memories))
+                    }
+                    Ok(_) => None,
+                    Err(e) => {
+                        eprintln!("⚠️ recall query: {e}");
+                        None
+                    }
+                },
+                Err(e) => {
+                    eprintln!("⚠️ recall db: {e}");
+                    None
                 }
+            },
+            Err(e) => {
+                eprintln!("⚠️ recall embed: {e}");
+                None
             }
-            Err(e) => { eprintln!("⚠️ recall embed: {e}"); None }
         };
-        agent_task_full(task, None, Some(&config.memory), recalled.as_deref(), attachments)
+        agent_task_full(
+            task,
+            None,
+            Some(&config.memory),
+            recalled.as_deref(),
+            attachments,
+        )
     };
     let mut agent_ctx = AgentContext::new(config);
 
@@ -735,7 +745,9 @@ async fn run_agent_loop(
                     }
 
                     // ── Code execution: run on bg thread, record in journal ──
-                    Action::ExecuteCode { source: ref _source } => {
+                    Action::ExecuteCode {
+                        source: ref _source,
+                    } => {
                         let output = match agent_ctx.interpret_action(action).await {
                             Ok(out) => out,
                             Err(e) => break Err(format!("exec error: {e}")),
@@ -821,8 +833,7 @@ async fn run_agent_loop(
 
                         // ── Codex-style: Agent spawned traces ──
                         for spec in orchestrator.specs() {
-                            let prompt_preview: String =
-                                spec.task.chars().take(120).collect();
+                            let prompt_preview: String = spec.task.chars().take(120).collect();
                             eprintln!(
                                 "\n• Agent spawned (Restate durable)\n  └ name: \"{}\"\n    status: pending init\n    prompt: {prompt_preview}...",
                                 spec.name
@@ -843,7 +854,9 @@ async fn run_agent_loop(
 
                             eprintln!(
                                 "\n• Agent running (Restate child workflow)\n  └ name: \"{}\"\n    status: running ({}/{})",
-                                spec.name, i + 1, agent_count
+                                spec.name,
+                                i + 1,
+                                agent_count
                             );
 
                             // Send to handler — it calls ctx.workflow_client().run().call().await
@@ -875,8 +888,7 @@ async fn run_agent_loop(
                             };
 
                             let duration = agent_start.elapsed();
-                            let snapshot: String =
-                                result_str.chars().take(150).collect();
+                            let snapshot: String = result_str.chars().take(150).collect();
                             eprintln!(
                                 "\n• Agent complete\n  └ name: \"{}\"\n    status: success\n    duration: {:.1}s\n    snapshot: {snapshot}...",
                                 spec.name,

@@ -12,13 +12,13 @@ use burn::backend::NdArray;
 use burn::prelude::*;
 use std::collections::HashMap;
 
-use hehrgnn::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
+use hehrgnn::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
 use hehrgnn::data::hetero_graph::{EdgeType, HeteroGraph};
 use hehrgnn::eval::fiduciary::*;
 use hehrgnn::model::gat::GatConfig;
 use hehrgnn::model::graph_transformer::GraphTransformerConfig;
 use hehrgnn::model::graphsage::GraphSageModelConfig;
-use hehrgnn::model::lora::{init_hetero_basis_adapter, LoraConfig};
+use hehrgnn::model::lora::{LoraConfig, init_hetero_basis_adapter};
 use hehrgnn::model::mhc::MhcRgcnConfig;
 use hehrgnn::model::trainer::*;
 
@@ -85,7 +85,8 @@ fn build_financial_graph() -> (HeteroGraph<B>, Vec<GraphFact>) {
         &GraphBuildConfig {
             node_feat_dim: 16,
             add_reverse_edges: true,
-            add_self_loops: true, add_positional_encoding: true,
+            add_self_loops: true,
+            add_positional_encoding: true,
         },
         &device,
     );
@@ -404,19 +405,36 @@ fn test_progressive_learning() {
     let models = ["GraphSAGE", "RGCN", "GAT", "GPS", "HEHRGNN"];
     let rounds = [5, 15, 30]; // epochs per round
 
-    println!("\n  ╔══════════════════════════════════════════════════════════════════════════════════════════════════╗");
-    println!("  ║  PROGRESSIVE LEARNING TEST — Each round should show improvement                               ║");
-    println!("  ╠══════════════════════════════════════════════════════════════════════════════════════════════════╣");
+    println!(
+        "\n  ╔══════════════════════════════════════════════════════════════════════════════════════════════════╗"
+    );
+    println!(
+        "  ║  PROGRESSIVE LEARNING TEST — Each round should show improvement                               ║"
+    );
+    println!(
+        "  ╠══════════════════════════════════════════════════════════════════════════════════════════════════╣"
+    );
 
     let mut all_improvements = 0usize;
     let mut all_comparisons = 0usize;
 
     for model_name in &models {
-        println!("  ╠──────────────────────────────────────────────────────────────────────────────────────────────────╣");
-        println!("  ║  Model: {:20}                                                                       ║", model_name);
-        println!("  ╠──────────────────────────────────────────────────────────────────────────────────────────────────╣");
-        println!("  ║  Round │ Epochs │  AUC   │  Loss  │ EmbVar │ FidScore │ PC Risk │ PC EM LL │ Actions │ Δ Score       ║");
-        println!("  ╠──────────────────────────────────────────────────────────────────────────────────────────────────╣");
+        println!(
+            "  ╠──────────────────────────────────────────────────────────────────────────────────────────────────╣"
+        );
+        println!(
+            "  ║  Model: {:20}                                                                       ║",
+            model_name
+        );
+        println!(
+            "  ╠──────────────────────────────────────────────────────────────────────────────────────────────────╣"
+        );
+        println!(
+            "  ║  Round │ Epochs │  AUC   │  Loss  │ EmbVar │ FidScore │ PC Risk │ PC EM LL │ Actions │ Δ Score       ║"
+        );
+        println!(
+            "  ╠──────────────────────────────────────────────────────────────────────────────────────────────────╣"
+        );
 
         let mut prev_score = 0.0f32;
         let mut prev_auc = 0.0f32;
@@ -449,8 +467,17 @@ fn test_progressive_learning() {
 
             println!(
                 "  ║   {:2}   │  {:3}   │ {:.4}{} │ {:.4} │ {:.4} │  {:5.3}  │  {:5.4} │  {:6.2}  │   {:2}    │ {:>6}        ║",
-                round_idx + 1, epochs, auc, auc_arrow, loss, var,
-                fid_score, avg_pc_risk, pc_em_ll, n_actions, delta,
+                round_idx + 1,
+                epochs,
+                auc,
+                auc_arrow,
+                loss,
+                var,
+                fid_score,
+                avg_pc_risk,
+                pc_em_ll,
+                n_actions,
+                delta,
             );
 
             // Track improvements
@@ -466,15 +493,21 @@ fn test_progressive_learning() {
         }
     }
 
-    println!("  ╠══════════════════════════════════════════════════════════════════════════════════════════════════╣");
+    println!(
+        "  ╠══════════════════════════════════════════════════════════════════════════════════════════════════╣"
+    );
     let pct = if all_comparisons > 0 {
         all_improvements as f32 / all_comparisons as f32 * 100.0
     } else {
         0.0
     };
-    println!("  ║  Learning verification: {}/{} rounds showed improvement ({:.0}%)                                  ║",
-        all_improvements, all_comparisons, pct);
-    println!("  ╚══════════════════════════════════════════════════════════════════════════════════════════════════╝");
+    println!(
+        "  ║  Learning verification: {}/{} rounds showed improvement ({:.0}%)                                  ║",
+        all_improvements, all_comparisons, pct
+    );
+    println!(
+        "  ╚══════════════════════════════════════════════════════════════════════════════════════════════════╝"
+    );
 
     // At least 60% of rounds should show improvement
     assert!(

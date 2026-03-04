@@ -274,11 +274,7 @@ impl AgentStore {
     /// Store a memory with its embedding vector.
     ///
     /// Embedding is stored as a JSON array string for universal SQLite compat.
-    pub async fn store_memory(
-        &self,
-        memory: &Memory,
-        embedding: &[f32],
-    ) -> anyhow::Result<()> {
+    pub async fn store_memory(&self, memory: &Memory, embedding: &[f32]) -> anyhow::Result<()> {
         let conn = self
             .db
             .connect()
@@ -382,13 +378,8 @@ impl AgentStore {
         Ok(memories)
     }
 
-
     /// List recent memories chronologically (no vector search).
-    pub async fn list_memories(
-        &self,
-        user_id: &str,
-        limit: usize,
-    ) -> anyhow::Result<Vec<Memory>> {
+    pub async fn list_memories(&self, user_id: &str, limit: usize) -> anyhow::Result<Vec<Memory>> {
         let conn = self
             .db
             .connect()
@@ -469,9 +460,5 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
     }
 
     let denom = norm_a.sqrt() * norm_b.sqrt();
-    if denom == 0.0 {
-        0.0
-    } else {
-        dot / denom
-    }
+    if denom == 0.0 { 0.0 } else { dot / denom }
 }

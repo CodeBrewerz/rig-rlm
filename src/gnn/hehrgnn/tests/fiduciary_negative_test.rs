@@ -757,551 +757,577 @@ fn test_financially_complete_user_still_gets_maintenance_advice() {
 
 #[test]
 fn test_full_pipeline_adversarial_with_real_ensemble_and_scorer() {
-    use burn::backend::Wgpu;
-    use burn::prelude::*;
+    let run = std::panic::catch_unwind(|| {
+        use burn::backend::Wgpu;
+        use burn::prelude::*;
 
-    type B = Wgpu;
+        type B = Wgpu;
 
-    use hehrgnn::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
-    use hehrgnn::data::hetero_graph::EdgeType;
-    use hehrgnn::eval::learnable_scorer::*;
-    use hehrgnn::model::gat::GatConfig;
-    use hehrgnn::model::graph_transformer::GraphTransformerConfig;
-    use hehrgnn::model::graphsage::GraphSageModelConfig;
-    use hehrgnn::model::rgcn::RgcnConfig;
-    use hehrgnn::server::state::PlainEmbeddings;
+        use hehrgnn::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
+        use hehrgnn::data::hetero_graph::EdgeType;
+        use hehrgnn::eval::learnable_scorer::*;
+        use hehrgnn::model::gat::GatConfig;
+        use hehrgnn::model::graph_transformer::GraphTransformerConfig;
+        use hehrgnn::model::graphsage::GraphSageModelConfig;
+        use hehrgnn::model::rgcn::RgcnConfig;
+        use hehrgnn::server::state::PlainEmbeddings;
 
-    println!(
-        "\n  ╔══════════════════════════════════════════════════════════════════════════════════╗"
-    );
-    println!(
-        "  ║  🧪 TEST 6: FULL PIPELINE ADVERSARIAL                                          ║"
-    );
-    println!(
-        "  ║  Real GNN Ensemble (4 models) + Learnable Scorer + Adversarial Scenarios        ║"
-    );
-    println!(
-        "  ╚══════════════════════════════════════════════════════════════════════════════════╝\n"
-    );
+        println!(
+            "\n  ╔══════════════════════════════════════════════════════════════════════════════════╗"
+        );
+        println!(
+            "  ║  🧪 TEST 6: FULL PIPELINE ADVERSARIAL                                          ║"
+        );
+        println!(
+            "  ║  Real GNN Ensemble (4 models) + Learnable Scorer + Adversarial Scenarios        ║"
+        );
+        println!(
+            "  ╚══════════════════════════════════════════════════════════════════════════════════╝\n"
+        );
 
-    fn gf(st: &str, s: &str, r: &str, dt: &str, d: &str) -> GraphFact {
-        GraphFact {
-            src: (st.to_string(), s.to_string()),
-            relation: r.to_string(),
-            dst: (dt.to_string(), d.to_string()),
+        fn gf(st: &str, s: &str, r: &str, dt: &str, d: &str) -> GraphFact {
+            GraphFact {
+                src: (st.to_string(), s.to_string()),
+                relation: r.to_string(),
+                dst: (dt.to_string(), d.to_string()),
+            }
         }
-    }
 
-    let hidden_dim = 32;
+        let hidden_dim = 32;
 
-    // ── Step 1: Build a wealthy user's graph ──
-    println!("  ── Step 1: Building wealthy user graph facts ──");
-    let facts = vec![
-        // User → instruments
-        gf(
-            "user",
-            "Millionaire",
-            "user-has-instrument",
-            "instrument",
-            "Checking_Premium",
-        ),
-        gf(
-            "user",
-            "Millionaire",
-            "user-has-instrument",
-            "instrument",
-            "Brokerage_Main",
-        ),
-        gf(
-            "user",
-            "Millionaire",
-            "user-has-instrument",
-            "instrument",
-            "Trust_Account",
-        ),
-        // User → goals
-        gf(
-            "user",
-            "Millionaire",
-            "subledger-holds-goal-funds",
-            "goal",
-            "Philanthropy_Fund",
-        ),
-        gf(
-            "user",
-            "Millionaire",
-            "subledger-holds-goal-funds",
-            "goal",
-            "Vacation_Home",
-        ),
-        gf(
-            "user",
-            "Millionaire",
-            "subledger-holds-goal-funds",
-            "goal",
-            "Education_Trust",
-        ),
-        // User → tax
-        gf(
-            "user",
-            "Millionaire",
-            "tax-party-has-exemption-certificate",
-            "tax-exemption-certificate",
-            "Charitable_Deduction",
-        ),
-        gf(
-            "user",
-            "Millionaire",
-            "tax-sinking-fund-backed-by-account",
-            "tax-sinking-fund",
-            "QuarterlyEst",
-        ),
-        // User → budget
-        gf(
-            "user",
-            "Millionaire",
-            "records-budget-estimation",
-            "budget-estimation",
-            "MonthlyBudget",
-        ),
-        // Assets
-        gf(
-            "asset",
-            "RealEstate_NYC",
-            "asset-has-valuation",
-            "asset-valuation",
-            "NYC_Valuation",
-        ),
-        gf(
-            "asset",
-            "StockPortfolio",
-            "asset-has-valuation",
-            "asset-valuation",
-            "Stocks_Valuation",
-        ),
-        // Reconciliation
-        gf(
-            "instrument",
-            "Checking_Premium",
-            "reconciliation-for-instrument",
-            "reconciliation-case",
-            "Q4_Audit",
-        ),
-    ];
-    println!("    {} graph facts for millionaire persona", facts.len());
+        // ── Step 1: Build a wealthy user's graph ──
+        println!("  ── Step 1: Building wealthy user graph facts ──");
+        let facts = vec![
+            // User → instruments
+            gf(
+                "user",
+                "Millionaire",
+                "user-has-instrument",
+                "instrument",
+                "Checking_Premium",
+            ),
+            gf(
+                "user",
+                "Millionaire",
+                "user-has-instrument",
+                "instrument",
+                "Brokerage_Main",
+            ),
+            gf(
+                "user",
+                "Millionaire",
+                "user-has-instrument",
+                "instrument",
+                "Trust_Account",
+            ),
+            // User → goals
+            gf(
+                "user",
+                "Millionaire",
+                "subledger-holds-goal-funds",
+                "goal",
+                "Philanthropy_Fund",
+            ),
+            gf(
+                "user",
+                "Millionaire",
+                "subledger-holds-goal-funds",
+                "goal",
+                "Vacation_Home",
+            ),
+            gf(
+                "user",
+                "Millionaire",
+                "subledger-holds-goal-funds",
+                "goal",
+                "Education_Trust",
+            ),
+            // User → tax
+            gf(
+                "user",
+                "Millionaire",
+                "tax-party-has-exemption-certificate",
+                "tax-exemption-certificate",
+                "Charitable_Deduction",
+            ),
+            gf(
+                "user",
+                "Millionaire",
+                "tax-sinking-fund-backed-by-account",
+                "tax-sinking-fund",
+                "QuarterlyEst",
+            ),
+            // User → budget
+            gf(
+                "user",
+                "Millionaire",
+                "records-budget-estimation",
+                "budget-estimation",
+                "MonthlyBudget",
+            ),
+            // Assets
+            gf(
+                "asset",
+                "RealEstate_NYC",
+                "asset-has-valuation",
+                "asset-valuation",
+                "NYC_Valuation",
+            ),
+            gf(
+                "asset",
+                "StockPortfolio",
+                "asset-has-valuation",
+                "asset-valuation",
+                "Stocks_Valuation",
+            ),
+            // Reconciliation
+            gf(
+                "instrument",
+                "Checking_Premium",
+                "reconciliation-for-instrument",
+                "reconciliation-case",
+                "Q4_Audit",
+            ),
+        ];
+        println!("    {} graph facts for millionaire persona", facts.len());
 
-    // ── Step 2: Run real GNN ensemble ──
-    println!("  ── Step 2: Running 4-model GNN ensemble ──");
-    let device = <B as Backend>::Device::default();
-    let config = GraphBuildConfig {
-        node_feat_dim: hidden_dim,
-        add_reverse_edges: true,
-        add_self_loops: true, add_positional_encoding: true,
-    };
-    let start = std::time::Instant::now();
-    let graph = build_hetero_graph::<B>(&facts, &config, &device);
-    let node_types: Vec<String> = graph.node_types().iter().map(|s| s.to_string()).collect();
-    let edge_types: Vec<EdgeType> = graph.edge_types().iter().map(|e| (*e).clone()).collect();
+        // ── Step 2: Run real GNN ensemble ──
+        println!("  ── Step 2: Running 4-model GNN ensemble ──");
+        let device = <B as Backend>::Device::default();
+        let config = GraphBuildConfig {
+            node_feat_dim: hidden_dim,
+            add_reverse_edges: true,
+            add_self_loops: true,
+            add_positional_encoding: true,
+        };
+        let start = std::time::Instant::now();
+        let graph = build_hetero_graph::<B>(&facts, &config, &device);
+        let node_types: Vec<String> = graph.node_types().iter().map(|s| s.to_string()).collect();
+        let edge_types: Vec<EdgeType> = graph.edge_types().iter().map(|e| (*e).clone()).collect();
 
-    // Run all 4 models
-    let sage_emb = PlainEmbeddings::from_burn(
-        &GraphSageModelConfig {
-            in_dim: hidden_dim,
-            hidden_dim,
-            num_layers: 2,
-            dropout: 0.0,
+        // Run all 4 models
+        let sage_emb = PlainEmbeddings::from_burn(
+            &GraphSageModelConfig {
+                in_dim: hidden_dim,
+                hidden_dim,
+                num_layers: 2,
+                dropout: 0.0,
+            }
+            .init::<B>(&node_types, &edge_types, &device)
+            .forward(&graph),
+        );
+        let _rgcn_emb = PlainEmbeddings::from_burn(
+            &RgcnConfig {
+                in_dim: hidden_dim,
+                hidden_dim,
+                num_layers: 2,
+                num_bases: 4,
+                dropout: 0.0,
+            }
+            .init_model::<B>(&node_types, &edge_types, &device)
+            .forward(&graph),
+        );
+        let _gat_emb = PlainEmbeddings::from_burn(
+            &GatConfig {
+                in_dim: hidden_dim,
+                hidden_dim,
+                num_heads: 4,
+                num_layers: 2,
+                dropout: 0.0,
+            }
+            .init_model::<B>(&node_types, &edge_types, &device)
+            .forward(&graph),
+        );
+        let _gt_emb = PlainEmbeddings::from_burn(
+            &GraphTransformerConfig {
+                in_dim: hidden_dim,
+                hidden_dim,
+                num_heads: 4,
+                num_layers: 2,
+                ffn_ratio: 2,
+                dropout: 0.0,
+            }
+            .init_model::<B>(&node_types, &edge_types, &device)
+            .forward(&graph),
+        );
+        let gnn_time = start.elapsed();
+        println!(
+            "    All 4 models ran in {:.1}s ({} nodes, {} edges)",
+            gnn_time.as_secs_f64(),
+            graph.total_nodes(),
+            graph.total_edges()
+        );
+
+        // Get real embeddings for user
+        let user_emb = sage_emb
+            .data
+            .get("user")
+            .and_then(|v| v.first())
+            .cloned()
+            .unwrap_or_else(|| vec![0.0; hidden_dim]);
+        println!(
+            "    User embedding dim={}, first 5: {:?}",
+            user_emb.len(),
+            &user_emb[..5.min(user_emb.len())]
+        );
+
+        // ── Step 3: Train learnable scorer ──
+        println!("  ── Step 3: Training learnable scorer ──");
+        let scorer_config = ScorerConfig {
+            embedding_dim: hidden_dim,
+            hidden1: 64,
+            hidden2: 32,
+            lr: 0.003,
+            ..ScorerConfig::default()
+        };
+        let mut scorer = LearnableScorer::new(&scorer_config);
+
+        // Phase A: Distill from expert rules
+        let mut distill_ex = Vec::new();
+        let mut distill_lbl = Vec::new();
+        for &action in &FiduciaryActionType::all() {
+            for anomaly in [0.05, 0.3, 0.7] {
+                let ue: Vec<f32> = (0..hidden_dim)
+                    .map(|d| (d as f32 * 0.1 + anomaly).sin() * 0.5)
+                    .collect();
+                let te: Vec<f32> = (0..hidden_dim)
+                    .map(|d| (d as f32 * 0.13).sin() * 0.5)
+                    .collect();
+                distill_ex.push(ScorerExample {
+                    user_emb: ue,
+                    target_emb: te,
+                    action_type: action,
+                    anomaly_score: anomaly,
+                    embedding_affinity: 0.5,
+                    context: [0.3, 0.5, 0.4, 0.0, 0.0],
+                });
+                distill_lbl.push(ScorerLabel {
+                    axes: FiduciaryAxes {
+                        cost_reduction: 0.5,
+                        risk_reduction: 0.5,
+                        goal_alignment: 0.5,
+                        urgency: 0.5,
+                        conflict_freedom: 0.7,
+                        reversibility: 0.5,
+                    },
+                    should_recommend: anomaly < 0.6,
+                });
+            }
         }
-        .init::<B>(&node_types, &edge_types, &device)
-        .forward(&graph),
-    );
-    let _rgcn_emb = PlainEmbeddings::from_burn(
-        &RgcnConfig {
-            in_dim: hidden_dim,
-            hidden_dim,
-            num_layers: 2,
-            num_bases: 4,
-            dropout: 0.0,
+        scorer.distill(&distill_ex, &distill_lbl, 50);
+        println!(
+            "    Distilled from {} expert examples (50 epochs)",
+            distill_ex.len()
+        );
+
+        // Phase B: Simulate reward feedback — user accepts prudent, rejects reckless
+        println!("  ── Step 4: Simulating 50 reward cycles (user feedback) ──");
+        let mut reward_buffer = Vec::new();
+        let target_emb: Vec<f32> = sagely(&sage_emb, "goal");
+
+        // User ACCEPTS: fund_goal, tax planning, claim_exemption, adjust_budget
+        for &action in &[
+            FiduciaryActionType::ShouldFundGoal,
+            FiduciaryActionType::ShouldFundTaxSinking,
+            FiduciaryActionType::ShouldClaimExemption,
+            FiduciaryActionType::ShouldAdjustBudget,
+            FiduciaryActionType::ShouldReconcile,
+        ] {
+            for _ in 0..10 {
+                let reward = RewardSignal {
+                    action_type: action,
+                    accepted: true,
+                    helpfulness: Some(0.9),
+                    example: ScorerExample {
+                        user_emb: user_emb.clone(),
+                        target_emb: target_emb.clone(),
+                        action_type: action,
+                        anomaly_score: 0.05,
+                        embedding_affinity: 0.8,
+                        context: [0.0, 0.9, 0.1, 0.0, 0.0], // no debt, high savings, low risk
+                    },
+                    was_high_risk: false,
+                };
+                scorer.apply_reward(&reward);
+                reward_buffer.push(reward);
+            }
         }
-        .init_model::<B>(&node_types, &edge_types, &device)
-        .forward(&graph),
-    );
-    let _gat_emb = PlainEmbeddings::from_burn(
-        &GatConfig {
-            in_dim: hidden_dim,
-            hidden_dim,
-            num_heads: 4,
-            num_layers: 2,
-            dropout: 0.0,
+
+        // User REJECTS: reckless actions when wealthy (avoid without reason, refinance with no debt)
+        for &action in &[
+            FiduciaryActionType::ShouldRefinance,   // no debt to refinance!
+            FiduciaryActionType::ShouldPayDownLien, // no lien!
+            FiduciaryActionType::ShouldDispute,     // nothing to dispute!
+        ] {
+            for _ in 0..10 {
+                let reward = RewardSignal {
+                    action_type: action,
+                    accepted: false,
+                    helpfulness: Some(0.1),
+                    example: ScorerExample {
+                        user_emb: user_emb.clone(),
+                        target_emb: target_emb.clone(),
+                        action_type: action,
+                        anomaly_score: 0.05,
+                        embedding_affinity: 0.8,
+                        context: [0.0, 0.9, 0.1, 0.0, 0.0],
+                    },
+                    was_high_risk: false,
+                };
+                scorer.apply_reward(&reward);
+                reward_buffer.push(reward);
+            }
         }
-        .init_model::<B>(&node_types, &edge_types, &device)
-        .forward(&graph),
-    );
-    let _gt_emb = PlainEmbeddings::from_burn(
-        &GraphTransformerConfig {
-            in_dim: hidden_dim,
-            hidden_dim,
-            num_heads: 4,
-            num_layers: 2,
-            ffn_ratio: 2,
-            dropout: 0.0,
-        }
-        .init_model::<B>(&node_types, &edge_types, &device)
-        .forward(&graph),
-    );
-    let gnn_time = start.elapsed();
-    println!(
-        "    All 4 models ran in {:.1}s ({} nodes, {} edges)",
-        gnn_time.as_secs_f64(),
-        graph.total_nodes(),
-        graph.total_edges()
-    );
+        println!(
+            "    Applied {} rewards (50 accepted + 30 rejected)",
+            reward_buffer.len()
+        );
 
-    // Get real embeddings for user
-    let user_emb = sage_emb
-        .data
-        .get("user")
-        .and_then(|v| v.first())
-        .cloned()
-        .unwrap_or_else(|| vec![0.0; hidden_dim]);
-    println!(
-        "    User embedding dim={}, first 5: {:?}",
-        user_emb.len(),
-        &user_emb[..5.min(user_emb.len())]
-    );
-
-    // ── Step 3: Train learnable scorer ──
-    println!("  ── Step 3: Training learnable scorer ──");
-    let scorer_config = ScorerConfig {
-        embedding_dim: hidden_dim,
-        hidden1: 64,
-        hidden2: 32,
-        lr: 0.003,
-        ..ScorerConfig::default()
-    };
-    let mut scorer = LearnableScorer::new(&scorer_config);
-
-    // Phase A: Distill from expert rules
-    let mut distill_ex = Vec::new();
-    let mut distill_lbl = Vec::new();
-    for &action in &FiduciaryActionType::all() {
-        for anomaly in [0.05, 0.3, 0.7] {
-            let ue: Vec<f32> = (0..hidden_dim)
-                .map(|d| (d as f32 * 0.1 + anomaly).sin() * 0.5)
-                .collect();
-            let te: Vec<f32> = (0..hidden_dim)
-                .map(|d| (d as f32 * 0.13).sin() * 0.5)
-                .collect();
-            distill_ex.push(ScorerExample {
-                user_emb: ue,
-                target_emb: te,
-                action_type: action,
-                anomaly_score: anomaly,
-                embedding_affinity: 0.5,
-                context: [0.3, 0.5, 0.4, 0.0, 0.0],
-            });
-            distill_lbl.push(ScorerLabel {
-                axes: FiduciaryAxes {
-                    cost_reduction: 0.5,
-                    risk_reduction: 0.5,
-                    goal_alignment: 0.5,
-                    urgency: 0.5,
-                    conflict_freedom: 0.7,
-                    reversibility: 0.5,
-                },
-                should_recommend: anomaly < 0.6,
-            });
-        }
-    }
-    scorer.distill(&distill_ex, &distill_lbl, 50);
-    println!(
-        "    Distilled from {} expert examples (50 epochs)",
-        distill_ex.len()
-    );
-
-    // Phase B: Simulate reward feedback — user accepts prudent, rejects reckless
-    println!("  ── Step 4: Simulating 50 reward cycles (user feedback) ──");
-    let mut reward_buffer = Vec::new();
-    let target_emb: Vec<f32> = sagely(&sage_emb, "goal");
-
-    // User ACCEPTS: fund_goal, tax planning, claim_exemption, adjust_budget
-    for &action in &[
-        FiduciaryActionType::ShouldFundGoal,
-        FiduciaryActionType::ShouldFundTaxSinking,
-        FiduciaryActionType::ShouldClaimExemption,
-        FiduciaryActionType::ShouldAdjustBudget,
-        FiduciaryActionType::ShouldReconcile,
-    ] {
-        for _ in 0..10 {
+        // Phase C: Anomaly-aware investigation signals (REDUCED — gate handles most of it)
+        // Before gate: needed 100 signals. Now only 20 needed (5× reduction).
+        for i in 0..10 {
+            let anomaly = 0.6 + (i as f32 * 0.04);
             let reward = RewardSignal {
-                action_type: action,
+                action_type: FiduciaryActionType::ShouldInvestigate,
                 accepted: true,
-                helpfulness: Some(0.9),
+                helpfulness: Some(0.95),
                 example: ScorerExample {
                     user_emb: user_emb.clone(),
                     target_emb: target_emb.clone(),
-                    action_type: action,
-                    anomaly_score: 0.05,
-                    embedding_affinity: 0.8,
-                    context: [0.0, 0.9, 0.1, 0.0, 0.0], // no debt, high savings, low risk
+                    action_type: FiduciaryActionType::ShouldInvestigate,
+                    anomaly_score: anomaly,
+                    embedding_affinity: 0.3,
+                    context: [0.0, 0.9, anomaly, 0.0, 0.0],
                 },
-                was_high_risk: false,
+                was_high_risk: true, // high anomaly = genuinely risky
             };
             scorer.apply_reward(&reward);
             reward_buffer.push(reward);
         }
-    }
-
-    // User REJECTS: reckless actions when wealthy (avoid without reason, refinance with no debt)
-    for &action in &[
-        FiduciaryActionType::ShouldRefinance,   // no debt to refinance!
-        FiduciaryActionType::ShouldPayDownLien, // no lien!
-        FiduciaryActionType::ShouldDispute,     // nothing to dispute!
-    ] {
-        for _ in 0..10 {
+        for i in 0..10 {
+            let anomaly = 0.02 + (i as f32 * 0.02);
             let reward = RewardSignal {
-                action_type: action,
+                action_type: FiduciaryActionType::ShouldInvestigate,
                 accepted: false,
                 helpfulness: Some(0.1),
                 example: ScorerExample {
                     user_emb: user_emb.clone(),
                     target_emb: target_emb.clone(),
-                    action_type: action,
-                    anomaly_score: 0.05,
+                    action_type: FiduciaryActionType::ShouldInvestigate,
+                    anomaly_score: anomaly,
                     embedding_affinity: 0.8,
-                    context: [0.0, 0.9, 0.1, 0.0, 0.0],
+                    context: [0.0, 0.9, anomaly, 0.0, 0.0],
                 },
-                was_high_risk: false,
+                was_high_risk: false, // low anomaly = not actually risky
             };
             scorer.apply_reward(&reward);
             reward_buffer.push(reward);
         }
-    }
-    println!(
-        "    Applied {} rewards (50 accepted + 30 rejected)",
-        reward_buffer.len()
-    );
+        println!("    Added 20 anomaly-aware investigation signals (was 100 before gate)");
 
-    // Phase C: Anomaly-aware investigation signals (REDUCED — gate handles most of it)
-    // Before gate: needed 100 signals. Now only 20 needed (5× reduction).
-    for i in 0..10 {
-        let anomaly = 0.6 + (i as f32 * 0.04);
-        let reward = RewardSignal {
-            action_type: FiduciaryActionType::ShouldInvestigate,
-            accepted: true,
-            helpfulness: Some(0.95),
-            example: ScorerExample {
-                user_emb: user_emb.clone(),
-                target_emb: target_emb.clone(),
-                action_type: FiduciaryActionType::ShouldInvestigate,
-                anomaly_score: anomaly,
-                embedding_affinity: 0.3,
-                context: [0.0, 0.9, anomaly, 0.0, 0.0],
+        // Phase D: Recursive self-improvement (more epochs for anomaly sensitivity)
+        let report = scorer.recursive_improve(&reward_buffer, 20);
+        println!(
+            "    Recursive improve: accuracy {:.0}% → {:.0}%, conflicts learned: {}",
+            report.initial_accuracy * 100.0,
+            report.final_accuracy * 100.0,
+            report.conflict_patterns_learned
+        );
+
+        // ── Step 5: Adversarial scoring with trained scorer ──
+        println!("\n  ── Step 5: Adversarial scoring with trained scorer ──\n");
+
+        // Scenario A: Millionaire — scorer should recommend fund_goal, NOT refinance
+        let score_fund = scorer.forward(&ScorerExample {
+            user_emb: user_emb.clone(),
+            target_emb: target_emb.clone(),
+            action_type: FiduciaryActionType::ShouldFundGoal,
+            anomaly_score: 0.05,
+            embedding_affinity: 0.8,
+            context: [0.0, 0.9, 0.1, 0.0, 0.0],
+        });
+
+        let score_refinance = scorer.forward(&ScorerExample {
+            user_emb: user_emb.clone(),
+            target_emb: target_emb.clone(),
+            action_type: FiduciaryActionType::ShouldRefinance,
+            anomaly_score: 0.05,
+            embedding_affinity: 0.8,
+            context: [0.0, 0.9, 0.1, 0.0, 0.0],
+        });
+
+        let score_tax = scorer.forward(&ScorerExample {
+            user_emb: user_emb.clone(),
+            target_emb: target_emb.clone(),
+            action_type: FiduciaryActionType::ShouldFundTaxSinking,
+            anomaly_score: 0.05,
+            embedding_affinity: 0.8,
+            context: [0.0, 0.9, 0.1, 0.0, 0.0],
+        });
+
+        let score_dispute = scorer.forward(&ScorerExample {
+            user_emb: user_emb.clone(),
+            target_emb: target_emb.clone(),
+            action_type: FiduciaryActionType::ShouldDispute,
+            anomaly_score: 0.05,
+            embedding_affinity: 0.8,
+            context: [0.0, 0.9, 0.1, 0.0, 0.0],
+        });
+
+        println!("  Scenario: Millionaire with no debt (using real GNN embeddings)");
+        println!("  ┌─────────────────────────┬──────────────┬─────────────────────┐");
+        println!("  │ Action                  │ Recommend?   │ Logit               │");
+        println!("  ├─────────────────────────┼──────────────┼─────────────────────┤");
+        println!(
+            "  │ should_fund_goal        │ {:>12} │ {:>19.4} │",
+            if score_fund.1 > 0.0 {
+                "✅ YES"
+            } else {
+                "❌ NO"
             },
-            was_high_risk: true, // high anomaly = genuinely risky
-        };
-        scorer.apply_reward(&reward);
-        reward_buffer.push(reward);
-    }
-    for i in 0..10 {
-        let anomaly = 0.02 + (i as f32 * 0.02);
-        let reward = RewardSignal {
-            action_type: FiduciaryActionType::ShouldInvestigate,
-            accepted: false,
-            helpfulness: Some(0.1),
-            example: ScorerExample {
-                user_emb: user_emb.clone(),
-                target_emb: target_emb.clone(),
-                action_type: FiduciaryActionType::ShouldInvestigate,
-                anomaly_score: anomaly,
-                embedding_affinity: 0.8,
-                context: [0.0, 0.9, anomaly, 0.0, 0.0],
+            score_fund.1
+        );
+        println!(
+            "  │ should_fund_tax_sinking │ {:>12} │ {:>19.4} │",
+            if score_tax.1 > 0.0 {
+                "✅ YES"
+            } else {
+                "❌ NO"
             },
-            was_high_risk: false, // low anomaly = not actually risky
-        };
-        scorer.apply_reward(&reward);
-        reward_buffer.push(reward);
-    }
-    println!("    Added 20 anomaly-aware investigation signals (was 100 before gate)");
+            score_tax.1
+        );
+        println!(
+            "  │ should_refinance        │ {:>12} │ {:>19.4} │",
+            if score_refinance.1 > 0.0 {
+                "⚠️ YES"
+            } else {
+                "✅ NO"
+            },
+            score_refinance.1
+        );
+        println!(
+            "  │ should_dispute          │ {:>12} │ {:>19.4} │",
+            if score_dispute.1 > 0.0 {
+                "⚠️ YES"
+            } else {
+                "✅ NO"
+            },
+            score_dispute.1
+        );
+        println!("  └─────────────────────────┴──────────────┴─────────────────────┘");
 
-    // Phase D: Recursive self-improvement (more epochs for anomaly sensitivity)
-    let report = scorer.recursive_improve(&reward_buffer, 20);
-    println!(
-        "    Recursive improve: accuracy {:.0}% → {:.0}%, conflicts learned: {}",
-        report.initial_accuracy * 100.0,
-        report.final_accuracy * 100.0,
-        report.conflict_patterns_learned
-    );
+        // ASSERTIONS
+        // Fund goal should score higher than refinance (no debt to refinance!)
+        println!("\n  Assertions:");
+        println!(
+            "    fund_goal logit ({:.4}) > refinance logit ({:.4}): {}",
+            score_fund.1,
+            score_refinance.1,
+            if score_fund.1 > score_refinance.1 {
+                "✅"
+            } else {
+                "❌"
+            }
+        );
+        assert!(
+            score_fund.1 > score_refinance.1,
+            "❌ SCORER MISALIGNED: fund_goal ({:.4}) should beat refinance ({:.4}) for debt-free user",
+            score_fund.1,
+            score_refinance.1
+        );
 
-    // ── Step 5: Adversarial scoring with trained scorer ──
-    println!("\n  ── Step 5: Adversarial scoring with trained scorer ──\n");
+        // Tax should score higher than dispute (nothing to dispute!)
+        println!(
+            "    tax_sinking logit ({:.4}) > dispute logit ({:.4}): {}",
+            score_tax.1,
+            score_dispute.1,
+            if score_tax.1 > score_dispute.1 {
+                "✅"
+            } else {
+                "❌"
+            }
+        );
+        assert!(
+            score_tax.1 > score_dispute.1,
+            "❌ SCORER MISALIGNED: tax_sinking ({:.4}) should beat dispute ({:.4}) for clean user",
+            score_tax.1,
+            score_dispute.1
+        );
 
-    // Scenario A: Millionaire — scorer should recommend fund_goal, NOT refinance
-    let score_fund = scorer.forward(&ScorerExample {
-        user_emb: user_emb.clone(),
-        target_emb: target_emb.clone(),
-        action_type: FiduciaryActionType::ShouldFundGoal,
-        anomaly_score: 0.05,
-        embedding_affinity: 0.8,
-        context: [0.0, 0.9, 0.1, 0.0, 0.0],
-    });
+        // Scenario B: Same user but HIGH anomaly — should_investigate should activate
+        let score_investigate_high = scorer.forward(&ScorerExample {
+            user_emb: user_emb.clone(),
+            target_emb: target_emb.clone(),
+            action_type: FiduciaryActionType::ShouldInvestigate,
+            anomaly_score: 0.9,
+            embedding_affinity: 0.3,
+            context: [0.0, 0.9, 0.8, 0.0, 0.0], // high risk despite high savings
+        });
+        let score_investigate_low = scorer.forward(&ScorerExample {
+            user_emb: user_emb.clone(),
+            target_emb: target_emb.clone(),
+            action_type: FiduciaryActionType::ShouldInvestigate,
+            anomaly_score: 0.05,
+            embedding_affinity: 0.8,
+            context: [0.0, 0.9, 0.1, 0.0, 0.0], // low risk
+        });
 
-    let score_refinance = scorer.forward(&ScorerExample {
-        user_emb: user_emb.clone(),
-        target_emb: target_emb.clone(),
-        action_type: FiduciaryActionType::ShouldRefinance,
-        anomaly_score: 0.05,
-        embedding_affinity: 0.8,
-        context: [0.0, 0.9, 0.1, 0.0, 0.0],
-    });
+        println!("\n  Scenario B: Investigation sensitivity to anomaly");
+        println!(
+            "    High anomaly investigate logit: {:.4}",
+            score_investigate_high.1
+        );
+        println!(
+            "    Low anomaly investigate logit:  {:.4}",
+            score_investigate_low.1
+        );
+        println!(
+            "    Difference: {:.4} (high should be > low)",
+            score_investigate_high.1 - score_investigate_low.1
+        );
 
-    let score_tax = scorer.forward(&ScorerExample {
-        user_emb: user_emb.clone(),
-        target_emb: target_emb.clone(),
-        action_type: FiduciaryActionType::ShouldFundTaxSinking,
-        anomaly_score: 0.05,
-        embedding_affinity: 0.8,
-        context: [0.0, 0.9, 0.1, 0.0, 0.0],
-    });
-
-    let score_dispute = scorer.forward(&ScorerExample {
-        user_emb: user_emb.clone(),
-        target_emb: target_emb.clone(),
-        action_type: FiduciaryActionType::ShouldDispute,
-        anomaly_score: 0.05,
-        embedding_affinity: 0.8,
-        context: [0.0, 0.9, 0.1, 0.0, 0.0],
-    });
-
-    println!("  Scenario: Millionaire with no debt (using real GNN embeddings)");
-    println!("  ┌─────────────────────────┬──────────────┬─────────────────────┐");
-    println!("  │ Action                  │ Recommend?   │ Logit               │");
-    println!("  ├─────────────────────────┼──────────────┼─────────────────────┤");
-    println!(
-        "  │ should_fund_goal        │ {:>12} │ {:>19.4} │",
-        if score_fund.1 > 0.0 {
-            "✅ YES"
-        } else {
-            "❌ NO"
-        },
-        score_fund.1
-    );
-    println!(
-        "  │ should_fund_tax_sinking │ {:>12} │ {:>19.4} │",
-        if score_tax.1 > 0.0 {
-            "✅ YES"
-        } else {
-            "❌ NO"
-        },
-        score_tax.1
-    );
-    println!(
-        "  │ should_refinance        │ {:>12} │ {:>19.4} │",
-        if score_refinance.1 > 0.0 {
-            "⚠️ YES"
-        } else {
-            "✅ NO"
-        },
-        score_refinance.1
-    );
-    println!(
-        "  │ should_dispute          │ {:>12} │ {:>19.4} │",
-        if score_dispute.1 > 0.0 {
-            "⚠️ YES"
-        } else {
-            "✅ NO"
-        },
-        score_dispute.1
-    );
-    println!("  └─────────────────────────┴──────────────┴─────────────────────┘");
-
-    // ASSERTIONS
-    // Fund goal should score higher than refinance (no debt to refinance!)
-    println!("\n  Assertions:");
-    println!(
-        "    fund_goal logit ({:.4}) > refinance logit ({:.4}): {}",
-        score_fund.1,
-        score_refinance.1,
-        if score_fund.1 > score_refinance.1 {
-            "✅"
-        } else {
-            "❌"
-        }
-    );
-    assert!(
-        score_fund.1 > score_refinance.1,
-        "❌ SCORER MISALIGNED: fund_goal ({:.4}) should beat refinance ({:.4}) for debt-free user",
-        score_fund.1,
-        score_refinance.1
-    );
-
-    // Tax should score higher than dispute (nothing to dispute!)
-    println!(
-        "    tax_sinking logit ({:.4}) > dispute logit ({:.4}): {}",
-        score_tax.1,
-        score_dispute.1,
-        if score_tax.1 > score_dispute.1 {
-            "✅"
-        } else {
-            "❌"
-        }
-    );
-    assert!(
-        score_tax.1 > score_dispute.1,
-        "❌ SCORER MISALIGNED: tax_sinking ({:.4}) should beat dispute ({:.4}) for clean user",
-        score_tax.1,
-        score_dispute.1
-    );
-
-    // Scenario B: Same user but HIGH anomaly — should_investigate should activate
-    let score_investigate_high = scorer.forward(&ScorerExample {
-        user_emb: user_emb.clone(),
-        target_emb: target_emb.clone(),
-        action_type: FiduciaryActionType::ShouldInvestigate,
-        anomaly_score: 0.9,
-        embedding_affinity: 0.3,
-        context: [0.0, 0.9, 0.8, 0.0, 0.0], // high risk despite high savings
-    });
-    let score_investigate_low = scorer.forward(&ScorerExample {
-        user_emb: user_emb.clone(),
-        target_emb: target_emb.clone(),
-        action_type: FiduciaryActionType::ShouldInvestigate,
-        anomaly_score: 0.05,
-        embedding_affinity: 0.8,
-        context: [0.0, 0.9, 0.1, 0.0, 0.0], // low risk
-    });
-
-    println!("\n  Scenario B: Investigation sensitivity to anomaly");
-    println!(
-        "    High anomaly investigate logit: {:.4}",
-        score_investigate_high.1
-    );
-    println!(
-        "    Low anomaly investigate logit:  {:.4}",
-        score_investigate_low.1
-    );
-    println!(
-        "    Difference: {:.4} (high should be > low)",
-        score_investigate_high.1 - score_investigate_low.1
-    );
-
-    // Scorer should give higher investigate score when anomaly is high
-    assert!(
-        score_investigate_high.1 > score_investigate_low.1,
-        "❌ SCORER MISALIGNED: investigate should score higher with high anomaly ({:.4}) \
+        // Scorer should give higher investigate score when anomaly is high
+        assert!(
+            score_investigate_high.1 > score_investigate_low.1,
+            "❌ SCORER MISALIGNED: investigate should score higher with high anomaly ({:.4}) \
          than low anomaly ({:.4}). Wealth doesn't exempt from investigation.",
-        score_investigate_high.1,
-        score_investigate_low.1
-    );
+            score_investigate_high.1,
+            score_investigate_low.1
+        );
 
-    println!("\n  ╔══════════════════════════════════════════════╗");
-    println!("  ║  ✅ FULL PIPELINE ADVERSARIAL TEST PASSED    ║");
-    println!("  ║  • 4 GNN models ran on real HeteroGraph      ║");
-    println!("  ║  • Scorer trained + improved recursively      ║");
-    println!("  ║  • fund_goal > refinance (no-debt user)      ║");
-    println!("  ║  • tax > dispute (clean user)                ║");
-    println!("  ║  • investigate(high anomaly) > investigate   ║");
-    println!("  ║    (low anomaly) — regardless of wealth      ║");
-    println!("  ╚══════════════════════════════════════════════╝");
+        println!("\n  ╔══════════════════════════════════════════════╗");
+        println!("  ║  ✅ FULL PIPELINE ADVERSARIAL TEST PASSED    ║");
+        println!("  ║  • 4 GNN models ran on real HeteroGraph      ║");
+        println!("  ║  • Scorer trained + improved recursively      ║");
+        println!("  ║  • fund_goal > refinance (no-debt user)      ║");
+        println!("  ║  • tax > dispute (clean user)                ║");
+        println!("  ║  • investigate(high anomaly) > investigate   ║");
+        println!("  ║    (low anomaly) — regardless of wealth      ║");
+        println!("  ╚══════════════════════════════════════════════╝");
+    });
+
+    if let Err(err) = run {
+        let panic_msg = if let Some(s) = err.downcast_ref::<String>() {
+            s.as_str()
+        } else if let Some(s) = err.downcast_ref::<&str>() {
+            s
+        } else {
+            ""
+        };
+
+        if panic_msg.contains("No possible adapter available for backend")
+            || panic_msg.contains("requested_backends: Backends(VULKAN)")
+            || panic_msg.contains("cubecl-wgpu")
+        {
+            eprintln!(
+                "Skipping test_full_pipeline_adversarial_with_real_ensemble_and_scorer: \
+                 no compatible WGPU/Vulkan adapter in this environment"
+            );
+            return;
+        }
+
+        std::panic::resume_unwind(err);
+    }
 }
 
 /// Helper: grab the first embedding from SAGE for a given node type.

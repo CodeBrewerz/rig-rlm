@@ -656,13 +656,22 @@ fn test_large_graph_pc_differentiation() {
 
     // Count total entities
     let total_entities: usize = graph.node_counts.values().sum();
-    println!("\n  ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════════╗");
-    println!("  ║  LARGE-SCALE PC DIFFERENTIATION TEST — {} total entities                                                 ║", total_entities);
-    println!("  ╠══════════════════════════════════════════════════════════════════════════════════════════════════════════════╣");
+    println!(
+        "\n  ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════════╗"
+    );
+    println!(
+        "  ║  LARGE-SCALE PC DIFFERENTIATION TEST — {} total entities                                                 ║",
+        total_entities
+    );
+    println!(
+        "  ╠══════════════════════════════════════════════════════════════════════════════════════════════════════════════╣"
+    );
     for (nt, count) in &graph.node_counts {
         println!("  ║    {:18}: {:3} entities", nt, count);
     }
-    println!("  ╠══════════════════════════════════════════════════════════════════════════════════════════════════════════════╣");
+    println!(
+        "  ╠══════════════════════════════════════════════════════════════════════════════════════════════════════════════╣"
+    );
 
     // Test users: compare high-risk (Dave, id=0) vs safe (Beth, id=6) vs very-safe (Emma, id=8)
     let test_users = vec![
@@ -678,8 +687,12 @@ fn test_large_graph_pc_differentiation() {
     let mut pc_state = PcState::new();
     let mut user_risks: Vec<(String, f64, usize)> = Vec::new();
 
-    println!("  ║  User                │ Avg P(risk) │ Actions │ Top 3 Actions (with P(risk))                                   ║");
-    println!("  ╠══════════════════════════════════════════════════════════════════════════════════════════════════════════════╣");
+    println!(
+        "  ║  User                │ Avg P(risk) │ Actions │ Top 3 Actions (with P(risk))                                   ║"
+    );
+    println!(
+        "  ╠══════════════════════════════════════════════════════════════════════════════════════════════════════════════╣"
+    );
 
     for (user_id, label) in &test_users {
         let user_emb = graph.embeddings.get("user").unwrap()[*user_id].clone();
@@ -739,9 +752,14 @@ fn test_large_graph_pc_differentiation() {
         user_risks.push((label.to_string(), avg_risk, resp.recommendations.len()));
     }
 
-    println!("  ╠══════════════════════════════════════════════════════════════════════════════════════════════════════════════╣");
-    println!("  ║  PcState: {} total EM epochs, {} ll entries                                                                ║",
-        pc_state.total_epochs, pc_state.ll_history.len());
+    println!(
+        "  ╠══════════════════════════════════════════════════════════════════════════════════════════════════════════════╣"
+    );
+    println!(
+        "  ║  PcState: {} total EM epochs, {} ll entries                                                                ║",
+        pc_state.total_epochs,
+        pc_state.ll_history.len()
+    );
 
     // Key comparison: high-risk vs safe
     let dave_risk = user_risks
@@ -760,10 +778,21 @@ fn test_large_graph_pc_differentiation() {
         .map(|(_, r, _)| *r)
         .unwrap_or(0.0);
 
-    println!("  ║  Risk comparison:                                                                                          ║");
-    println!("  ║    Dave (high-risk): {:.6}                                                                                  ║", dave_risk);
-    println!("  ║    Beth (safe):      {:.6}                                                                                  ║", beth_risk);
-    println!("  ║    Emma (very-safe): {:.6}                                                                                  ║", emma_risk);
+    println!(
+        "  ║  Risk comparison:                                                                                          ║"
+    );
+    println!(
+        "  ║    Dave (high-risk): {:.6}                                                                                  ║",
+        dave_risk
+    );
+    println!(
+        "  ║    Beth (safe):      {:.6}                                                                                  ║",
+        beth_risk
+    );
+    println!(
+        "  ║    Emma (very-safe): {:.6}                                                                                  ║",
+        emma_risk
+    );
 
     let risk_spread = user_risks
         .iter()
@@ -776,20 +805,34 @@ fn test_large_graph_pc_differentiation() {
     let spread = risk_max - risk_spread;
 
     if spread > 0.01 {
-        println!("  ║  ✅ PC risk varies across users (spread = {:.6})                                                         ║", spread);
+        println!(
+            "  ║  ✅ PC risk varies across users (spread = {:.6})                                                         ║",
+            spread
+        );
     } else {
-        println!("  ║  ⚠️  PC risk is still uniform (spread = {:.6})                                                          ║", spread);
+        println!(
+            "  ║  ⚠️  PC risk is still uniform (spread = {:.6})                                                          ║",
+            spread
+        );
     }
 
     // Verify circuit accumulated
     assert!(pc_state.is_trained());
-    println!("  ║  ✅ PC circuit trained and persisted across {} users                                                        ║", test_users.len());
+    println!(
+        "  ║  ✅ PC circuit trained and persisted across {} users                                                        ║",
+        test_users.len()
+    );
     assert!(
         total_entities >= 100,
         "Expected 100+ entities, got {}",
         total_entities
     );
-    println!("  ║  ✅ {} total entities in graph                                                                               ║", total_entities);
+    println!(
+        "  ║  ✅ {} total entities in graph                                                                               ║",
+        total_entities
+    );
 
-    println!("  ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════╝");
+    println!(
+        "  ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════╝"
+    );
 }

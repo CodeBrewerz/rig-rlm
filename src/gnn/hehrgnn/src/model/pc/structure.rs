@@ -33,8 +33,12 @@ pub fn naive(num_vars: usize, num_categories: usize) -> CircuitBuilder {
 /// `num_categories`: number of categories per variable.
 /// `num_latents`: number of latent components (mixture size at each tree node).
 pub fn hclt(data: &[Vec<usize>], num_categories: usize, num_latents: usize) -> CircuitBuilder {
-    let num_vars = data[0].len();
-    let num_samples = data.len();
+    let num_categories = num_categories.max(1);
+    let num_latents = num_latents.max(1);
+    let Some(first) = data.first() else {
+        return naive(1, num_categories);
+    };
+    let num_vars = first.len();
 
     if num_vars <= 1 {
         return naive(num_vars, num_categories);
@@ -65,6 +69,7 @@ pub fn hclt(data: &[Vec<usize>], num_categories: usize, num_latents: usize) -> C
 
 /// Compute pairwise mutual information matrix.
 fn mutual_information(data: &[Vec<usize>], num_cats: usize) -> Vec<Vec<f64>> {
+    let num_cats = num_cats.max(1);
     let n_vars = data[0].len();
     let n = data.len() as f64;
     let mut mi = vec![vec![0.0; n_vars]; n_vars];
@@ -112,7 +117,7 @@ fn maximum_spanning_tree(mi: &[Vec<f64>], n: usize) -> Vec<(usize, usize, f64)> 
             edges.push((i, j, mi[i][j]));
         }
     }
-    edges.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
+    edges.sort_by(|a, b| b.2.total_cmp(&a.2));
 
     // Union-Find
     let mut parent: Vec<usize> = (0..n).collect();
@@ -208,6 +213,7 @@ fn build_hclt_recursive(
 
 /// Compute empirical distribution from data for a variable.
 fn empirical_distribution(data: &[Vec<usize>], var: usize, num_cats: usize) -> Distribution {
+    let num_cats = num_cats.max(1);
     let mut counts = vec![0.0f64; num_cats];
     for sample in data {
         let v = sample[var].min(num_cats - 1);

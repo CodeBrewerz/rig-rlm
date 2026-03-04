@@ -6,7 +6,7 @@
 use burn::backend::NdArray;
 use burn::prelude::*;
 
-use hehrgnn::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
+use hehrgnn::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
 use hehrgnn::data::hetero_graph::EdgeType;
 use hehrgnn::model::backbone::NodeEmbeddings;
 use hehrgnn::model::gat::GatConfig;
@@ -158,7 +158,8 @@ fn build_test_graph() -> hehrgnn::data::hetero_graph::HeteroGraph<B> {
         &GraphBuildConfig {
             node_feat_dim: 16,
             add_reverse_edges: true,
-            add_self_loops: true, add_positional_encoding: true,
+            add_self_loops: true,
+            add_positional_encoding: true,
         },
         &device,
     )

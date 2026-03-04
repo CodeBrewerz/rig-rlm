@@ -70,7 +70,13 @@ mod live_llm {
     async fn live_single_task_with_trinity() {
         let mut ctx = live_context(10);
 
-        let program = agent_task_full("What is 2 + 2? Reply with just the number.", None, None, None, vec![]);
+        let program = agent_task_full(
+            "What is 2 + 2? Reply with just the number.",
+            None,
+            None,
+            None,
+            vec![],
+        );
         let result = ctx.run(program).await;
         match &result {
             Ok(answer) => {

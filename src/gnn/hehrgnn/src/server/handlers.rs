@@ -7,13 +7,168 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use super::state::{AppState, PlainEmbeddings};
 use crate::eval::probing::ActivationProfile;
+
+const MIN_SCORER_SAMPLES_FOR_GATING: usize = 25;
+
+fn anomaly_score_ensemble(state: &AppState, target_type: &str, target_id: usize) -> f32 {
+    let mut vals = Vec::new();
+    for model in &state.model_names {
+        if let Some(scores) = state.precomputed.get(model, target_type) {
+            let v = scores.normalized(target_id);
+            if v.is_finite() {
+                vals.push(v.clamp(0.0, 1.0));
+            }
+        }
+    }
+    if vals.is_empty() {
+        return 0.0;
+    }
+    vals.sort_by(|a, b| a.total_cmp(b));
+    let mid = vals.len() / 2;
+    if vals.len() % 2 == 0 {
+        ((vals[mid - 1] + vals[mid]) * 0.5).clamp(0.0, 1.0)
+    } else {
+        vals[mid].clamp(0.0, 1.0)
+    }
+}
+
+fn derived_scorer_context(
+    state: &AppState,
+    user_type: &str,
+    user_id: usize,
+    target_type: &str,
+    target_id: usize,
+) -> [f32; 5] {
+    let mut degree = 0usize;
+    let mut debt_hits = 0usize;
+    let mut goal_links = 0usize;
+    let mut goal_funding_links = 0usize;
+    let mut target_tax = false;
+    let mut target_recurring = false;
+    let mut user_tax = false;
+    let mut user_recurring = false;
+
+    let target_type_l = target_type.to_ascii_lowercase();
+    let target_is_goal = target_type_l.contains("goal");
+    if target_type_l.contains("tax") {
+        target_tax = true;
+    }
+    if target_type_l.contains("recurring") || target_type_l.contains("subscription") {
+        target_recurring = true;
+    }
+
+    for ((src_t, rel, dst_t), edges) in &state.graph_edges.edges {
+        let rel_l = rel.to_ascii_lowercase();
+        let src_l = src_t.to_ascii_lowercase();
+        let dst_l = dst_t.to_ascii_lowercase();
+
+        for &(src, dst) in edges {
+            let touches_target = (src_t == target_type && src == target_id)
+                || (dst_t == target_type && dst == target_id);
+            if touches_target {
+                degree += 1;
+
+                let debt_rel = rel_l.contains("debt")
+                    || rel_l.contains("obligation")
+                    || rel_l.contains("lien")
+                    || rel_l.contains("loan");
+                let debt_type = src_l.contains("debt")
+                    || dst_l.contains("debt")
+                    || src_l.contains("obligation")
+                    || dst_l.contains("obligation")
+                    || src_l.contains("loan")
+                    || dst_l.contains("loan")
+                    || src_l.contains("lien")
+                    || dst_l.contains("lien");
+                if debt_rel || debt_type {
+                    debt_hits += 1;
+                }
+
+                if target_is_goal
+                    || rel_l.contains("goal")
+                    || src_l.contains("goal")
+                    || dst_l.contains("goal")
+                {
+                    goal_links += 1;
+                    if rel_l.contains("fund")
+                        || rel_l.contains("contribution")
+                        || rel_l.contains("allocation")
+                        || rel_l.contains("sinking")
+                    {
+                        goal_funding_links += 1;
+                    }
+                }
+
+                if rel_l.contains("tax") || src_l.contains("tax") || dst_l.contains("tax") {
+                    target_tax = true;
+                }
+                if rel_l.contains("recurring")
+                    || src_l.contains("recurring")
+                    || dst_l.contains("recurring")
+                    || rel_l.contains("subscription")
+                    || src_l.contains("subscription")
+                    || dst_l.contains("subscription")
+                {
+                    target_recurring = true;
+                }
+            }
+
+            let touches_user =
+                (src_t == user_type && src == user_id) || (dst_t == user_type && dst == user_id);
+            if touches_user {
+                if rel_l.contains("tax") || src_l.contains("tax") || dst_l.contains("tax") {
+                    user_tax = true;
+                }
+                if rel_l.contains("recurring")
+                    || src_l.contains("recurring")
+                    || dst_l.contains("recurring")
+                    || rel_l.contains("subscription")
+                    || src_l.contains("subscription")
+                    || dst_l.contains("subscription")
+                {
+                    user_recurring = true;
+                }
+            }
+        }
+    }
+
+    let degree_ratio = (degree as f32 / 20.0).clamp(0.0, 1.0);
+    let debt_ratio = if degree > 0 {
+        (debt_hits as f32 / degree as f32).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let goal_progress = if goal_links > 0 {
+        (goal_funding_links as f32 / goal_links as f32).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let has_tax = if target_tax || user_tax { 1.0 } else { 0.0 };
+    let has_recurring = if target_recurring || user_recurring {
+        1.0
+    } else {
+        0.0
+    };
+
+    [
+        degree_ratio,
+        debt_ratio,
+        goal_progress,
+        has_tax,
+        has_recurring,
+    ]
+}
+
+fn sigmoid_f32(x: f32) -> f32 {
+    1.0 / (1.0 + (-x.clamp(-20.0, 20.0)).exp())
+}
 
 // ===========================================================================
 // Common explanation types — used by ALL prediction endpoints
@@ -95,20 +250,24 @@ pub async fn get_embedding(
     Json(req): Json<EmbeddingRequest>,
 ) -> Result<Json<EmbeddingResponse>, (StatusCode, String)> {
     let emb_guard = state.embeddings.read().unwrap();
-    let nodes = emb_guard
-        .data
-        .get(&req.node_type)
-        .ok_or((StatusCode::NOT_FOUND, format!("Node type '{}' not found", req.node_type)))?;
+    let nodes = emb_guard.data.get(&req.node_type).ok_or((
+        StatusCode::NOT_FOUND,
+        format!("Node type '{}' not found", req.node_type),
+    ))?;
 
-    let emb = nodes
-        .get(req.node_id)
-        .ok_or((StatusCode::BAD_REQUEST, format!("node_id {} out of range", req.node_id)))?;
+    let emb = nodes.get(req.node_id).ok_or((
+        StatusCode::BAD_REQUEST,
+        format!("node_id {} out of range", req.node_id),
+    ))?;
 
     let node_name = state.node_name(&req.node_type, req.node_id);
     let explanation = PredictionExplanation {
         methodology: "GNN node embedding via GraphSAGE message passing".into(),
         inputs: vec![
-            format!("Node: {} (type={}, id={})", node_name, req.node_type, req.node_id),
+            format!(
+                "Node: {} (type={}, id={})",
+                node_name, req.node_type, req.node_id
+            ),
             format!("Embedding dimension: {}", state.hidden_dim),
         ],
         reasoning_steps: vec![
@@ -156,7 +315,9 @@ pub struct MatchRankRequest {
     pub top_k: usize,
 }
 
-fn default_top_k() -> usize { 5 }
+fn default_top_k() -> usize {
+    5
+}
 
 #[derive(Serialize)]
 pub struct MatchRankResponse {
@@ -186,15 +347,15 @@ pub async fn rank_matches(
     Json(req): Json<MatchRankRequest>,
 ) -> Result<Json<MatchRankResponse>, (StatusCode, String)> {
     let emb_guard = state.embeddings.read().unwrap();
-    let src_nodes = emb_guard
-        .data
-        .get(&req.src_type)
-        .ok_or((StatusCode::NOT_FOUND, format!("Source type '{}' not found", req.src_type)))?;
+    let src_nodes = emb_guard.data.get(&req.src_type).ok_or((
+        StatusCode::NOT_FOUND,
+        format!("Source type '{}' not found", req.src_type),
+    ))?;
 
-    let dst_nodes = emb_guard
-        .data
-        .get(&req.dst_type)
-        .ok_or((StatusCode::NOT_FOUND, format!("Dest type '{}' not found", req.dst_type)))?;
+    let dst_nodes = emb_guard.data.get(&req.dst_type).ok_or((
+        StatusCode::NOT_FOUND,
+        format!("Dest type '{}' not found", req.dst_type),
+    ))?;
 
     let src_emb = src_nodes
         .get(req.src_id)
@@ -209,7 +370,7 @@ pub async fn rank_matches(
         .map(|(id, dst_emb)| (id, PlainEmbeddings::dot_score(src_emb, dst_emb)))
         .collect();
 
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
 
     let top_k = req.top_k.min(scored.len());
 
@@ -240,15 +401,26 @@ pub async fn rank_matches(
                     },
                     ReasoningStep {
                         step: 3,
-                        description: format!("Rank against {} candidates of type '{}'", dst_nodes.len(), req.dst_type),
-                        result: format!("Rank {} of {} (higher score = stronger predicted link)", rank + 1, dst_nodes.len()),
+                        description: format!(
+                            "Rank against {} candidates of type '{}'",
+                            dst_nodes.len(),
+                            req.dst_type
+                        ),
+                        result: format!(
+                            "Rank {} of {} (higher score = stronger predicted link)",
+                            rank + 1,
+                            dst_nodes.len()
+                        ),
                     },
                 ],
                 conclusion: format!(
                     "{} is ranked #{} match for {} with dot-product score {:.4}. \
                      This means their graph neighborhoods are structurally aligned — \
                      entities they connect to are similar.",
-                    dst_name, rank + 1, src_name, score
+                    dst_name,
+                    rank + 1,
+                    src_name,
+                    score
                 ),
                 confidence: Some((score.max(0.0) / scored[0].1.max(1e-6)).min(1.0) as f64),
                 models_used: vec!["GraphSAGE".into()],
@@ -266,34 +438,58 @@ pub async fn rank_matches(
     let overall_explanation = PredictionExplanation {
         methodology: "Link prediction via dot-product similarity on GraphSAGE embeddings".into(),
         inputs: vec![
-            format!("Source: {} (type={}, id={})", src_name, req.src_type, req.src_id),
-            format!("Target type: {} ({} candidates)", req.dst_type, dst_nodes.len()),
+            format!(
+                "Source: {} (type={}, id={})",
+                src_name, req.src_type, req.src_id
+            ),
+            format!(
+                "Target type: {} ({} candidates)",
+                req.dst_type,
+                dst_nodes.len()
+            ),
             format!("Top K: {}", top_k),
         ],
         reasoning_steps: vec![
             ReasoningStep {
                 step: 1,
-                description: "Compute GraphSAGE embeddings for all nodes via 2-layer message passing".into(),
-                result: format!("{}-dimensional embeddings for {} nodes", state.hidden_dim, state.graph_meta.total_nodes),
+                description:
+                    "Compute GraphSAGE embeddings for all nodes via 2-layer message passing".into(),
+                result: format!(
+                    "{}-dimensional embeddings for {} nodes",
+                    state.hidden_dim, state.graph_meta.total_nodes
+                ),
             },
             ReasoningStep {
                 step: 2,
-                description: format!("Score {} {} candidates via dot product with source embedding", dst_nodes.len(), req.dst_type),
-                result: format!("Scores range from {:.4} to {:.4}", scored.last().map(|x| x.1).unwrap_or(0.0), scored[0].1),
+                description: format!(
+                    "Score {} {} candidates via dot product with source embedding",
+                    dst_nodes.len(),
+                    req.dst_type
+                ),
+                result: format!(
+                    "Scores range from {:.4} to {:.4}",
+                    scored.last().map(|x| x.1).unwrap_or(0.0),
+                    scored[0].1
+                ),
             },
             ReasoningStep {
                 step: 3,
                 description: format!("Sort and return top {} matches", top_k),
                 result: format!(
                     "Top match: {} (score={:.4}), lowest returned: {} (score={:.4})",
-                    state.node_name(&req.dst_type, scored[0].0), scored[0].1,
-                    state.node_name(&req.dst_type, scored[top_k - 1].0), scored[top_k - 1].1
+                    state.node_name(&req.dst_type, scored[0].0),
+                    scored[0].1,
+                    state.node_name(&req.dst_type, scored[top_k - 1].0),
+                    scored[top_k - 1].1
                 ),
             },
         ],
         conclusion: format!(
             "Found top {} matches for {} among {} {} candidates using dot-product link prediction",
-            top_k, src_name, dst_nodes.len(), req.dst_type
+            top_k,
+            src_name,
+            dst_nodes.len(),
+            req.dst_type
         ),
         confidence: None,
         models_used: vec!["GraphSAGE".into()],
@@ -339,10 +535,10 @@ pub async fn classify_nodes(
     Json(req): Json<ClassifyRequest>,
 ) -> Result<Json<ClassifyResponse>, (StatusCode, String)> {
     let emb_guard = state.embeddings.read().unwrap();
-    let nodes = emb_guard
-        .data
-        .get(&req.node_type)
-        .ok_or((StatusCode::NOT_FOUND, format!("Node type '{}' not found", req.node_type)))?;
+    let nodes = emb_guard.data.get(&req.node_type).ok_or((
+        StatusCode::NOT_FOUND,
+        format!("Node type '{}' not found", req.node_type),
+    ))?;
 
     let predictions: Vec<ClassPrediction> = req
         .node_ids
@@ -359,7 +555,10 @@ pub async fn classify_nodes(
             let explanation = PredictionExplanation {
                 methodology: "Embedding-based classification via magnitude bucketing".into(),
                 inputs: vec![
-                    format!("Node: {} (type={}, id={})", node_name, req.node_type, node_id),
+                    format!(
+                        "Node: {} (type={}, id={})",
+                        node_name, req.node_type, node_id
+                    ),
                     format!("Embedding dim: {}", state.hidden_dim),
                     format!("Num classes: {}", state.num_classes),
                 ],
@@ -376,15 +575,26 @@ pub async fn classify_nodes(
                     },
                     ReasoningStep {
                         step: 3,
-                        description: format!("Map magnitude to class bucket (mod {})", state.num_classes),
-                        result: format!("class = {} (confidence = {:.1}%)", class, confidence * 100.0),
+                        description: format!(
+                            "Map magnitude to class bucket (mod {})",
+                            state.num_classes
+                        ),
+                        result: format!(
+                            "class = {} (confidence = {:.1}%)",
+                            class,
+                            confidence * 100.0
+                        ),
                     },
                 ],
                 conclusion: format!(
                     "{} classified as class {} with {:.1}% confidence. \
                      The embedding magnitude {:.4} indicates the node's structural position \
                      in the graph corresponds to class {}.",
-                    node_name, class, confidence * 100.0, magnitude, class
+                    node_name,
+                    class,
+                    confidence * 100.0,
+                    magnitude,
+                    class
                 ),
                 confidence: Some(confidence.min(1.0) as f64),
                 models_used: vec!["GraphSAGE".into()],
@@ -409,7 +619,8 @@ pub async fn classify_nodes(
         reasoning_steps: vec![
             ReasoningStep {
                 step: 1,
-                description: "Retrieve pre-computed GraphSAGE embeddings for all requested nodes".into(),
+                description: "Retrieve pre-computed GraphSAGE embeddings for all requested nodes"
+                    .into(),
                 result: format!("{} embeddings retrieved", predictions.len()),
             },
             ReasoningStep {
@@ -417,11 +628,18 @@ pub async fn classify_nodes(
                 description: "Classify each node by embedding magnitude bucketing".into(),
                 result: format!(
                     "Classes assigned: {:?}",
-                    predictions.iter().map(|p| p.predicted_class).collect::<Vec<_>>()
+                    predictions
+                        .iter()
+                        .map(|p| p.predicted_class)
+                        .collect::<Vec<_>>()
                 ),
             },
         ],
-        conclusion: format!("Classified {} nodes of type '{}'", predictions.len(), req.node_type),
+        conclusion: format!(
+            "Classified {} nodes of type '{}'",
+            predictions.len(),
+            req.node_type
+        ),
         confidence: None,
         models_used: vec!["GraphSAGE".into()],
     };
@@ -466,9 +684,8 @@ fn default_categorize_top_k() -> usize {
 pub async fn categorize_transaction(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CategorizeRequest>,
-) -> Result<Json<crate::tasks::link_predictor::LinkPredictionResult>, (StatusCode, String)>
-{
-    use crate::tasks::link_predictor::{LinkPredictorConfig, LinkPredictor};
+) -> Result<Json<crate::tasks::link_predictor::LinkPredictionResult>, (StatusCode, String)> {
+    use crate::tasks::link_predictor::{LinkPredictor, LinkPredictorConfig};
 
     // Validate transaction node
     let emb_guard = state.embeddings.read().unwrap();
@@ -484,7 +701,10 @@ pub async fn categorize_transaction(
         })?;
 
     // Get all category embeddings
-    let cat_embs: Vec<(String, usize, String, Vec<f32>)> = state.embeddings.read().unwrap()
+    let cat_embs: Vec<(String, usize, String, Vec<f32>)> = state
+        .embeddings
+        .read()
+        .unwrap()
         .data
         .get(&req.category_type)
         .map(|vecs| {
@@ -507,9 +727,8 @@ pub async fn categorize_transaction(
 
     // Build historical transaction context for TopK-NN
     // Find all transactions from the same company/owner as this transaction
-    let historical = build_historical_context(
-        &state, &req.node_type, req.node_id, &req.category_type,
-    );
+    let historical =
+        build_historical_context(&state, &req.node_type, req.node_id, &req.category_type);
 
     let config = LinkPredictorConfig {
         top_k: req.top_k,
@@ -533,16 +752,19 @@ pub async fn categorize_transaction(
     // Each model provides its own embedding perspective; averaging improves robustness.
     {
         let all_models = state.model_embeddings.read().unwrap();
-        let num_models = all_models.len().max(1) as f32;
 
         for pred in &mut result.predictions {
             let mut ensemble_score = 0.0f32;
             let mut models_scored = 0;
 
             for (_model_name, model_emb) in all_models.iter() {
-                let src = model_emb.data.get(&req.node_type)
+                let src = model_emb
+                    .data
+                    .get(&req.node_type)
                     .and_then(|vecs| vecs.get(req.node_id));
-                let tgt = model_emb.data.get(&pred.target_type)
+                let tgt = model_emb
+                    .data
+                    .get(&pred.target_type)
                     .and_then(|vecs| vecs.get(pred.target_id));
 
                 if let (Some(s), Some(t)) = (src, tgt) {
@@ -559,7 +781,9 @@ pub async fn categorize_transaction(
         }
 
         // Re-sort by ensemble score (descending)
-        result.predictions.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        result
+            .predictions
+            .sort_by(|a, b| b.score.total_cmp(&a.score));
         // Re-assign ranks
         for (i, pred) in result.predictions.iter_mut().enumerate() {
             pred.rank = i + 1;
@@ -639,9 +863,7 @@ fn build_historical_context(
     let txn_embs = emb_guard.data.get(txn_type)?;
     let historical_embs: Vec<(Vec<f32>, usize)> = txn_to_cat
         .iter()
-        .filter_map(|(&txn, &cat)| {
-            txn_embs.get(txn).map(|emb| (emb.clone(), cat))
-        })
+        .filter_map(|(&txn, &cat)| txn_embs.get(txn).map(|emb| (emb.clone(), cat)))
         .collect();
 
     // Step 5: Build category metadata
@@ -896,10 +1118,16 @@ pub async fn score_anomalies(
     Json(req): Json<AnomalyRequest>,
 ) -> Result<Json<AnomalyResponse>, (StatusCode, String)> {
     // Verify node type exists
-    state.embeddings.read().unwrap()
+    state
+        .embeddings
+        .read()
+        .unwrap()
         .data
         .get(&req.node_type)
-        .ok_or((StatusCode::NOT_FOUND, format!("Node type '{}' not found", req.node_type)))?;
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            format!("Node type '{}' not found", req.node_type),
+        ))?;
 
     let model_names = &state.model_names;
     let dim = state.hidden_dim;
@@ -915,7 +1143,9 @@ pub async fn score_anomalies(
         let norm_signals: Vec<f32> = model_names
             .iter()
             .map(|m| {
-                state.precomputed.get(m, &req.node_type)
+                state
+                    .precomputed
+                    .get(m, &req.node_type)
                     .map(|s| s.normalized(node_id))
                     .unwrap_or(0.0)
             })
@@ -923,8 +1153,14 @@ pub async fn score_anomalies(
 
         // Softmax attention over signal strengths (temperature=2.0)
         let temperature = 2.0f32;
-        let max_s = norm_signals.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let exp_signals: Vec<f32> = norm_signals.iter().map(|s| ((s - max_s) * temperature).exp()).collect();
+        let max_s = norm_signals
+            .iter()
+            .cloned()
+            .fold(f32::NEG_INFINITY, f32::max);
+        let exp_signals: Vec<f32> = norm_signals
+            .iter()
+            .map(|s| ((s - max_s) * temperature).exp())
+            .collect();
         let sum_exp: f32 = exp_signals.iter().sum();
         let attn_weights: Vec<f32> = exp_signals.iter().map(|e| e / sum_exp.max(1e-10)).collect();
 
@@ -942,7 +1178,9 @@ pub async fn score_anomalies(
         let raw_signals: Vec<f32> = model_names
             .iter()
             .map(|m| {
-                state.precomputed.get(m, &req.node_type)
+                state
+                    .precomputed
+                    .get(m, &req.node_type)
                     .map(|s| s.raw(node_id))
                     .unwrap_or(0.0)
             })
@@ -983,7 +1221,7 @@ pub async fn score_anomalies(
             .collect();
 
         // Sort by contribution (highest first)
-        signals.sort_by(|a, b| b.contribution.partial_cmp(&a.contribution).unwrap());
+        signals.sort_by(|a, b| b.contribution.total_cmp(&a.contribution));
 
         // Top 3 factors
         let top_factors: Vec<String> = signals
@@ -1009,7 +1247,8 @@ pub async fn score_anomalies(
             },
             ReasoningStep {
                 step: 2,
-                description: "Normalize using precomputed global min/max (over ALL nodes, not batch)".into(),
+                description:
+                    "Normalize using precomputed global min/max (over ALL nodes, not batch)".into(),
                 result: signals
                     .iter()
                     .map(|s| format!("{}: {:.3}", s.model, s.normalized_score))
@@ -1047,9 +1286,14 @@ pub async fn score_anomalies(
             format!(
                 "🚨 {} is ANOMALOUS (ensemble={:.3}). Top contributing models: {}. \
                  Multiple GNN architectures agree this node's graph neighborhood is unusual.",
-                node_name, ensemble_score,
-                signals.iter().take(2).map(|s| format!("{} ({:.1}%)", s.model, s.contribution * 100.0))
-                    .collect::<Vec<_>>().join(", ")
+                node_name,
+                ensemble_score,
+                signals
+                    .iter()
+                    .take(2)
+                    .map(|s| format!("{} ({:.1}%)", s.model, s.contribution * 100.0))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )
         } else {
             format!(
@@ -1063,15 +1307,22 @@ pub async fn score_anomalies(
         let per_model_percentiles: Vec<ModelPercentile> = model_names
             .iter()
             .map(|m| {
-                let pct = state.precomputed.get(m, &req.node_type)
+                let pct = state
+                    .precomputed
+                    .get(m, &req.node_type)
                     .map(|s| s.percentile(node_id))
                     .unwrap_or(50.0);
-                ModelPercentile { model: m.clone(), percentile: pct }
+                ModelPercentile {
+                    model: m.clone(),
+                    percentile: pct,
+                }
             })
             .collect();
-        let avg_percentile = per_model_percentiles.iter()
+        let avg_percentile = per_model_percentiles
+            .iter()
             .map(|p| p.percentile)
-            .sum::<f32>() / n_models.max(1) as f32;
+            .sum::<f32>()
+            / n_models.max(1) as f32;
         let percentile_info = PercentileInfo {
             ensemble_percentile: avg_percentile,
             per_model: per_model_percentiles,
@@ -1083,9 +1334,12 @@ pub async fn score_anomalies(
 
         // ── Feature 2: Feature Attribution ──
         // Use primary model (SAGE) for dimension analysis
-        let feature_attr = if let Some(sage_scores) = state.precomputed.get("SAGE", &req.node_type) {
+        let feature_attr = if let Some(sage_scores) = state.precomputed.get("SAGE", &req.node_type)
+        {
             let emb_guard = state.embeddings.read().unwrap();
-            let node_emb = emb_guard.data.get(&req.node_type)
+            let node_emb = emb_guard
+                .data
+                .get(&req.node_type)
                 .and_then(|v| v.get(node_id))
                 .map(|e| e.as_slice())
                 .unwrap_or(&[]);
@@ -1097,7 +1351,11 @@ pub async fn score_anomalies(
                 .map(|&(dim, contrib)| DimensionContribution {
                     dimension: dim,
                     contribution: contrib,
-                    fraction: if total_l2_sq > 0.0 { contrib / total_l2_sq } else { 0.0 },
+                    fraction: if total_l2_sq > 0.0 {
+                        contrib / total_l2_sq
+                    } else {
+                        0.0
+                    },
                 })
                 .collect();
             let coverage: f32 = top_dims.iter().map(|d| d.fraction).sum();
@@ -1105,7 +1363,9 @@ pub async fn score_anomalies(
                 summary: format!(
                     "Top {} of {} dimensions explain {:.1}% of the anomaly signal. \
                      Dimension {} contributes most ({:.1}%).",
-                    top_n, dim, coverage * 100.0,
+                    top_n,
+                    dim,
+                    coverage * 100.0,
                     top_dims.first().map(|d| d.dimension).unwrap_or(0),
                     top_dims.first().map(|d| d.fraction * 100.0).unwrap_or(0.0)
                 ),
@@ -1137,7 +1397,11 @@ pub async fn score_anomalies(
                             .sum();
                         let needed_contrib = 0.5 - other_contribution;
                         let needed_norm = needed_contrib / attn_weights[m].max(1e-10);
-                        format!("Would need to drop from {:.3} to {:.3}", norm_signals[m], needed_norm.max(0.0))
+                        format!(
+                            "Would need to drop from {:.3} to {:.3}",
+                            norm_signals[m],
+                            needed_norm.max(0.0)
+                        )
                     } else {
                         "This model has negligible weight".into()
                     }
@@ -1149,7 +1413,11 @@ pub async fn score_anomalies(
                             .sum();
                         let needed_contrib = 0.5 - other_contribution;
                         let needed_norm = needed_contrib / attn_weights[m].max(1e-10);
-                        format!("Would need to rise from {:.3} to {:.3}", norm_signals[m], needed_norm.min(1.0))
+                        format!(
+                            "Would need to rise from {:.3} to {:.3}",
+                            norm_signals[m],
+                            needed_norm.min(1.0)
+                        )
                     } else {
                         "This model has negligible weight".into()
                     }
@@ -1188,10 +1456,14 @@ pub async fn score_anomalies(
         let mut influential: Vec<InfluentialNeighbor> = neighbors
             .iter()
             .filter_map(|n| {
-                let score = state.precomputed.get("SAGE", &n.node_type)
+                let score = state
+                    .precomputed
+                    .get("SAGE", &n.node_type)
                     .map(|s| s.normalized(n.node_id))
                     .unwrap_or(0.0);
-                let pct = state.precomputed.get("SAGE", &n.node_type)
+                let pct = state
+                    .precomputed
+                    .get("SAGE", &n.node_type)
                     .map(|s| s.percentile(n.node_id))
                     .unwrap_or(50.0);
                 Some(InfluentialNeighbor {
@@ -1206,8 +1478,11 @@ pub async fn score_anomalies(
             })
             .collect();
         // Sort by anomaly score (most anomalous first)
-        influential.sort_by(|a, b| b.anomaly_score.partial_cmp(&a.anomaly_score).unwrap());
-        let anomalous_count = influential.iter().filter(|n| n.anomaly_score >= 0.5).count();
+        influential.sort_by(|a, b| b.anomaly_score.total_cmp(&a.anomaly_score));
+        let anomalous_count = influential
+            .iter()
+            .filter(|n| n.anomaly_score >= 0.5)
+            .count();
         let anomalous_frac = anomalous_count as f32 / total_neighbors.max(1) as f32;
         let top_influential: Vec<InfluentialNeighbor> = influential.into_iter().take(5).collect();
 
@@ -1219,9 +1494,15 @@ pub async fn score_anomalies(
                 "{} has {} direct neighbors ({}-hop receptive field). \
                  {} of {} ({:.0}%) neighbors are themselves anomalous. \
                  Top neighbor: {}.",
-                node_name, total_neighbors, k_hops,
-                anomalous_count, total_neighbors, anomalous_frac * 100.0,
-                top_influential.first().map(|n| format!("{} (score={:.2})", n.name, n.anomaly_score))
+                node_name,
+                total_neighbors,
+                k_hops,
+                anomalous_count,
+                total_neighbors,
+                anomalous_frac * 100.0,
+                top_influential
+                    .first()
+                    .map(|n| format!("{} (score={:.2})", n.name, n.anomaly_score))
                     .unwrap_or_else(|| "none".into())
             ),
             influential_neighbors: top_influential,
@@ -1235,7 +1516,8 @@ pub async fn score_anomalies(
             x if x as f32 > n_models as f32 * 0.5 => "majority",
             x if x as f32 == n_models as f32 * 0.5 => "split",
             _ => "minority",
-        }.to_string();
+        }
+        .to_string();
         let consensus = ConsensusInfo {
             models_agreeing_anomalous: models_above,
             total_models: n_models,
@@ -1243,10 +1525,16 @@ pub async fn score_anomalies(
             consensus_level: consensus_level.clone(),
             summary: format!(
                 "{}/{} models individually flag this node as anomalous ({}). {}",
-                models_above, n_models, consensus_level,
-                if models_above == n_models { "Strong confidence — all models agree." }
-                else if models_above == 0 { "No model individually flags this node." }
-                else { "Mixed signals — some models disagree." }
+                models_above,
+                n_models,
+                consensus_level,
+                if models_above == n_models {
+                    "Strong confidence — all models agree."
+                } else if models_above == 0 {
+                    "No model individually flags this node."
+                } else {
+                    "Mixed signals — some models disagree."
+                }
             ),
         };
 
@@ -1255,18 +1543,23 @@ pub async fn score_anomalies(
         let similar_cases = if let Some(sage_vecs) = emb_guard.data.get(&req.node_type) {
             if let Some(query_emb) = sage_vecs.get(node_id) {
                 // Compute cosine sim to all same-type nodes, split by anomalous/normal
-                let mut all_sims: Vec<(usize, f32, f32, bool)> = sage_vecs.iter().enumerate()
+                let mut all_sims: Vec<(usize, f32, f32, bool)> = sage_vecs
+                    .iter()
+                    .enumerate()
                     .filter(|(i, _)| *i != node_id)
                     .map(|(i, emb)| {
                         let sim = PlainEmbeddings::cosine_similarity(query_emb, emb);
-                        let anom_score = state.precomputed.get("SAGE", &req.node_type)
-                            .map(|s| s.normalized(i)).unwrap_or(0.0);
+                        let anom_score = state
+                            .precomputed
+                            .get("SAGE", &req.node_type)
+                            .map(|s| s.normalized(i))
+                            .unwrap_or(0.0);
                         (i, sim, anom_score, anom_score >= 0.5)
                     })
                     .collect();
 
                 // Sort by similarity (highest first)
-                all_sims.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                all_sims.sort_by(|a, b| b.1.total_cmp(&a.1));
 
                 let to_case = |&(id, sim, score, anom): &(usize, f32, f32, bool)| SimilarCase {
                     name: state.node_name(&req.node_type, id),
@@ -1276,13 +1569,15 @@ pub async fn score_anomalies(
                     is_anomalous: anom,
                 };
 
-                let similar_anom: Vec<SimilarCase> = all_sims.iter()
+                let similar_anom: Vec<SimilarCase> = all_sims
+                    .iter()
                     .filter(|s| s.3) // anomalous
                     .take(3)
                     .map(to_case)
                     .collect();
 
-                let similar_norm: Vec<SimilarCase> = all_sims.iter()
+                let similar_norm: Vec<SimilarCase> = all_sims
+                    .iter()
                     .filter(|s| !s.3) // normal
                     .take(3)
                     .map(to_case)
@@ -1290,44 +1585,71 @@ pub async fn score_anomalies(
 
                 let summary = format!(
                     "Most similar anomalous: {}. Most similar normal: {}.",
-                    similar_anom.first().map(|c| format!("{} (sim={:.2})", c.name, c.cosine_similarity))
+                    similar_anom
+                        .first()
+                        .map(|c| format!("{} (sim={:.2})", c.name, c.cosine_similarity))
                         .unwrap_or_else(|| "none".into()),
-                    similar_norm.first().map(|c| format!("{} (sim={:.2})", c.name, c.cosine_similarity))
+                    similar_norm
+                        .first()
+                        .map(|c| format!("{} (sim={:.2})", c.name, c.cosine_similarity))
                         .unwrap_or_else(|| "none".into()),
                 );
 
-                SimilarCases { similar_anomalous: similar_anom, similar_normal: similar_norm, summary }
+                SimilarCases {
+                    similar_anomalous: similar_anom,
+                    similar_normal: similar_norm,
+                    summary,
+                }
             } else {
-                SimilarCases { similar_anomalous: vec![], similar_normal: vec![], summary: "Node not found".into() }
+                SimilarCases {
+                    similar_anomalous: vec![],
+                    similar_normal: vec![],
+                    summary: "Node not found".into(),
+                }
             }
         } else {
-            SimilarCases { similar_anomalous: vec![], similar_normal: vec![], summary: "No SAGE embeddings".into() }
+            SimilarCases {
+                similar_anomalous: vec![],
+                similar_normal: vec![],
+                summary: "No SAGE embeddings".into(),
+            }
         };
 
         // ── Feature 8: Stability / Sensitivity Analysis ──
         let flip_margin = score_gap; // reuse: distance from decision boundary
-        let stability_class = if flip_margin > 0.1 { "stable" }
-            else if flip_margin > 0.02 { "marginal" }
-            else { "fragile" };
+        let stability_class = if flip_margin > 0.1 {
+            "stable"
+        } else if flip_margin > 0.02 {
+            "marginal"
+        } else {
+            "fragile"
+        };
         let stability = StabilityAnalysis {
             is_stable: flip_margin > 0.05,
             flip_margin,
             stability_class: stability_class.to_string(),
             summary: format!(
                 "Prediction is {} (margin={:.3} from threshold). {}",
-                stability_class, flip_margin,
-                if stability_class == "stable" { "Would require significant model change to flip." }
-                else if stability_class == "marginal" { "Relatively close to decision boundary — consider manual review." }
-                else { "Very close to threshold — high sensitivity to small changes. Recommend human review." }
+                stability_class,
+                flip_margin,
+                if stability_class == "stable" {
+                    "Would require significant model change to flip."
+                } else if stability_class == "marginal" {
+                    "Relatively close to decision boundary — consider manual review."
+                } else {
+                    "Very close to threshold — high sensitivity to small changes. Recommend human review."
+                }
             ),
         };
 
         // ── Feature 9: Confidence Interval ──
         let model_scores = &norm_signals;
         let mean_score = model_scores.iter().sum::<f32>() / n_models.max(1) as f32;
-        let variance = model_scores.iter()
+        let variance = model_scores
+            .iter()
             .map(|s| (s - mean_score).powi(2))
-            .sum::<f32>() / n_models.max(1) as f32;
+            .sum::<f32>()
+            / n_models.max(1) as f32;
         let std_err = (variance / n_models.max(1) as f32).sqrt();
         let z_95 = 1.96f32;
         let lower_95 = (ensemble_score - z_95 * std_err).clamp(0.0, 1.0);
@@ -1339,10 +1661,16 @@ pub async fn score_anomalies(
             standard_error: std_err,
             summary: format!(
                 "95% CI: [{:.3}, {:.3}] (SE={:.4}). {}",
-                lower_95, upper_95, std_err,
-                if lower_95 >= 0.5 { "Entire CI above threshold — high confidence anomalous." }
-                else if upper_95 < 0.5 { "Entire CI below threshold — high confidence normal." }
-                else { "CI spans threshold — prediction has uncertainty, recommend further investigation." }
+                lower_95,
+                upper_95,
+                std_err,
+                if lower_95 >= 0.5 {
+                    "Entire CI above threshold — high confidence anomalous."
+                } else if upper_95 < 0.5 {
+                    "Entire CI below threshold — high confidence normal."
+                } else {
+                    "CI spans threshold — prediction has uncertainty, recommend further investigation."
+                }
             ),
         };
 
@@ -1359,18 +1687,34 @@ pub async fn score_anomalies(
                  Top contributing factor: {}. \
                  {} of {} graph neighbors ({:.0}%) are themselves anomalous. \
                  {}.",
-                node_name, req.node_type, node_id,
-                n_models, k_hops,
+                node_name,
+                req.node_type,
+                node_id,
+                n_models,
+                k_hops,
                 ensemble_score,
                 avg_percentile,
-                if is_anomalous { "FLAGGED AS ANOMALOUS" } else { "Classified as NORMAL" },
-                models_above, n_models, consensus_level,
-                stability_class, flip_margin,
-                lower_95, upper_95,
-                top_factors.first().map(|f| f.as_str()).unwrap_or("none"),
-                anomalous_count, total_neighbors, anomalous_frac * 100.0,
                 if is_anomalous {
-                    format!("Action recommended: manual review of this {} and its connected entities", req.node_type)
+                    "FLAGGED AS ANOMALOUS"
+                } else {
+                    "Classified as NORMAL"
+                },
+                models_above,
+                n_models,
+                consensus_level,
+                stability_class,
+                flip_margin,
+                lower_95,
+                upper_95,
+                top_factors.first().map(|f| f.as_str()).unwrap_or("none"),
+                anomalous_count,
+                total_neighbors,
+                anomalous_frac * 100.0,
+                if is_anomalous {
+                    format!(
+                        "Action recommended: manual review of this {} and its connected entities",
+                        req.node_type
+                    )
                 } else {
                     "No action required at this time".into()
                 }
@@ -1378,7 +1722,8 @@ pub async fn score_anomalies(
         };
 
         // ── Feature 11: Embedding Visualization Coordinates ──
-        let (pca_x, pca_y) = state.pca_coords
+        let (pca_x, pca_y) = state
+            .pca_coords
             .get(&req.node_type)
             .and_then(|coords| coords.get(node_id))
             .copied()
@@ -1468,21 +1813,28 @@ pub async fn score_anomalies(
                 step: 1,
                 description: format!(
                     "Lookup precomputed L2 scores for {} nodes across {} models (O(1) per node)",
-                    req.node_ids.len(), n_models
+                    req.node_ids.len(),
+                    n_models
                 ),
                 result: format!(
                     "{} model × {} node = {} score lookups (precomputed at startup)",
-                    n_models, req.node_ids.len(), n_models * req.node_ids.len()
+                    n_models,
+                    req.node_ids.len(),
+                    n_models * req.node_ids.len()
                 ),
             },
             ReasoningStep {
                 step: 2,
-                description: "Normalize using precomputed global min/max (consistent for any batch size)".into(),
+                description:
+                    "Normalize using precomputed global min/max (consistent for any batch size)"
+                        .into(),
                 result: "Scores normalized to [0, 1] using global population statistics".into(),
             },
             ReasoningStep {
                 step: 3,
-                description: "Fuse via softmax attention: each model's weight depends on signal strength".into(),
+                description:
+                    "Fuse via softmax attention: each model's weight depends on signal strength"
+                        .into(),
                 result: "Models with higher anomaly signals get more attention weight".into(),
             },
             ReasoningStep {
@@ -1490,13 +1842,19 @@ pub async fn score_anomalies(
                 description: "Classify nodes: ensemble ≥ 0.5 → anomalous".into(),
                 result: format!(
                     "{} anomalous, {} normal out of {} scored",
-                    n_anomalous, results.len() - n_anomalous, results.len()
+                    n_anomalous,
+                    results.len() - n_anomalous,
+                    results.len()
                 ),
             },
         ],
         conclusion: format!(
             "Scored {} {} nodes using {} GNN models: {} anomalous, {} normal",
-            results.len(), req.node_type, n_models, n_anomalous, results.len() - n_anomalous
+            results.len(),
+            req.node_type,
+            n_models,
+            n_anomalous,
+            results.len() - n_anomalous
         ),
         confidence: None,
         models_used: model_names.clone(),
@@ -1550,10 +1908,10 @@ pub async fn similarity_search(
     Json(req): Json<SimilarityRequest>,
 ) -> Result<Json<SimilarityResponse>, (StatusCode, String)> {
     let emb_guard = state.embeddings.read().unwrap();
-    let nodes = emb_guard
-        .data
-        .get(&req.node_type)
-        .ok_or((StatusCode::NOT_FOUND, format!("Node type '{}' not found", req.node_type)))?;
+    let nodes = emb_guard.data.get(&req.node_type).ok_or((
+        StatusCode::NOT_FOUND,
+        format!("Node type '{}' not found", req.node_type),
+    ))?;
 
     let query_emb = nodes
         .get(req.node_id)
@@ -1569,7 +1927,7 @@ pub async fn similarity_search(
         .map(|(id, emb)| (id, PlainEmbeddings::cosine_similarity(query_emb, emb)))
         .collect();
 
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
 
     let top_k = req.top_k.min(scored.len());
 
@@ -1593,13 +1951,21 @@ pub async fn similarity_search(
                     ReasoningStep {
                         step: 2,
                         description: format!("Rank among {} same-type candidates", scored.len()),
-                        result: format!("Rank {} of {} (1.0 = identical, 0.0 = orthogonal)", rank + 1, scored.len()),
+                        result: format!(
+                            "Rank {} of {} (1.0 = identical, 0.0 = orthogonal)",
+                            rank + 1,
+                            scored.len()
+                        ),
                     },
                 ],
                 conclusion: format!(
                     "{} is the #{} most similar {} to {} (cosine={:.4}). \
                      They share similar graph neighborhood patterns.",
-                    name, rank + 1, req.node_type, query_name, score
+                    name,
+                    rank + 1,
+                    req.node_type,
+                    query_name,
+                    score
                 ),
                 confidence: Some(score.max(0.0).min(1.0) as f64),
                 models_used: vec!["GraphSAGE".into()],
@@ -1617,7 +1983,10 @@ pub async fn similarity_search(
     let overall_explanation = PredictionExplanation {
         methodology: "K-nearest neighbors via cosine similarity on GraphSAGE embeddings".into(),
         inputs: vec![
-            format!("Query: {} (type={}, id={})", query_name, req.node_type, req.node_id),
+            format!(
+                "Query: {} (type={}, id={})",
+                query_name, req.node_type, req.node_id
+            ),
             format!("Search space: {} {} nodes", nodes.len() - 1, req.node_type),
             format!("Top K: {}", top_k),
         ],
@@ -1629,10 +1998,15 @@ pub async fn similarity_search(
             },
             ReasoningStep {
                 step: 2,
-                description: format!("Compute cosine similarity against all {} other {} nodes", nodes.len() - 1, req.node_type),
+                description: format!(
+                    "Compute cosine similarity against all {} other {} nodes",
+                    nodes.len() - 1,
+                    req.node_type
+                ),
                 result: format!(
                     "Similarity range: {:.4} to {:.4}",
-                    scored.last().map(|x| x.1).unwrap_or(0.0), scored[0].1
+                    scored.last().map(|x| x.1).unwrap_or(0.0),
+                    scored[0].1
                 ),
             },
             ReasoningStep {
@@ -1640,8 +2014,11 @@ pub async fn similarity_search(
                 description: format!("Return top {} most similar nodes", top_k),
                 result: format!(
                     "Top: {} ({:.4}), #{}: {} ({:.4})",
-                    state.node_name(&req.node_type, scored[0].0), scored[0].1,
-                    top_k, state.node_name(&req.node_type, scored[top_k - 1].0), scored[top_k - 1].1
+                    state.node_name(&req.node_type, scored[0].0),
+                    scored[0].1,
+                    top_k,
+                    state.node_name(&req.node_type, scored[top_k - 1].0),
+                    scored[top_k - 1].1
                 ),
             },
         ],
@@ -1774,6 +2151,7 @@ pub async fn fiduciary_next_actions(
                 format!("No SAGE embedding for {}:{}", req.node_type, req.node_id),
             )
         })?;
+    let user_emb_owned = user_emb.clone();
 
     // Build anomaly scores map: model → { node_type → scores }
     let mut anomaly_scores: HashMap<String, HashMap<String, Vec<f32>>> = HashMap::new();
@@ -1810,50 +2188,76 @@ pub async fn fiduciary_next_actions(
         hidden_dim: state.hidden_dim,
     };
 
-    let mut response = crate::eval::fiduciary::recommend(&ctx, None);
+    // Keep persistent PC state across requests so PC learns incrementally.
+    let mut response = if let Ok(mut pc_state) = state.pc_state.lock() {
+        crate::eval::fiduciary::recommend(&ctx, Some(&mut *pc_state))
+    } else {
+        crate::eval::fiduciary::recommend(&ctx, None)
+    };
 
     // ── Enrich recommendations with learned scorer (asymmetric RL, paper 2402.18246) ──
     if let Ok(scorer) = state.scorer.lock() {
         use crate::eval::learnable_scorer::ScorerExample;
+        let scorer_ready = scorer.samples_seen >= MIN_SCORER_SAMPLES_FOR_GATING;
+
         for rec in &mut response.recommendations {
-            let action_type = crate::eval::fiduciary::FiduciaryActionType::from_name(&rec.action_type);
-            let target_emb = state.embeddings.read().unwrap()
+            let Some(action_type) =
+                crate::eval::fiduciary::FiduciaryActionType::try_from_name(&rec.action_type)
+            else {
+                continue;
+            };
+
+            let target_emb = emb_guard
                 .data
                 .get(&rec.target_node_type)
                 .and_then(|vecs| vecs.get(rec.target_node_id))
                 .map(|v| v.clone())
                 .unwrap_or_else(|| vec![0.0; state.hidden_dim]);
 
+            let context = derived_scorer_context(
+                &state,
+                &req.node_type,
+                req.node_id,
+                &rec.target_node_type,
+                rec.target_node_id,
+            );
+
             let example = ScorerExample {
-                user_emb: user_emb.to_vec(),
+                user_emb: user_emb_owned.clone(),
                 target_emb,
                 action_type,
                 anomaly_score: rec.target_anomaly_score,
                 embedding_affinity: rec.embedding_affinity,
-                context: [
-                    rec.axes.cost_reduction,
-                    rec.axes.risk_reduction,
-                    rec.axes.goal_alignment,
-                    rec.axes.urgency,
-                    rec.axes.conflict_freedom,
-                ],
+                context,
             };
 
             let (_axes, logit) = scorer.forward(&example);
             rec.scorer_logit = Some(logit);
-            // Override recommendation using learned model:
-            // logit > 0 = model endorses, logit <= 0 = model advises caution
-            rec.is_recommended = logit > 0.0;
+
+            // Blend scorer confidence into ranking only when model has enough feedback.
+            if scorer_ready {
+                let scorer_conf = sigmoid_f32(logit);
+                rec.fiduciary_score =
+                    (0.85 * rec.fiduciary_score + 0.15 * scorer_conf).clamp(0.0, 1.0);
+                // Gate recommendations conservatively: keep original fiduciary threshold + scorer endorsement.
+                rec.is_recommended = rec.is_recommended && logit > 0.0;
+            }
+        }
+
+        if scorer_ready {
+            response
+                .recommendations
+                .sort_by(|a, b| b.fiduciary_score.total_cmp(&a.fiduciary_score));
+            for (i, rec) in response.recommendations.iter_mut().enumerate() {
+                rec.rank = i + 1;
+            }
         }
     }
 
     // Attach SAE interpretability explanation if available
     if let Some(sae_state) = &state.sae_state {
-        let sae_explanation = crate::eval::sae::explain(
-            &sae_state.sae,
-            user_emb,
-            &sae_state.feature_labels,
-        );
+        let sae_explanation =
+            crate::eval::sae::explain(&sae_state.sae, user_emb, &sae_state.feature_labels);
         response.sae_explanation = Some(sae_explanation);
     }
 
@@ -1914,7 +2318,7 @@ pub async fn critical_path(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CriticalPathRequest>,
 ) -> Result<Json<CriticalPathResponse>, (StatusCode, String)> {
-    use crate::eval::critical_path::{discover_critical_paths, CriticalPathConfig};
+    use crate::eval::critical_path::{CriticalPathConfig, discover_critical_paths};
 
     // Build anomaly scores map
     let mut anomaly_scores: HashMap<String, HashMap<String, Vec<f32>>> = HashMap::new();
@@ -2012,10 +2416,19 @@ pub async fn fiduciary_reward(
 ) -> Result<Json<RewardResponse>, (StatusCode, String)> {
     use crate::eval::learnable_scorer::{RewardSignal, ScorerExample};
 
-    let action_type = crate::eval::fiduciary::FiduciaryActionType::from_name(&req.action_type);
+    let action_type = crate::eval::fiduciary::FiduciaryActionType::try_from_name(&req.action_type)
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Unknown action_type: {}", req.action_type),
+            )
+        })?;
 
     // Get embeddings for user and target
-    let user_emb = state.embeddings.read().unwrap()
+    let user_emb = state
+        .embeddings
+        .read()
+        .unwrap()
         .data
         .get(&req.node_type)
         .and_then(|vecs| vecs.get(req.node_id))
@@ -2027,7 +2440,10 @@ pub async fn fiduciary_reward(
         })?
         .clone();
 
-    let target_emb = state.embeddings.read().unwrap()
+    let target_emb = state
+        .embeddings
+        .read()
+        .unwrap()
         .data
         .get(&req.target_node_type)
         .and_then(|vecs| vecs.get(req.target_node_id))
@@ -2043,39 +2459,49 @@ pub async fn fiduciary_reward(
         .clone();
 
     // Get anomaly score and affinity for context
-    let anomaly_score = state
-        .precomputed
-        .get("SAGE", &req.target_node_type)
-        .map(|s| s.normalized(req.target_node_id))
-        .unwrap_or(0.0);
+    let anomaly_score = anomaly_score_ensemble(&state, &req.target_node_type, req.target_node_id);
 
     let affinity = PlainEmbeddings::cosine_similarity(&user_emb, &target_emb);
+    let context = derived_scorer_context(
+        &state,
+        &req.node_type,
+        req.node_id,
+        &req.target_node_type,
+        req.target_node_id,
+    );
+    let helpfulness = req.helpfulness.map(|h| h.clamp(0.0, 1.0));
 
     let reward = RewardSignal {
         action_type,
         accepted: req.accepted,
-        helpfulness: req.helpfulness,
+        helpfulness,
         example: ScorerExample {
             user_emb,
             target_emb,
             action_type,
             anomaly_score,
             embedding_affinity: affinity,
-            context: [0.5, 0.5, 0.5, 0.5, 0.5], // default context
+            context,
         },
         was_high_risk: req.was_high_risk,
     };
 
-    let updated = if let Ok(mut scorer) = state.scorer.lock() {
+    let (updated, persisted) = if let Ok(mut scorer) = state.scorer.lock() {
         scorer.apply_reward(&reward);
-        true
+        let saved =
+            crate::model::ensemble_pipeline::persist_scorer(&scorer, state.scorer_graph_hash);
+        (true, saved)
     } else {
-        false
+        (false, false)
     };
 
     Ok(Json(RewardResponse {
         status: if updated {
-            "Reward applied — scorer updated with asymmetric RL".into()
+            if persisted {
+                "Reward applied — scorer updated and checkpoint persisted".into()
+            } else {
+                "Reward applied — scorer updated but checkpoint persistence failed".into()
+            }
         } else {
             "Failed to acquire scorer lock".into()
         },
@@ -2147,16 +2573,16 @@ pub async fn retrain(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RetrainRequest>,
 ) -> Json<RetrainResponse> {
-    use burn::backend::NdArray;
-    use burn::prelude::*;
-    use crate::data::graph_builder::{build_from_schema, GraphBuildConfig};
+    use crate::data::graph_builder::{GraphBuildConfig, build_from_schema};
     use crate::data::synthetic::{SyntheticDataConfig, TqlSchema};
     use crate::model::gat::GatConfig;
     use crate::model::graph_transformer::GraphTransformerConfig;
     use crate::model::graphsage::GraphSageModelConfig;
-    use crate::model::lora::{init_hetero_basis_adapter, LoraConfig};
+    use crate::model::lora::{LoraConfig, init_hetero_basis_adapter};
     use crate::model::mhc::MhcRgcnConfig;
     use crate::model::trainer::*;
+    use burn::backend::NdArray;
+    use burn::prelude::*;
 
     type B = NdArray;
 
@@ -2176,7 +2602,8 @@ pub async fn retrain(
     let graph_config = GraphBuildConfig {
         node_feat_dim: feat_dim,
         add_reverse_edges: true,
-        add_self_loops: true, add_positional_encoding: true,
+        add_self_loops: true,
+        add_positional_encoding: true,
     };
     let mut graph = build_from_schema::<B>(&schema, &syn_config, &graph_config, &device);
     let node_types: Vec<String> = graph.node_types().iter().map(|s| s.to_string()).collect();
@@ -2184,7 +2611,9 @@ pub async fn retrain(
         graph.edge_types().iter().map(|e| (*e).clone()).collect();
 
     // Derive actual feature dim (may differ from feat_dim due to PE)
-    let actual_feat_dim = graph.node_features.values()
+    let actual_feat_dim = graph
+        .node_features
+        .values()
         .next()
         .map(|t| t.dims()[1])
         .unwrap_or(feat_dim);
@@ -2217,109 +2646,154 @@ pub async fn retrain(
     // 1. GraphSAGE + DoRA + JEPA
     {
         let mut sage = GraphSageModelConfig {
-            in_dim: actual_feat_dim, hidden_dim, num_layers: 2, dropout: 0.0,
-        }.init::<B>(&node_types, &edge_types, &device);
+            in_dim: actual_feat_dim,
+            hidden_dim,
+            num_layers: 2,
+            dropout: 0.0,
+        }
+        .init::<B>(&node_types, &edge_types, &device);
         sage.attach_adapter(init_hetero_basis_adapter(
-            actual_feat_dim, hidden_dim, &LoraConfig::default(), node_types.clone(), &device,
+            actual_feat_dim,
+            hidden_dim,
+            &LoraConfig::default(),
+            node_types.clone(),
+            &device,
         ));
-        let fwd = |g: &crate::data::hetero_graph::HeteroGraph<B>| sage.forward(g);
-        let report = train_jepa(&mut graph, &fwd, &train_config, 0.1, 0.5, false);
+        let _adapter_report = train_adapter(&mut sage, &graph, &train_config);
+        let report = train_jepa_input_weights(&mut sage, &graph, &train_config, 0.12, 0.35, true);
         let meta = crate::model::weights::WeightMeta {
-            model_type: "sage_dora_jepa".into(), graph_hash,
+            model_type: "sage_dora_jepa".into(),
+            graph_hash,
             epochs_trained: report.epochs_trained,
-            final_loss: report.final_loss, final_auc: report.final_auc,
-            hidden_dim, timestamp: super::state::chrono_now(),
+            final_loss: report.final_loss,
+            final_auc: report.final_auc,
+            hidden_dim,
+            timestamp: super::state::chrono_now(),
         };
-        let saved = crate::model::weights::save_model(
-            &sage, "sage_dora_jepa", graph_hash, &meta, &device,
-        ).is_ok();
+        let saved =
+            crate::model::weights::save_model(&sage, "sage_dora_jepa", graph_hash, &meta, &device)
+                .is_ok();
         models_retrained.push(RetrainedModelInfo {
-            model_name: "SAGE".into(), config: "DoRA+JEPA".into(),
+            model_name: "SAGE".into(),
+            config: "DoRA+JEPA".into(),
             epochs_trained: report.epochs_trained,
-            final_auc: report.final_auc, final_loss: report.final_loss,
+            final_auc: report.final_auc,
+            final_loss: report.final_loss,
             checkpoint_saved: saved,
         });
     }
 
     // 2. GAT + JEPA
     {
-        let gat = GatConfig {
-            in_dim: actual_feat_dim, hidden_dim, num_heads: 4, num_layers: 2, dropout: 0.0,
-        }.init_model::<B>(&node_types, &edge_types, &device);
-        let fwd = |g: &crate::data::hetero_graph::HeteroGraph<B>| gat.forward(g);
-        let report = train_jepa(&mut graph, &fwd, &train_config, 0.1, 0.5, false);
+        let mut gat = GatConfig {
+            in_dim: actual_feat_dim,
+            hidden_dim,
+            num_heads: 4,
+            num_layers: 2,
+            dropout: 0.0,
+        }
+        .init_model::<B>(&node_types, &edge_types, &device);
+        let report = train_jepa_input_weights(&mut gat, &graph, &train_config, 0.12, 0.30, true);
         let meta = crate::model::weights::WeightMeta {
-            model_type: "gat_jepa".into(), graph_hash,
+            model_type: "gat_jepa".into(),
+            graph_hash,
             epochs_trained: report.epochs_trained,
-            final_loss: report.final_loss, final_auc: report.final_auc,
-            hidden_dim, timestamp: super::state::chrono_now(),
+            final_loss: report.final_loss,
+            final_auc: report.final_auc,
+            hidden_dim,
+            timestamp: super::state::chrono_now(),
         };
-        let saved = crate::model::weights::save_model(
-            &gat, "gat_jepa", graph_hash, &meta, &device,
-        ).is_ok();
+        let saved =
+            crate::model::weights::save_model(&gat, "gat_jepa", graph_hash, &meta, &device).is_ok();
         models_retrained.push(RetrainedModelInfo {
-            model_name: "GAT".into(), config: "JEPA".into(),
+            model_name: "GAT".into(),
+            config: "JEPA".into(),
             epochs_trained: report.epochs_trained,
-            final_auc: report.final_auc, final_loss: report.final_loss,
+            final_auc: report.final_auc,
+            final_loss: report.final_loss,
             checkpoint_saved: saved,
         });
     }
 
     // 3. GPS + JEPA
     {
-        let gps = GraphTransformerConfig {
-            in_dim: actual_feat_dim, hidden_dim, num_heads: 4, num_layers: 2,
-            ffn_ratio: 2, dropout: 0.0,
-        }.init_model::<B>(&node_types, &edge_types, &device);
-        let fwd = |g: &crate::data::hetero_graph::HeteroGraph<B>| gps.forward(g);
-        let report = train_jepa(&mut graph, &fwd, &train_config, 0.1, 0.5, false);
+        let mut gps = GraphTransformerConfig {
+            in_dim: actual_feat_dim,
+            hidden_dim,
+            num_heads: 4,
+            num_layers: 2,
+            ffn_ratio: 2,
+            dropout: 0.0,
+        }
+        .init_model::<B>(&node_types, &edge_types, &device);
+        let report = train_jepa_input_weights(&mut gps, &graph, &train_config, 0.12, 0.30, true);
         let meta = crate::model::weights::WeightMeta {
-            model_type: "gps_jepa".into(), graph_hash,
+            model_type: "gps_jepa".into(),
+            graph_hash,
             epochs_trained: report.epochs_trained,
-            final_loss: report.final_loss, final_auc: report.final_auc,
-            hidden_dim, timestamp: super::state::chrono_now(),
+            final_loss: report.final_loss,
+            final_auc: report.final_auc,
+            hidden_dim,
+            timestamp: super::state::chrono_now(),
         };
-        let saved = crate::model::weights::save_model(
-            &gps, "gps_jepa", graph_hash, &meta, &device,
-        ).is_ok();
+        let saved =
+            crate::model::weights::save_model(&gps, "gps_jepa", graph_hash, &meta, &device).is_ok();
         models_retrained.push(RetrainedModelInfo {
-            model_name: "GT".into(), config: "JEPA".into(),
+            model_name: "GT".into(),
+            config: "JEPA".into(),
             epochs_trained: report.epochs_trained,
-            final_auc: report.final_auc, final_loss: report.final_loss,
+            final_auc: report.final_auc,
+            final_loss: report.final_loss,
             checkpoint_saved: saved,
         });
     }
 
     // 4. RGCN + mHC + JEPA
     {
-        let mhc = MhcRgcnConfig {
-            in_dim: actual_feat_dim, hidden_dim, num_layers: 8,
-            num_bases: 4, n_streams: 4, dropout: 0.0,
-        }.init::<B>(&node_types, &edge_types, &device);
-        let fwd = |g: &crate::data::hetero_graph::HeteroGraph<B>| mhc.forward(g);
-        let report = train_jepa(&mut graph, &fwd, &train_config, 0.1, 0.5, false);
+        let mut mhc = MhcRgcnConfig {
+            in_dim: actual_feat_dim,
+            hidden_dim,
+            num_layers: 8,
+            num_bases: 4,
+            n_streams: 4,
+            dropout: 0.0,
+        }
+        .init::<B>(&node_types, &edge_types, &device);
+        let report = train_jepa_input_weights(&mut mhc, &graph, &train_config, 0.12, 0.30, true);
         let meta = crate::model::weights::WeightMeta {
-            model_type: "rgcn_mhc_jepa".into(), graph_hash,
+            model_type: "rgcn_mhc_jepa".into(),
+            graph_hash,
             epochs_trained: report.epochs_trained,
-            final_loss: report.final_loss, final_auc: report.final_auc,
-            hidden_dim, timestamp: super::state::chrono_now(),
+            final_loss: report.final_loss,
+            final_auc: report.final_auc,
+            hidden_dim,
+            timestamp: super::state::chrono_now(),
         };
-        let saved = crate::model::weights::save_model(
-            &mhc, "rgcn_mhc_jepa", graph_hash, &meta, &device,
-        ).is_ok();
+        let saved =
+            crate::model::weights::save_model(&mhc, "rgcn_mhc_jepa", graph_hash, &meta, &device)
+                .is_ok();
         models_retrained.push(RetrainedModelInfo {
-            model_name: "RGCN".into(), config: "mHC+JEPA".into(),
+            model_name: "RGCN".into(),
+            config: "mHC+JEPA".into(),
             epochs_trained: report.epochs_trained,
-            final_auc: report.final_auc, final_loss: report.final_loss,
+            final_auc: report.final_auc,
+            final_loss: report.final_loss,
             checkpoint_saved: saved,
         });
     }
 
-    let checkpoints_saved = models_retrained.iter().filter(|m| m.checkpoint_saved).count();
+    let checkpoints_saved = models_retrained
+        .iter()
+        .filter(|m| m.checkpoint_saved)
+        .count();
     let duration_ms = start.elapsed().as_millis() as u64;
 
     Json(RetrainResponse {
-        status: format!("Retrained {} models in {}ms", models_retrained.len(), duration_ms),
+        status: format!(
+            "Retrained {} models in {}ms",
+            models_retrained.len(),
+            duration_ms
+        ),
         models_retrained,
         checkpoints_saved,
         total_duration_ms: duration_ms,
@@ -2360,8 +2834,8 @@ pub async fn predict_pql(
     State(state): State<Arc<AppState>>,
     Json(req): Json<PqlRequest>,
 ) -> Result<Json<PqlResponse>, (StatusCode, String)> {
+    use crate::tasks::link_predictor::{LinkPredictor, LinkPredictorConfig};
     use crate::tasks::pql::parse_pql;
-    use crate::tasks::link_predictor::{LinkPredictorConfig, LinkPredictor};
 
     // Parse the PQL query
     let task = match parse_pql(&req.query) {
@@ -2391,7 +2865,10 @@ pub async fn predict_pql(
         .ok_or_else(|| {
             (
                 StatusCode::BAD_REQUEST,
-                format!("No embedding for {}:{}", task.source_type, req.source_node_id),
+                format!(
+                    "No embedding for {}:{}",
+                    task.source_type, req.source_node_id
+                ),
             )
         })?;
 
@@ -2415,7 +2892,10 @@ pub async fn predict_pql(
             query: req.query,
             parsed_task: Some(parsed),
             predictions: None,
-            error: Some(format!("No target nodes of type '{}' found", task.target_type)),
+            error: Some(format!(
+                "No target nodes of type '{}' found",
+                task.target_type
+            )),
         }));
     }
 
@@ -2510,32 +2990,56 @@ pub async fn explain_link(
     let top_features_desc: Vec<String> = importances
         .iter()
         .take(3)
-        .map(|fi| format!("dim[{}]: importance={:.4}, direction={:.4}", fi.feature_idx, fi.importance, fi.direction))
+        .map(|fi| {
+            format!(
+                "dim[{}]: importance={:.4}, direction={:.4}",
+                fi.feature_idx, fi.importance, fi.direction
+            )
+        })
         .collect();
 
     let explanation = PredictionExplanation {
         methodology: "Perturbation-based feature importance (KumoRFM §2.4)".into(),
         inputs: vec![
-            format!("Source: {} ({}:{})", src_name, req.source_type, req.source_id),
-            format!("Target: {} ({}:{})", tgt_name, req.target_type, req.target_id),
+            format!(
+                "Source: {} ({}:{})",
+                src_name, req.source_type, req.source_id
+            ),
+            format!(
+                "Target: {} ({}:{})",
+                tgt_name, req.target_type, req.target_id
+            ),
             format!("Embedding dim: {}", state.hidden_dim),
         ],
         reasoning_steps: vec![
             ReasoningStep {
                 step: 1,
-                description: format!("Compute base dot-product score between {} and {}", src_name, tgt_name),
+                description: format!(
+                    "Compute base dot-product score between {} and {}",
+                    src_name, tgt_name
+                ),
                 result: format!("base_score = {:.4}", base_score),
             },
             ReasoningStep {
                 step: 2,
-                description: format!("Perturb each of {} features by ±σ, measure score change", state.hidden_dim),
-                result: format!("Top {} features: {}", importances.len(), top_features_desc.join("; ")),
+                description: format!(
+                    "Perturb each of {} features by ±σ, measure score change",
+                    state.hidden_dim
+                ),
+                result: format!(
+                    "Top {} features: {}",
+                    importances.len(),
+                    top_features_desc.join("; ")
+                ),
             },
         ],
         conclusion: format!(
             "The link between {} and {} (score={:.4}) is most influenced by {} embedding dimensions. \
              Positive direction means the feature pushes the prediction score higher.",
-            src_name, tgt_name, base_score, importances.len()
+            src_name,
+            tgt_name,
+            base_score,
+            importances.len()
         ),
         confidence: Some((base_score.abs() as f64).min(1.0)),
         models_used: vec!["GraphSAGE".into()],
@@ -2592,7 +3096,10 @@ pub async fn graph_mutate(
     // Apply mutations via InstantGNN propagation
     let mutation_result = {
         let mut prop = state.propagation.lock().map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {}", e))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Lock error: {}", e),
+            )
         })?;
         let result = prop.apply_mutations(&req.events);
 
@@ -2601,7 +3108,10 @@ pub async fn graph_mutate(
         {
             // Update SAGE embeddings (primary prediction source)
             let mut emb = state.embeddings.write().map_err(|e| {
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("RwLock error: {}", e))
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("RwLock error: {}", e),
+                )
             })?;
             let hidden_dim = emb.hidden_dim;
             for (node_type, vecs) in &updated {
@@ -2612,7 +3122,10 @@ pub async fn graph_mutate(
         {
             // Update ALL 5 models (SAGE, RGCN, GAT, GT, HEHRGNN)
             let mut all_models = state.model_embeddings.write().map_err(|e| {
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("RwLock error: {}", e))
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("RwLock error: {}", e),
+                )
             })?;
             for (_model_name, model_emb) in all_models.iter_mut() {
                 let hidden_dim = model_emb.hidden_dim;
@@ -2629,7 +3142,10 @@ pub async fn graph_mutate(
     // Update retrain monitor with drift
     let retrain_status = {
         let mut monitor = state.retrain_monitor.lock().map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {}", e))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Lock error: {}", e),
+            )
         })?;
         monitor.record_drift(mutation_result.drift_delta);
         monitor.status()
@@ -2638,32 +3154,39 @@ pub async fn graph_mutate(
     // Log mutations
     {
         let mut log = state.mutation_log.lock().map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {}", e))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Lock error: {}", e),
+            )
         })?;
         log.extend(req.events.clone());
     }
 
-    let total_mutations = state
-        .mutation_log
-        .lock()
-        .map(|l| l.len())
-        .unwrap_or(0);
+    let total_mutations = state.mutation_log.lock().map(|l| l.len()).unwrap_or(0);
 
     // Auto-retrain: when drift exceeds θ, spawn background retrain (all 5 models + GEPA)
     let auto_retrain_triggered = if retrain_status.retrain_recommended {
-        println!("  🔄 Auto-retrain triggered! Drift {:.4} > θ {:.4}. Spawning background retrain...",
-            retrain_status.cumulative_drift, retrain_status.threshold);
+        println!(
+            "  🔄 Auto-retrain triggered! Drift {:.4} > θ {:.4}. Spawning background retrain...",
+            retrain_status.cumulative_drift, retrain_status.threshold
+        );
 
         // Reset drift monitor so we don't re-trigger
         {
-            let mut monitor = state.retrain_monitor.lock().unwrap();
-            monitor.record_retrain(&super::state::chrono_now());
+            if let Ok(mut monitor) = state.retrain_monitor.lock() {
+                monitor.record_retrain(&super::state::chrono_now());
+            } else {
+                eprintln!("  ⚠️  Failed to lock retrain_monitor while resetting drift state");
+            }
         }
 
         // Reset propagation drift
         {
-            let mut prop = state.propagation.lock().unwrap();
-            prop.reset_drift();
+            if let Ok(mut prop) = state.propagation.lock() {
+                prop.reset_drift();
+            } else {
+                eprintln!("  ⚠️  Failed to lock propagation state while resetting drift");
+            }
         }
 
         // Spawn background retrain task
@@ -2674,12 +3197,11 @@ pub async fn graph_mutate(
                 epochs: 15,
                 lr: 0.01,
             };
-            let result = retrain(
-                axum::extract::State(state_clone),
-                axum::Json(req),
-            ).await;
-            println!("  🔄 [background] Retrain complete: {} models retrained",
-                result.0.models_retrained.len());
+            let result = retrain(axum::extract::State(state_clone), axum::Json(req)).await;
+            println!(
+                "  🔄 [background] Retrain complete: {} models retrained",
+                result.0.models_retrained.len()
+            );
         });
 
         true

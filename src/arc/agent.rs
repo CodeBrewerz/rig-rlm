@@ -12,9 +12,9 @@ use indexmap::IndexMap;
 use super::data::Grid;
 use super::prompt::format_arc_task;
 use super::signature::ArcSolver;
-use crate::monad::{AgentConfig, AgentContext, Role};
 use crate::monad::interaction::agent_task;
 use crate::monad::provider::ProviderConfig;
+use crate::monad::{AgentConfig, AgentContext, Role};
 use crate::sandbox::ExecutorKind;
 
 /// Wraps the monadic agent loop for ARC-AGI tasks.
@@ -90,7 +90,9 @@ impl Module for ArcAgentModule {
         let mut ctx = AgentContext::new(agent_config);
         let program = agent_task(&task_prompt);
 
-        let result = ctx.run(program).await
+        let result = ctx
+            .run(program)
+            .await
             .map_err(|e| anyhow::anyhow!("ARC agent execution failed: {e}"))?;
 
         // 6. Extract code and outputs from the result
@@ -113,7 +115,10 @@ impl Optimizable for ArcAgentModule {
 
     fn parameters(&mut self) -> IndexMap<String, &mut dyn Optimizable> {
         let mut map = IndexMap::new();
-        map.insert("predictor".to_string(), &mut self.predictor as &mut dyn Optimizable);
+        map.insert(
+            "predictor".to_string(),
+            &mut self.predictor as &mut dyn Optimizable,
+        );
         map
     }
 
@@ -130,15 +135,15 @@ impl Optimizable for ArcAgentModule {
 /// - Dimension mismatch detection
 impl FeedbackEvaluator for ArcAgentModule {
     async fn feedback_metric(&self, example: &Example, prediction: &Prediction) -> FeedbackMetric {
-        let predicted_outputs = prediction.get("outputs", None)
+        let predicted_outputs = prediction
+            .get("outputs", None)
             .as_str()
             .unwrap_or("")
             .to_string();
         let expected_outputs = example.get("expected_outputs", None);
 
         // Parse grids
-        let predicted: std::result::Result<Vec<Grid>, _> =
-            serde_json::from_str(&predicted_outputs);
+        let predicted: std::result::Result<Vec<Grid>, _> = serde_json::from_str(&predicted_outputs);
         let expected: std::result::Result<Vec<Grid>, _> =
             serde_json::from_value(expected_outputs.clone());
 
@@ -172,9 +177,9 @@ impl FeedbackEvaluator for ArcAgentModule {
             } else {
                 let mismatches = count_cell_mismatches(pred, exp);
                 let dim_match = pred.len() == exp.len()
-                    && pred.first().map_or(true, |r| {
-                        exp.first().map_or(true, |er| r.len() == er.len())
-                    });
+                    && pred
+                        .first()
+                        .map_or(true, |r| exp.first().map_or(true, |er| r.len() == er.len()));
 
                 feedback_lines.push(format!(
                     "Test {}: ✗ {} cell{} wrong{}",
@@ -218,18 +223,16 @@ impl FeedbackEvaluator for ArcAgentModule {
 /// plus all cells in the non-overlapping area.
 pub fn count_cell_mismatches(predicted: &Grid, expected: &Grid) -> usize {
     let max_rows = predicted.len().max(expected.len());
-    let max_cols = predicted.first().map_or(0, |r| r.len())
+    let max_cols = predicted
+        .first()
+        .map_or(0, |r| r.len())
         .max(expected.first().map_or(0, |r| r.len()));
 
     let mut mismatches = 0;
     for row in 0..max_rows {
         for col in 0..max_cols {
-            let pred_val = predicted
-                .get(row)
-                .and_then(|r| r.get(col));
-            let exp_val = expected
-                .get(row)
-                .and_then(|r| r.get(col));
+            let pred_val = predicted.get(row).and_then(|r| r.get(col));
+            let exp_val = expected.get(row).and_then(|r| r.get(col));
 
             match (pred_val, exp_val) {
                 (Some(a), Some(b)) if a != b => mismatches += 1,
@@ -249,11 +252,13 @@ pub fn count_cell_mismatches(predicted: &Grid, expected: &Grid) -> usize {
 fn extract_arc_outputs(result: &str, ctx: &AgentContext) -> (String, String) {
     // Try to parse as JSON (SUBMIT result)
     if let Ok(val) = serde_json::from_str::<serde_json::Value>(result) {
-        let code = val.get("code")
+        let code = val
+            .get("code")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let outputs = val.get("outputs")
+        let outputs = val
+            .get("outputs")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
@@ -263,7 +268,11 @@ fn extract_arc_outputs(result: &str, ctx: &AgentContext) -> (String, String) {
     }
 
     // Fallback: extract last code block from assistant messages
-    let code = ctx.history.messages().iter().rev()
+    let code = ctx
+        .history
+        .messages()
+        .iter()
+        .rev()
         .find(|m| m.role == Role::Assistant)
         .map(|m| {
             if let Some(start) = m.content.find("```") {

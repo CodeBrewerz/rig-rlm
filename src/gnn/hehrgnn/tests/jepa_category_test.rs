@@ -11,14 +11,14 @@
 
 use burn::backend::NdArray;
 use burn::prelude::*;
-use hehrgnn::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
+use hehrgnn::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
 use hehrgnn::model::gat::GatConfig;
 use hehrgnn::model::graph_transformer::GraphTransformerConfig;
 use hehrgnn::model::graphsage::GraphSageModelConfig;
-use hehrgnn::model::lora::{init_hetero_basis_adapter, LoraConfig};
+use hehrgnn::model::lora::{LoraConfig, init_hetero_basis_adapter};
 use hehrgnn::model::mhc::MhcRgcnConfig;
 use hehrgnn::model::trainer::*;
-use hehrgnn::tasks::link_predictor::{build_link_pc, LinkPredictor, LinkPredictorConfig};
+use hehrgnn::tasks::link_predictor::{LinkPredictor, LinkPredictorConfig, build_link_pc};
 use std::collections::HashMap;
 
 type B = NdArray;
@@ -133,7 +133,8 @@ fn test_jepa_latent_space_category_clustering() {
     let config = GraphBuildConfig {
         node_feat_dim: dim,
         add_reverse_edges: true,
-        add_self_loops: true, add_positional_encoding: true,
+        add_self_loops: true,
+        add_positional_encoding: true,
     };
 
     let mut graph = build_hetero_graph::<B>(&facts, &config, &device);

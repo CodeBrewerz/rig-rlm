@@ -67,6 +67,7 @@ pub fn init_lora_adapter<B: Backend>(
     alpha: f32,
     device: &B::Device,
 ) -> LoraAdapter<B> {
+    let rank = rank.max(1);
     let lora_a = nn::LinearConfig::new(d_in, rank)
         .with_bias(false)
         .init(device);
@@ -176,7 +177,11 @@ impl<B: Backend> HeteroBasisAdapter<B> {
     pub fn forward_for_type(&self, x: Tensor<B, 2>, type_key: &str) -> Tensor<B, 2> {
         let type_idx = match self.type_idx(type_key) {
             Some(idx) => idx,
-            None => return Tensor::zeros_like(&x), // unknown type → zero adapter
+            None => {
+                // Unknown type: zero adapter contribution with the correct output shape.
+                let batch = x.dims()[0];
+                return Tensor::<B, 2>::zeros([batch, self.d_out], &x.device());
+            }
         };
 
         // Get blend coefficients for this type and softmax normalize
@@ -381,8 +386,33 @@ pub fn compute_link_scores(
 }
 
 fn softmax_vec(v: &[f32]) -> Vec<f32> {
+    if v.is_empty() {
+        return Vec::new();
+    }
+
     let max = v.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    if !max.is_finite() {
+        return vec![1.0 / v.len() as f32; v.len()];
+    }
     let exps: Vec<f32> = v.iter().map(|x| (x - max).exp()).collect();
     let sum: f32 = exps.iter().sum();
-    exps.iter().map(|e| e / sum).collect()
+    if !sum.is_finite() || sum <= 1e-12 {
+        return vec![1.0 / v.len() as f32; v.len()];
+    }
+
+    let mut probs: Vec<f32> = exps.iter().map(|e| e / sum).collect();
+    for p in &mut probs {
+        if !p.is_finite() || *p < 0.0 {
+            *p = 0.0;
+        }
+    }
+    let norm: f32 = probs.iter().sum();
+    if norm <= 1e-12 || !norm.is_finite() {
+        vec![1.0 / v.len() as f32; v.len()]
+    } else {
+        for p in &mut probs {
+            *p /= norm;
+        }
+        probs
+    }
 }

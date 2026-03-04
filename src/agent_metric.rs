@@ -9,10 +9,10 @@
 //! The textual feedback drives GEPA's evolutionary search — the richer
 //! and more actionable the feedback, the better GEPA performs.
 
-use dspy_rs::*;
 use crate::agent_module::AgentModule;
-use crate::sandbox::Pyo3CodeExecutor;
 use crate::sandbox::CodeExecutor;
+use crate::sandbox::Pyo3CodeExecutor;
+use dspy_rs::*;
 
 /// Implements FeedbackEvaluator for AgentModule so GEPA can optimize it.
 ///
@@ -25,11 +25,13 @@ impl FeedbackEvaluator for AgentModule {
         let mut weight_sum: f32 = 0.0;
 
         // Extract predicted values
-        let predicted_answer = prediction.get("answer", None)
+        let predicted_answer = prediction
+            .get("answer", None)
             .as_str()
             .unwrap_or("")
             .to_string();
-        let predicted_code = prediction.get("code", None)
+        let predicted_code = prediction
+            .get("code", None)
             .as_str()
             .unwrap_or("")
             .to_string();
@@ -46,13 +48,13 @@ impl FeedbackEvaluator for AgentModule {
             match executor.execute(&predicted_code).await {
                 Ok(result) => {
                     if result.is_error() {
-                        let err_msg = result.exception.as_ref()
+                        let err_msg = result
+                            .exception
+                            .as_ref()
                             .map(|e| e.message.as_str())
                             .or(result.stderr.lines().last())
                             .unwrap_or("unknown error");
-                        feedback_lines.push(format!(
-                            "✗ Code execution failed: {}", err_msg
-                        ));
+                        feedback_lines.push(format!("✗ Code execution failed: {}", err_msg));
                         total_score += 0.0;
                     } else if result.is_submitted() {
                         feedback_lines.push("✓ Code executed and called SUBMIT()".to_string());
@@ -77,7 +79,8 @@ impl FeedbackEvaluator for AgentModule {
         }
 
         // 3. Answer comparison (exact match or fuzzy)
-        let expected = example.get("answer", None)
+        let expected = example
+            .get("answer", None)
             .as_str()
             .unwrap_or("")
             .to_string();
@@ -85,14 +88,19 @@ impl FeedbackEvaluator for AgentModule {
         let answer_score = if predicted_answer.trim() == expected.trim() {
             feedback_lines.push("✓ Exact answer match".to_string());
             1.0
-        } else if predicted_answer.to_lowercase().contains(&expected.to_lowercase()) {
+        } else if predicted_answer
+            .to_lowercase()
+            .contains(&expected.to_lowercase())
+        {
             feedback_lines.push(format!(
-                "◐ Partial match: expected '{}', got '{}'", expected, predicted_answer
+                "◐ Partial match: expected '{}', got '{}'",
+                expected, predicted_answer
             ));
             0.5
         } else {
             feedback_lines.push(format!(
-                "✗ Wrong answer: expected '{}', got '{}'", expected, predicted_answer
+                "✗ Wrong answer: expected '{}', got '{}'",
+                expected, predicted_answer
             ));
             0.0
         };
@@ -118,7 +126,11 @@ impl FeedbackEvaluator for AgentModule {
             weight_sum += 0.2;
         }
 
-        let final_score = if weight_sum > 0.0 { total_score / weight_sum } else { 0.0 };
+        let final_score = if weight_sum > 0.0 {
+            total_score / weight_sum
+        } else {
+            0.0
+        };
 
         FeedbackMetric::new(final_score, feedback_lines.join("\n"))
     }

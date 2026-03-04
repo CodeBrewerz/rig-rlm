@@ -13,12 +13,12 @@
 
 use burn::backend::NdArray;
 use burn::prelude::*;
-use hehrgnn::data::graph_builder::{build_from_schema, GraphBuildConfig};
+use hehrgnn::data::graph_builder::{GraphBuildConfig, build_from_schema};
 use hehrgnn::data::synthetic::{SyntheticDataConfig, TqlSchema};
 use hehrgnn::model::gat::GatConfig;
 use hehrgnn::model::graph_transformer::GraphTransformerConfig;
 use hehrgnn::model::graphsage::GraphSageModelConfig;
-use hehrgnn::model::lora::{init_hetero_basis_adapter, LoraConfig};
+use hehrgnn::model::lora::{LoraConfig, init_hetero_basis_adapter};
 use hehrgnn::model::mhc::MhcRgcnConfig;
 use hehrgnn::model::trainer::*;
 use hehrgnn::tasks::link_predictor::{LinkPredictor, LinkPredictorConfig};

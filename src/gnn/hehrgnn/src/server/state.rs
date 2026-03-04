@@ -12,8 +12,8 @@ pub fn chrono_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     // Rough ISO format: YYYY-MM-DDTHH:MM:SSZ
     let days = secs / 86400;
     let time = secs % 86400;
@@ -90,7 +90,10 @@ impl PlainEmbeddings {
             hidden_dim = dims[1];
 
             let flat = tensor.clone().reshape([num_nodes * hidden_dim]).into_data();
-            let values: Vec<f32> = flat.as_slice::<f32>().unwrap().to_vec();
+            let values: Vec<f32> = flat
+                .as_slice::<f32>()
+                .map(|s| s.to_vec())
+                .unwrap_or_else(|_| vec![0.0; num_nodes * hidden_dim]);
 
             let mut per_node = Vec::with_capacity(num_nodes);
             for i in 0..num_nodes {
@@ -192,6 +195,10 @@ pub struct AppState {
     /// Learnable scorer for fiduciary recommendations (thread-safe for reward feedback).
     /// Uses asymmetric RL rewards: miss_penalty_multiplier=3.0 (paper 2402.18246).
     pub scorer: Arc<Mutex<crate::eval::learnable_scorer::LearnableScorer>>,
+    /// Graph hash used for scorer checkpoint persistence.
+    pub scorer_graph_hash: u64,
+    /// Persistent PC state for fiduciary recommend() self-learning across requests.
+    pub pc_state: Arc<Mutex<crate::eval::fiduciary::PcState>>,
 
     /// InstantGNN: PPR-based propagation state for incremental updates (KDD 2022).
     pub propagation: Arc<Mutex<crate::tasks::instant_propagation::PropagationState>>,
@@ -443,7 +450,7 @@ impl ModelTypeScores {
                 (dim, (e_val - c_val).powi(2))
             })
             .collect();
-        contribs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        contribs.sort_by(|a, b| b.1.total_cmp(&a.1));
         contribs
     }
 }
@@ -467,7 +474,13 @@ impl PrecomputedScores {
                         .map(|j| {
                             node_vecs
                                 .iter()
-                                .map(|e| if j < e.len() { e[j] } else { 0.0 })
+                                .map(|e| {
+                                    if j < e.len() && e[j].is_finite() {
+                                        e[j]
+                                    } else {
+                                        0.0
+                                    }
+                                })
                                 .sum::<f32>()
                                 / n as f32
                         })
@@ -476,7 +489,10 @@ impl PrecomputedScores {
                     // Compute L2 scores
                     let raw_scores: Vec<f32> = node_vecs
                         .iter()
-                        .map(|e| PlainEmbeddings::l2_distance(e, &centroid))
+                        .map(|e| {
+                            let d = PlainEmbeddings::l2_distance(e, &centroid);
+                            if d.is_finite() { d.max(0.0) } else { 0.0 }
+                        })
                         .collect();
 
                     // Global stats
@@ -489,7 +505,7 @@ impl PrecomputedScores {
 
                     // Sorted scores for percentile lookup
                     let mut sorted_scores = raw_scores.clone();
-                    sorted_scores.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    sorted_scores.sort_by(|a, b| a.total_cmp(b));
 
                     scores.insert(
                         (model_name.clone(), node_type.clone()),
@@ -543,13 +559,12 @@ impl Default for ServerConfig {
 impl AppState {
     /// Initialize: build graph → run ALL GNN models → extract plain embeddings.
     pub fn init(config: &ServerConfig) -> Arc<Self> {
-        use crate::data::graph_builder::{build_from_schema, GraphBuildConfig};
+        use crate::data::graph_builder::{GraphBuildConfig, build_from_schema};
         use crate::data::synthetic::{SyntheticDataConfig, TqlSchema};
         use crate::model::gat::GatConfig;
         use crate::model::graph_transformer::GraphTransformerConfig;
-        use crate::model::lora::{init_hetero_basis_adapter, LoraConfig};
+        use crate::model::lora::{LoraConfig, init_hetero_basis_adapter};
         use crate::model::mhc::MhcRgcnConfig;
-        use crate::model::rgcn::RgcnConfig;
         use crate::model::trainer::*;
 
         let device = <B as Backend>::Device::default();
@@ -557,8 +572,16 @@ impl AppState {
 
         // Load schema
         let schema = if let Some(ref path) = config.schema_path {
-            let tql = std::fs::read_to_string(path).expect("Failed to read schema file");
-            TqlSchema::parse(&tql)
+            match std::fs::read_to_string(path) {
+                Ok(tql) => TqlSchema::parse(&tql),
+                Err(e) => {
+                    eprintln!(
+                        "  ⚠️  Failed to read schema file '{}': {}. Falling back to DEFAULT_SCHEMA.",
+                        path, e
+                    );
+                    TqlSchema::parse(DEFAULT_SCHEMA)
+                }
+            }
         } else {
             TqlSchema::parse(DEFAULT_SCHEMA)
         };
@@ -624,7 +647,7 @@ impl AppState {
             perturb_frac: 1.0,
             mode: TrainMode::Fast,
         };
-        let mut graph = graph; // make mutable for training
+        let graph = graph;
 
         // Compute graph hash for checkpoint keying
         let graph_hash = {
@@ -672,8 +695,9 @@ impl AppState {
                 node_types.clone(),
                 &device,
             ));
-            let sage_fwd = |g: &HeteroGraph<B>| sage_model.forward(g);
-            let sage_report = train_jepa(&mut graph, &sage_fwd, &train_config, 0.1, 0.5, false);
+            let _adapter_report = train_adapter(&mut sage_model, &graph, &train_config);
+            let sage_report =
+                train_jepa_input_weights(&mut sage_model, &graph, &train_config, 0.12, 0.35, true);
             println!("  ✅ GraphSAGE trained (auc={:.4})", sage_report.final_auc);
             // Save checkpoint
             let meta = crate::model::weights::WeightMeta {
@@ -734,8 +758,9 @@ impl AppState {
             );
             loaded
         } else {
-            let rgcn_fwd = |g: &HeteroGraph<B>| mhc_rgcn.forward(g);
-            let rgcn_report = train_jepa(&mut graph, &rgcn_fwd, &train_config, 0.1, 0.5, false);
+            let mut mhc_rgcn = mhc_rgcn;
+            let rgcn_report =
+                train_jepa_input_weights(&mut mhc_rgcn, &graph, &train_config, 0.12, 0.30, true);
             println!(
                 "  ✅ RGCN+mHC trained (auc={:.4}, 8 layers)",
                 rgcn_report.final_auc
@@ -786,8 +811,9 @@ impl AppState {
             );
             loaded
         } else {
-            let gat_fwd = |g: &HeteroGraph<B>| gat_model.forward(g);
-            let gat_report = train_jepa(&mut graph, &gat_fwd, &train_config, 0.1, 0.5, false);
+            let mut gat_model = gat_model;
+            let gat_report =
+                train_jepa_input_weights(&mut gat_model, &graph, &train_config, 0.12, 0.30, true);
             println!("  ✅ GAT trained (auc={:.4})", gat_report.final_auc);
             let meta = crate::model::weights::WeightMeta {
                 model_type: "gat_jepa".into(),
@@ -828,8 +854,9 @@ impl AppState {
             );
             loaded
         } else {
-            let gt_fwd = |g: &HeteroGraph<B>| gt_model.forward(g);
-            let gt_report = train_jepa(&mut graph, &gt_fwd, &train_config, 0.1, 0.5, false);
+            let mut gt_model = gt_model;
+            let gt_report =
+                train_jepa_input_weights(&mut gt_model, &graph, &train_config, 0.12, 0.30, true);
             println!("  ✅ GPS trained (auc={:.4})", gt_report.final_auc);
             let meta = crate::model::weights::WeightMeta {
                 model_type: "gps_jepa".into(),
@@ -1094,7 +1121,7 @@ impl AppState {
         // ── Initialize learnable scorer with asymmetric RL rewards ──
         println!("  Initializing learnable scorer (asymmetric RL, 3× miss penalty)...");
         let scorer = {
-            use crate::eval::learnable_scorer::{LearnableScorer, ScorerConfig};
+            use crate::eval::learnable_scorer::ScorerConfig;
             let scorer_config = ScorerConfig {
                 embedding_dim: config.hidden_dim,
                 hidden1: 64,
@@ -1152,6 +1179,8 @@ impl AppState {
             layer_activations: all_layer_activations,
             sae_state,
             scorer,
+            scorer_graph_hash: graph_hash_u64,
+            pc_state: Arc::new(Mutex::new(crate::eval::fiduciary::PcState::new())),
 
             propagation: propagation_state,
 

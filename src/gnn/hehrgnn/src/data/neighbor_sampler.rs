@@ -225,7 +225,7 @@ impl NeighborSampler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
+    use crate::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
     use burn::backend::NdArray;
 
     type TestBackend = NdArray;
@@ -289,7 +289,8 @@ mod tests {
         let config = GraphBuildConfig {
             node_feat_dim: 4,
             add_reverse_edges: true,
-            add_self_loops: false, add_positional_encoding: true,
+            add_self_loops: false,
+            add_positional_encoding: true,
         };
 
         build_hetero_graph(&facts, &config, &device)
@@ -335,7 +336,8 @@ mod tests {
         // Check that feature dimensions are preserved
         for (nt, feat) in &batch.graph.node_features {
             let feat_dim = feat.dims()[1];
-            assert_eq!(feat_dim, 4, "Feature dim mismatch for {}", nt);
+            let expected = graph.node_feat_dims[nt];
+            assert_eq!(feat_dim, expected, "Feature dim mismatch for {}", nt);
         }
     }
 }

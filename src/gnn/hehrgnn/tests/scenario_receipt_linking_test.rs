@@ -11,11 +11,11 @@ mod tests {
 
     type B = NdArray;
 
-    use hehrgnn::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
+    use hehrgnn::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
     use hehrgnn::data::hetero_graph::EdgeType;
     use hehrgnn::model::graphsage::GraphSageModelConfig;
     use hehrgnn::server::state::PlainEmbeddings;
-    use hehrgnn::tasks::link_predictor::LinkPredictorConfig;
+    use hehrgnn::tasks::link_predictor::{LinkPredictor, LinkPredictorConfig};
 
     fn fact(st: &str, s: &str, r: &str, dt: &str, d: &str) -> GraphFact {
         GraphFact {
@@ -36,7 +36,13 @@ mod tests {
             let tx = format!("tx_{}", i);
             let receipt = format!("receipt_{}", i);
             let merch = merchants[i % merchants.len()];
-            let amt = if i % 3 == 0 { "large" } else if i % 3 == 1 { "medium" } else { "small" };
+            let amt = if i % 3 == 0 {
+                "large"
+            } else if i % 3 == 1 {
+                "medium"
+            } else {
+                "small"
+            };
             let acct = if i < 10 { "checking" } else { "credit_card" };
 
             // Transaction
@@ -45,19 +51,49 @@ mod tests {
             facts.push(fact("transaction", &tx, "posted_to", "account", acct));
 
             // Receipt (same merchant + amount = should match)
-            facts.push(fact("receipt", &receipt, "receipt_merchant", "merchant", merch));
-            facts.push(fact("receipt", &receipt, "receipt_amount", "amount_range", amt));
+            facts.push(fact(
+                "receipt",
+                &receipt,
+                "receipt_merchant",
+                "merchant",
+                merch,
+            ));
+            facts.push(fact(
+                "receipt",
+                &receipt,
+                "receipt_amount",
+                "amount_range",
+                amt,
+            ));
 
             // Known link
-            facts.push(fact("receipt", &receipt, "evidence_for", "transaction", &tx));
+            facts.push(fact(
+                "receipt",
+                &receipt,
+                "evidence_for",
+                "transaction",
+                &tx,
+            ));
             gt_links.push((receipt, tx));
         }
 
         // 5 orphan receipts (no matching transaction)
         for i in 20..25 {
             let receipt = format!("receipt_{}", i);
-            facts.push(fact("receipt", &receipt, "receipt_merchant", "merchant", "unknown_vendor"));
-            facts.push(fact("receipt", &receipt, "receipt_amount", "amount_range", "small"));
+            facts.push(fact(
+                "receipt",
+                &receipt,
+                "receipt_merchant",
+                "merchant",
+                "unknown_vendor",
+            ));
+            facts.push(fact(
+                "receipt",
+                &receipt,
+                "receipt_amount",
+                "amount_range",
+                "small",
+            ));
         }
 
         // Account ownership
@@ -82,22 +118,48 @@ mod tests {
         println!("  ═══════════════════════════════════════════════════════════════\n");
 
         let config = GraphBuildConfig {
-            node_feat_dim: 32, add_reverse_edges: true, add_self_loops: true, add_positional_encoding: true,
+            node_feat_dim: 32,
+            add_reverse_edges: true,
+            add_self_loops: true,
+            add_positional_encoding: true,
         };
         let graph = build_hetero_graph::<B>(&facts, &config, &device);
-        println!("  Graph: {} nodes, {} edges", graph.total_nodes(), graph.total_edges());
+        println!(
+            "  Graph: {} nodes, {} edges",
+            graph.total_nodes(),
+            graph.total_edges()
+        );
 
         let node_types: Vec<String> = graph.node_types().iter().map(|s| s.to_string()).collect();
         let edge_types: Vec<EdgeType> = graph.edge_types().iter().map(|e| (*e).clone()).collect();
 
-        let sage = GraphSageModelConfig { in_dim: 32, hidden_dim: 64, num_layers: 2, dropout: 0.0 };
+        let in_dim = graph
+            .node_features
+            .values()
+            .next()
+            .map(|t| t.dims()[1])
+            .unwrap_or(32);
+        let sage = GraphSageModelConfig {
+            in_dim,
+            hidden_dim: 64,
+            num_layers: 2,
+            dropout: 0.0,
+        };
         let model = sage.init::<B>(&node_types, &edge_types, &device);
         let emb = PlainEmbeddings::from_burn(&model.forward(&graph));
 
         let receipt_embs = &emb.data["receipt"];
         let tx_embs = &emb.data["transaction"];
 
-        let lp = LinkPredictorConfig { hidden_dim: 64, mlp_dim: 64, dropout: 0.0 }.init::<B>(&device);
+        let lp = LinkPredictor::new(LinkPredictorConfig {
+            top_k: tx_embs.len(),
+            ..Default::default()
+        });
+        let tx_targets: Vec<(String, usize, String, Vec<f32>)> = tx_embs
+            .iter()
+            .enumerate()
+            .map(|(idx, v)| ("transaction".into(), idx, format!("tx_{}", idx), v.clone()))
+            .collect();
 
         // Score each receipt against all transactions
         println!("\n  ── RECEIPT ↔ TRANSACTION LINKING ──\n");
@@ -106,34 +168,51 @@ mod tests {
         for (receipt, tx) in &gt_links {
             let r_num: usize = receipt.strip_prefix("receipt_").unwrap().parse().unwrap();
             let t_num: usize = tx.strip_prefix("tx_").unwrap().parse().unwrap();
-            if r_num >= receipt_embs.len() || t_num >= tx_embs.len() { continue; }
-
-            let query = Tensor::<B, 2>::from_data(
-                burn::tensor::TensorData::new(receipt_embs[r_num].clone(), [1, 64]), &device);
-            let mut cand_data = vec![0.0f32; tx_embs.len() * 64];
-            for (i, e) in tx_embs.iter().enumerate() {
-                for (j, &v) in e.iter().enumerate() { if j < 64 { cand_data[i * 64 + j] = v; } }
+            if r_num >= receipt_embs.len() || t_num >= tx_embs.len() {
+                continue;
             }
-            let candidates = Tensor::<B, 2>::from_data(
-                burn::tensor::TensorData::new(cand_data, [tx_embs.len(), 64]), &device);
-            let scores = lp.rank_candidates(query, candidates);
-            let scores_data: Vec<f32> = scores.into_data().as_slice::<f32>().unwrap().to_vec();
 
-            let mut indexed: Vec<(usize, f32)> = scores_data.iter().enumerate().map(|(i,&s)| (i,s)).collect();
-            indexed.sort_by(|a,b| b.1.partial_cmp(&a.1).unwrap());
-            let rank = indexed.iter().position(|(i,_)| *i == t_num).unwrap_or(999) + 1;
+            let result = lp.predict(
+                &receipt_embs[r_num],
+                &tx_targets,
+                None,
+                None,
+                "receipt",
+                r_num,
+            );
+            let rank = result
+                .predictions
+                .iter()
+                .position(|p| p.target_id == t_num)
+                .unwrap_or(tx_embs.len())
+                + 1;
             ranks.push(rank);
         }
 
         let hit1 = ranks.iter().filter(|&&r| r == 1).count();
         let hit3 = ranks.iter().filter(|&&r| r <= 3).count();
         let hit5 = ranks.iter().filter(|&&r| r <= 5).count();
-        let mrr: f64 = ranks.iter().map(|&r| 1.0/r as f64).sum::<f64>() / ranks.len() as f64;
+        let mrr: f64 = ranks.iter().map(|&r| 1.0 / r as f64).sum::<f64>() / ranks.len() as f64;
 
         println!("    Total receipt-tx pairs: {}", ranks.len());
-        println!("    Hit@1:  {}/{} ({:.0}%)", hit1, ranks.len(), hit1 as f64/ranks.len() as f64*100.0);
-        println!("    Hit@3:  {}/{} ({:.0}%)", hit3, ranks.len(), hit3 as f64/ranks.len() as f64*100.0);
-        println!("    Hit@5:  {}/{} ({:.0}%)", hit5, ranks.len(), hit5 as f64/ranks.len() as f64*100.0);
+        println!(
+            "    Hit@1:  {}/{} ({:.0}%)",
+            hit1,
+            ranks.len(),
+            hit1 as f64 / ranks.len() as f64 * 100.0
+        );
+        println!(
+            "    Hit@3:  {}/{} ({:.0}%)",
+            hit3,
+            ranks.len(),
+            hit3 as f64 / ranks.len() as f64 * 100.0
+        );
+        println!(
+            "    Hit@5:  {}/{} ({:.0}%)",
+            hit5,
+            ranks.len(),
+            hit5 as f64 / ranks.len() as f64 * 100.0
+        );
         println!("    MRR:    {:.4}", mrr);
 
         // Embedding similarity
@@ -142,7 +221,10 @@ mod tests {
             let r: usize = receipt.strip_prefix("receipt_").unwrap().parse().unwrap();
             let t: usize = tx.strip_prefix("tx_").unwrap().parse().unwrap();
             if r < receipt_embs.len() && t < tx_embs.len() {
-                matched_sims.push(PlainEmbeddings::cosine_similarity(&receipt_embs[r], &tx_embs[t]));
+                matched_sims.push(PlainEmbeddings::cosine_similarity(
+                    &receipt_embs[r],
+                    &tx_embs[t],
+                ));
             }
         }
         let avg_sim = matched_sims.iter().sum::<f32>() / matched_sims.len().max(1) as f32;

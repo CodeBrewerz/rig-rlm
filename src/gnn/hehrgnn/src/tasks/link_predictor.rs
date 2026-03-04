@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use crate::model::pc::bridge::{build_fiduciary_pc, NUM_CATEGORIES};
+use crate::model::pc::bridge::{NUM_CATEGORIES, build_fiduciary_pc};
 use crate::model::pc::circuit::CompiledCircuit;
 use crate::model::pc::query;
 
@@ -220,7 +220,7 @@ impl LinkPredictor {
             .map(|(idx, (_tt, _tid, _name, t_emb))| (idx, dot_product(source_emb, t_emb)))
             .collect();
 
-        scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scores.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         let top_k = self.config.top_k.min(scores.len());
         let predictions: Vec<LinkPrediction> = scores[..top_k]
@@ -283,7 +283,7 @@ impl LinkPredictor {
             return None;
         }
 
-        sim_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        sim_scores.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         let mut seen: HashMap<usize, f32> = HashMap::new();
         for &(_idx, sim, tid) in &sim_scores {
@@ -301,7 +301,7 @@ impl LinkPredictor {
         }
 
         let mut target_scores: Vec<(usize, f32)> = seen.into_iter().collect();
-        target_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        target_scores.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         let top_k = self.config.top_k.min(target_scores.len());
         let predictions: Vec<LinkPrediction> = target_scores[..top_k]
@@ -366,14 +366,15 @@ impl LinkPredictor {
             .map(|(idx, (_tt, _tid, _name, t_emb))| (idx, dot_product(source_emb, t_emb)))
             .collect();
 
-        scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scores.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         let top_k = self.config.top_k.min(scores.len());
         let mut pc_analyses: Vec<PcLinkAnalysis> = Vec::with_capacity(top_k);
 
         for &(idx, dot_score) in &scores[..top_k] {
             let score_bin = discretize_score(dot_score);
-            let target_bin = idx.min(NUM_CATEGORIES - 1);
+            let (_tt, target_id, _name, _emb) = &target_embs[idx];
+            let target_bin = (*target_id).min(NUM_CATEGORIES - 1);
 
             let evidence: Vec<Option<usize>> = vec![Some(score_bin), Some(norm_bin), None];
 
@@ -415,7 +416,7 @@ impl LinkPredictor {
                     lift_factors.push((format!("{}={}", var_name, var_val), lift_val));
                 }
             }
-            lift_factors.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            lift_factors.sort_by(|a, b| b.1.total_cmp(&a.1));
 
             pc_analyses.push(PcLinkAnalysis {
                 probability: prob,
@@ -511,9 +512,7 @@ pub fn weighted_negative_sample(
         while count < num_negatives_per_positive && attempts < num_negatives_per_positive * 10 {
             attempts += 1;
             let r = next_rand(&mut seed);
-            let neg = match cumulative
-                .binary_search_by(|x| x.partial_cmp(&r).unwrap_or(std::cmp::Ordering::Equal))
-            {
+            let neg = match cumulative.binary_search_by(|x| x.total_cmp(&r)) {
                 Ok(i) => i.min(num_targets - 1),
                 Err(i) => i.min(num_targets - 1),
             };
@@ -546,7 +545,7 @@ pub fn diversity_filter(embeddings: &[Vec<f32>], keep_ratio: f32) -> Vec<usize> 
         })
         .collect();
 
-    avg_sims.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    avg_sims.sort_by(|a, b| a.1.total_cmp(&b.1));
     avg_sims[..keep_count].iter().map(|&(idx, _)| idx).collect()
 }
 
@@ -827,11 +826,7 @@ pub fn explain_prediction(
         });
     }
 
-    importances.sort_by(|a, b| {
-        b.importance
-            .partial_cmp(&a.importance)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    importances.sort_by(|a, b| b.importance.total_cmp(&a.importance));
     importances.truncate(top_k);
     importances
 }
@@ -1063,6 +1058,63 @@ mod tests {
             assert!(a.probability >= 0.0 && a.probability <= 1.0);
         }
         println!("✅ PC link prediction: P={:.3}", pc[0].probability);
+    }
+
+    #[test]
+    fn test_predict_with_pc_uses_target_ids_not_rank_index() {
+        let predictor = LinkPredictor::new(LinkPredictorConfig {
+            top_k: 2,
+            ..Default::default()
+        });
+
+        // Intentionally use target IDs that don't match score-sorted positions.
+        // Historical data says target_id=4 is much more likely for high score bins.
+        let targets = vec![
+            ("sub-ledger".into(), 1, "LowProb".into(), vec![0.0, 1.0]), // lower dot
+            ("sub-ledger".into(), 4, "HighProb".into(), vec![1.0, 0.0]), // higher dot
+        ];
+        let src = vec![1.0, 0.0];
+
+        let historical: Vec<(f32, f32, usize)> = vec![
+            (1.2, 1.0, 4),
+            (1.1, 1.0, 4),
+            (1.0, 1.0, 4),
+            (0.9, 1.0, 4),
+            (-0.4, 1.0, 1),
+            (-0.3, 1.0, 1),
+            (-0.2, 1.0, 1),
+            (-0.1, 1.0, 1),
+            (0.8, 1.0, 4),
+            (-0.2, 1.0, 1),
+        ];
+        let mut circuit = build_link_pc(&historical, 5, 12);
+
+        let (result, pc) = predictor.predict_with_pc(&src, &targets, &mut circuit, "case", 7);
+
+        let top_pred = &result.predictions[0];
+        assert_eq!(
+            top_pred.target_id, 4,
+            "Expected score ranking to prefer target_id=4"
+        );
+
+        let score_bin = super::discretize_score(top_pred.score);
+        let src_norm: f32 = src.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let norm_bin = super::discretize_norm(src_norm);
+        let target_bin = top_pred.target_id.min(NUM_CATEGORIES - 1);
+
+        let evidence = vec![Some(score_bin), Some(norm_bin), None];
+        let cond = query::conditional(&mut circuit, &evidence, &[super::PC_VAR_TARGET]);
+        let probs = cond
+            .get(&super::PC_VAR_TARGET)
+            .expect("target conditional must exist");
+        let expected = probs[target_bin];
+
+        assert!(
+            (pc[0].probability - expected).abs() < 1e-12,
+            "PC probability should index by target_id bin; got {}, expected {}",
+            pc[0].probability,
+            expected
+        );
     }
 
     #[test]

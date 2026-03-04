@@ -13,15 +13,18 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::State,
-    response::{IntoResponse, Response, sse::{Event, Sse}},
+    response::{
+        IntoResponse, Response,
+        sse::{Event, Sse},
+    },
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
-use crate::monad::{AgentConfig, AgentContext};
 use crate::monad::interaction::agent_task;
+use crate::monad::{AgentConfig, AgentContext};
 
 // ── A2A Protocol Types ────────────────────────────────────────────
 
@@ -233,10 +236,7 @@ async fn handle_a2a_request(
 }
 
 /// Handle `message/send` — synchronous task execution.
-async fn handle_message_send(
-    state: Arc<A2aServerState>,
-    req: JsonRpcRequest,
-) -> Response {
+async fn handle_message_send(state: Arc<A2aServerState>, req: JsonRpcRequest) -> Response {
     // Parse params
     let params: MessageSendParams = match serde_json::from_value(req.params) {
         Ok(p) => p,
@@ -282,7 +282,10 @@ async fn handle_message_send(
         .await
         .map_err(|e| anyhow::anyhow!("Task channel error: {e}"))
         .and_then(|r| r);
-    tracing::info!("[a2a] handle_message_send: got result (ok={})", result.is_ok());
+    tracing::info!(
+        "[a2a] handle_message_send: got result (ok={})",
+        result.is_ok()
+    );
 
     let task = match result {
         Ok(answer) => A2aTask {
@@ -336,10 +339,7 @@ async fn handle_message_send(
 ///
 /// Uses manual SSE formatting instead of axum's Sse wrapper to avoid
 /// buffering issues that prevent events from reaching the client.
-async fn handle_message_stream(
-    state: Arc<A2aServerState>,
-    req: JsonRpcRequest,
-) -> Response {
+async fn handle_message_stream(state: Arc<A2aServerState>, req: JsonRpcRequest) -> Response {
     // Parse params
     let params: MessageSendParams = match serde_json::from_value(req.params) {
         Ok(p) => p,
@@ -383,7 +383,10 @@ async fn handle_message_stream(
         .await
         .map_err(|e| anyhow::anyhow!("Task channel error: {e}"))
         .and_then(|r| r);
-    tracing::info!("[a2a] handle_message_stream: got result (ok={})", result.is_ok());
+    tracing::info!(
+        "[a2a] handle_message_stream: got result (ok={})",
+        result.is_ok()
+    );
 
     // Build SSE body manually: "working" event + final event
     let working = serde_json::json!({
@@ -426,7 +429,10 @@ async fn handle_message_stream(
         serde_json::to_string(&final_event).unwrap(),
     );
 
-    tracing::info!("[a2a] handle_message_stream: returning {} bytes SSE body.", body.len());
+    tracing::info!(
+        "[a2a] handle_message_stream: returning {} bytes SSE body.",
+        body.len()
+    );
 
     axum::http::Response::builder()
         .status(200)
@@ -466,7 +472,10 @@ fn run_agent_task(
     let task = task.to_string();
     let (tx, rx) = tokio::sync::oneshot::channel();
 
-    tracing::info!("[a2a] Spawning agent thread for task: {}", &task[..task.len().min(80)]);
+    tracing::info!(
+        "[a2a] Spawning agent thread for task: {}",
+        &task[..task.len().min(80)]
+    );
 
     std::thread::spawn(move || {
         tracing::info!("[a2a] Agent thread started, building runtime...");
@@ -486,7 +495,10 @@ fn run_agent_task(
             let program = agent_task(&task);
             let result = ctx.run(program).await;
 
-            tracing::info!("[a2a] Monadic program finished (ok={}), shutting down...", result.is_ok());
+            tracing::info!(
+                "[a2a] Monadic program finished (ok={}), shutting down...",
+                result.is_ok()
+            );
 
             if let Err(e) = ctx.shutdown().await {
                 tracing::warn!("[a2a] Failed to shutdown executor: {e}");
@@ -496,7 +508,10 @@ fn run_agent_task(
             result.map_err(|e| anyhow::anyhow!("{e}"))
         });
 
-        tracing::info!("[a2a] Agent thread done (ok={}), sending result.", result.is_ok());
+        tracing::info!(
+            "[a2a] Agent thread done (ok={}), sending result.",
+            result.is_ok()
+        );
         let _ = tx.send(result);
     });
 

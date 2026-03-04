@@ -290,17 +290,15 @@ impl LlmProvider {
 
         let embed_model = std::env::var("RLM_EMBEDDING_MODEL")
             .unwrap_or_else(|_| "qwen/qwen3-embedding-8b".to_string());
-        let url = format!(
-            "{}/embeddings",
-            self.config.base_url.trim_end_matches('/')
-        );
+        let url = format!("{}/embeddings", self.config.base_url.trim_end_matches('/'));
 
         let body = json!({
             "model": embed_model,
             "input": text,
         });
 
-        let response = self.http
+        let response = self
+            .http
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.config.api_key))
             .header("Content-Type", "application/json")
@@ -330,9 +328,7 @@ impl LlmProvider {
             Ok(resp) => {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
-                eprintln!(
-                    "⚠️ embed API returned {status}: {body}. Using hash fallback."
-                );
+                eprintln!("⚠️ embed API returned {status}: {body}. Using hash fallback.");
                 Ok(hash_embedding(text, HASH_EMBED_DIM))
             }
             Err(e) => {

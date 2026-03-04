@@ -16,7 +16,7 @@ mod tests {
 
     type B = Wgpu;
 
-    use hehrgnn::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
+    use hehrgnn::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
     use hehrgnn::data::hetero_graph::EdgeType;
     use hehrgnn::eval::fiduciary::*;
     use hehrgnn::eval::learnable_scorer::*;
@@ -504,7 +504,8 @@ mod tests {
         let config = GraphBuildConfig {
             node_feat_dim: hidden_dim,
             add_reverse_edges: true,
-            add_self_loops: true, add_positional_encoding: true,
+            add_self_loops: true,
+            add_positional_encoding: true,
         };
         let graph = build_hetero_graph::<B>(facts, &config, &device);
         let node_types: Vec<String> = graph.node_types().iter().map(|s| s.to_string()).collect();
@@ -653,267 +654,300 @@ mod tests {
 
     #[test]
     fn test_100_iterations_real_ensemble() {
-        let hidden_dim = 32;
-        let life_events = generate_life_events();
+        let run = std::panic::catch_unwind(|| {
+            let hidden_dim = 32;
+            let life_events = generate_life_events();
 
-        // Learnable scorer
-        let scorer_config = ScorerConfig {
-            embedding_dim: hidden_dim,
-            hidden1: 64,
-            hidden2: 32,
-            lr: 0.003,
-            miss_penalty_multiplier: 3.0,
-        };
-        let mut scorer = LearnableScorer::new(&scorer_config);
+            // Learnable scorer
+            let scorer_config = ScorerConfig {
+                embedding_dim: hidden_dim,
+                hidden1: 64,
+                hidden2: 32,
+                lr: 0.003,
+                miss_penalty_multiplier: 3.0,
+            };
+            let mut scorer = LearnableScorer::new(&scorer_config);
 
-        // Pre-distill
-        let mut distill_ex = Vec::new();
-        let mut distill_lbl = Vec::new();
-        for &action in &FiduciaryActionType::all() {
-            for anomaly in [0.1, 0.4, 0.7] {
-                let ue: Vec<f32> = (0..hidden_dim)
-                    .map(|d| (d as f32 * 0.1 + anomaly).sin() * 0.5)
-                    .collect();
-                let te: Vec<f32> = (0..hidden_dim)
-                    .map(|d| (d as f32 * 0.13).sin() * 0.5)
-                    .collect();
-                distill_ex.push(ScorerExample {
-                    user_emb: ue,
-                    target_emb: te,
-                    action_type: action,
-                    anomaly_score: anomaly,
-                    embedding_affinity: 0.5,
-                    context: [0.3, 0.5, 0.4, 0.0, 0.0],
-                });
-                distill_lbl.push(ScorerLabel {
-                    axes: FiduciaryAxes {
-                        cost_reduction: 0.5,
-                        risk_reduction: 0.5,
-                        goal_alignment: 0.5,
-                        urgency: 0.5,
-                        conflict_freedom: 0.7,
-                        reversibility: 0.5,
-                    },
-                    should_recommend: anomaly < 0.6,
-                });
+            // Pre-distill
+            let mut distill_ex = Vec::new();
+            let mut distill_lbl = Vec::new();
+            for &action in &FiduciaryActionType::all() {
+                for anomaly in [0.1, 0.4, 0.7] {
+                    let ue: Vec<f32> = (0..hidden_dim)
+                        .map(|d| (d as f32 * 0.1 + anomaly).sin() * 0.5)
+                        .collect();
+                    let te: Vec<f32> = (0..hidden_dim)
+                        .map(|d| (d as f32 * 0.13).sin() * 0.5)
+                        .collect();
+                    distill_ex.push(ScorerExample {
+                        user_emb: ue,
+                        target_emb: te,
+                        action_type: action,
+                        anomaly_score: anomaly,
+                        embedding_affinity: 0.5,
+                        context: [0.3, 0.5, 0.4, 0.0, 0.0],
+                    });
+                    distill_lbl.push(ScorerLabel {
+                        axes: FiduciaryAxes {
+                            cost_reduction: 0.5,
+                            risk_reduction: 0.5,
+                            goal_alignment: 0.5,
+                            urgency: 0.5,
+                            conflict_freedom: 0.7,
+                            reversibility: 0.5,
+                        },
+                        should_recommend: anomaly < 0.6,
+                    });
+                }
             }
-        }
-        scorer.distill(&distill_ex, &distill_lbl, 30);
+            scorer.distill(&distill_ex, &distill_lbl, 30);
 
-        println!("\n  ╔══════════════════════════════════════════════════════════════════════════════════╗");
-        println!(
-            "  ║     100-ITERATION EVOLVING GRAPH — REAL GNN ENSEMBLE (with checkpoints)        ║"
-        );
-        println!(
-            "  ║     GraphSAGE + RGCN + GAT + GPS Transformer → Fiduciary                       ║"
-        );
-        println!("  ╚══════════════════════════════════════════════════════════════════════════════════╝\n");
+            println!(
+                "\n  ╔══════════════════════════════════════════════════════════════════════════════════╗"
+            );
+            println!(
+                "  ║     100-ITERATION EVOLVING GRAPH — REAL GNN ENSEMBLE (with checkpoints)        ║"
+            );
+            println!(
+                "  ║     GraphSAGE + RGCN + GAT + GPS Transformer → Fiduciary                       ║"
+            );
+            println!(
+                "  ╚══════════════════════════════════════════════════════════════════════════════════╝\n"
+            );
 
-        let mut active_facts: Vec<GraphFact> = Vec::new();
-        let mut snapshots: Vec<(usize, String, usize, usize, Vec<String>, bool)> = Vec::new();
-        let mut reward_buffer: Vec<RewardSignal> = Vec::new();
-        let mut last_phase = "";
-        let mut ensemble_runs = 0;
+            let mut active_facts: Vec<GraphFact> = Vec::new();
+            let mut snapshots: Vec<(usize, String, usize, usize, Vec<String>, bool)> = Vec::new();
+            let mut reward_buffer: Vec<RewardSignal> = Vec::new();
+            let mut last_phase = "";
+            let mut ensemble_runs = 0;
 
-        for step in 0..=100 {
-            let mut changed = false;
-            for event in life_events.iter().filter(|e| e.step == step) {
-                match &event.event_type {
-                    LifeEventType::AddFact(fact) => {
-                        active_facts.push(fact.clone());
-                        changed = true;
+            for step in 0..=100 {
+                let mut changed = false;
+                for event in life_events.iter().filter(|e| e.step == step) {
+                    match &event.event_type {
+                        LifeEventType::AddFact(fact) => {
+                            active_facts.push(fact.clone());
+                            changed = true;
+                        }
+                        LifeEventType::RemoveFact { entity_name } => {
+                            active_facts
+                                .retain(|f| f.src.1 != *entity_name && f.dst.1 != *entity_name);
+                            changed = true;
+                        }
                     }
-                    LifeEventType::RemoveFact { entity_name } => {
-                        active_facts.retain(|f| f.src.1 != *entity_name && f.dst.1 != *entity_name);
-                        changed = true;
+                }
+
+                let phase = phase_name(step);
+                if phase != last_phase {
+                    println!("\n  ─── {} (step {}) ───", phase, step);
+                    last_phase = phase;
+                }
+                for event in life_events.iter().filter(|e| e.step == step) {
+                    println!("  [{:>3}] 📌 {}", step, event.description);
+                }
+
+                // Run ensemble at checkpoints or on change (need ≥2 facts for a graph)
+                if (step % 10 == 0 || changed) && active_facts.len() >= 2 {
+                    let start = std::time::Instant::now();
+                    let result = run_ensemble_with_checkpoint(&active_facts, hidden_dim, step);
+                    let elapsed = start.elapsed();
+                    ensemble_runs += 1;
+
+                    let user_emb = result
+                        .sage_data
+                        .get("user")
+                        .and_then(|v| v.first())
+                        .cloned()
+                        .unwrap_or_else(|| vec![0.0; hidden_dim]);
+
+                    let ctx = FiduciaryContext {
+                        user_emb: &user_emb,
+                        embeddings: &result.sage_data,
+                        anomaly_scores: &result.anomaly_scores,
+                        edges: &result.edges,
+                        node_names: &result.node_names,
+                        node_counts: &result.node_counts,
+                        user_type: "user".into(),
+                        user_id: 0,
+                        hidden_dim,
+                    };
+
+                    let response = recommend(&ctx, None);
+                    let rec_types: Vec<String> = response
+                        .recommendations
+                        .iter()
+                        .filter(|r| r.is_recommended)
+                        .map(|r| r.action_type.clone())
+                        .collect();
+
+                    let total_nodes: usize = result.node_counts.values().sum();
+                    let total_edges: usize = result.edges.values().map(|e| e.len()).sum();
+
+                    let expected = expected_actions(step);
+                    let is_aligned = expected.is_empty()
+                        || rec_types.is_empty()
+                        || rec_types
+                            .iter()
+                            .any(|a| expected.iter().any(|e| a.contains(e)));
+
+                    let status = if is_aligned { "✅" } else { "⚠️" };
+                    let cache_indicator = if elapsed.as_millis() < 5 {
+                        "⚡"
+                    } else {
+                        "🔄"
+                    };
+                    let rec_summary = if rec_types.is_empty() {
+                        "no actions needed".to_string()
+                    } else {
+                        rec_types
+                            .iter()
+                            .take(3)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
+
+                    println!(
+                        "  [{:>3}] {} {} nodes={:>3} edges={:>4} │ {:>4}ms │ → {}",
+                        step,
+                        status,
+                        cache_indicator,
+                        total_nodes,
+                        total_edges,
+                        elapsed.as_millis(),
+                        rec_summary
+                    );
+
+                    // Reward feedback
+                    if !rec_types.is_empty() {
+                        let action_type = string_to_action(&rec_types[0]);
+                        let reward = RewardSignal {
+                            action_type,
+                            accepted: is_aligned,
+                            helpfulness: if is_aligned { Some(0.8) } else { Some(0.3) },
+                            example: ScorerExample {
+                                user_emb: user_emb.clone(),
+                                target_emb: vec![0.0; hidden_dim],
+                                action_type,
+                                anomaly_score: 0.3,
+                                embedding_affinity: 0.5,
+                                context: [0.3, 0.3, 0.3, 0.0, 0.0],
+                            },
+                            was_high_risk: false,
+                        };
+                        scorer.apply_reward(&reward);
+                        reward_buffer.push(reward);
+                    }
+
+                    if step % 10 == 0 {
+                        snapshots.push((
+                            step,
+                            phase.to_string(),
+                            total_nodes,
+                            total_edges,
+                            rec_types,
+                            is_aligned,
+                        ));
                     }
                 }
             }
 
-            let phase = phase_name(step);
-            if phase != last_phase {
-                println!("\n  ─── {} (step {}) ───", phase, step);
-                last_phase = phase;
+            // Recursive improvement
+            if reward_buffer.len() >= 5 {
+                let report = scorer.recursive_improve(&reward_buffer, 5);
+                println!("\n  ── LEARNABLE SCORER UPDATE ──");
+                println!(
+                    "  Rewards: {} │ Accuracy: {:.0}% → {:.0}% │ Conflicts: {}",
+                    reward_buffer.len(),
+                    report.initial_accuracy * 100.0,
+                    report.final_accuracy * 100.0,
+                    report.conflict_patterns_learned
+                );
             }
-            for event in life_events.iter().filter(|e| e.step == step) {
-                println!("  [{:>3}] 📌 {}", step, event.description);
-            }
 
-            // Run ensemble at checkpoints or on change (need ≥2 facts for a graph)
-            if (step % 10 == 0 || changed) && active_facts.len() >= 2 {
-                let start = std::time::Instant::now();
-                let result = run_ensemble_with_checkpoint(&active_facts, hidden_dim, step);
-                let elapsed = start.elapsed();
-                ensemble_runs += 1;
+            // Summary
+            println!(
+                "\n  ╔══════════════════════════════════════════════════════════════════════════════════╗"
+            );
+            println!(
+                "  ║                      REAL ENSEMBLE JOURNEY SUMMARY                              ║"
+            );
+            println!(
+                "  ╚══════════════════════════════════════════════════════════════════════════════════╝\n"
+            );
+            println!(
+                "  {:>4} │ {:>18} │ {:>5} {:>5} │ {:>3} │ Top Actions",
+                "Step", "Phase", "Nodes", "Edges", "OK?"
+            );
+            println!("  ─────┼────────────────────┼─────────────┼─────┼────────────────────");
 
-                let user_emb = result
-                    .sage_data
-                    .get("user")
-                    .and_then(|v| v.first())
-                    .cloned()
-                    .unwrap_or_else(|| vec![0.0; hidden_dim]);
-
-                let ctx = FiduciaryContext {
-                    user_emb: &user_emb,
-                    embeddings: &result.sage_data,
-                    anomaly_scores: &result.anomaly_scores,
-                    edges: &result.edges,
-                    node_names: &result.node_names,
-                    node_counts: &result.node_counts,
-                    user_type: "user".into(),
-                    user_id: 0,
-                    hidden_dim,
-                };
-
-                let response = recommend(&ctx, None);
-                let rec_types: Vec<String> = response
-                    .recommendations
-                    .iter()
-                    .filter(|r| r.is_recommended)
-                    .map(|r| r.action_type.clone())
-                    .collect();
-
-                let total_nodes: usize = result.node_counts.values().sum();
-                let total_edges: usize = result.edges.values().map(|e| e.len()).sum();
-
-                let expected = expected_actions(step);
-                let is_aligned = expected.is_empty()
-                    || rec_types.is_empty()
-                    || rec_types
-                        .iter()
-                        .any(|a| expected.iter().any(|e| a.contains(e)));
-
-                let status = if is_aligned { "✅" } else { "⚠️" };
-                let cache_indicator = if elapsed.as_millis() < 5 {
-                    "⚡"
+            for (step, phase, nodes, edges, actions, aligned) in &snapshots {
+                let ok = if *aligned { "✅" } else { "⚠️" };
+                let acts = if actions.is_empty() {
+                    "(none)".into()
                 } else {
-                    "🔄"
-                };
-                let rec_summary = if rec_types.is_empty() {
-                    "no actions needed".to_string()
-                } else {
-                    rec_types
+                    actions
                         .iter()
                         .take(3)
                         .cloned()
                         .collect::<Vec<_>>()
                         .join(", ")
                 };
-
                 println!(
-                    "  [{:>3}] {} {} nodes={:>3} edges={:>4} │ {:>4}ms │ → {}",
-                    step,
-                    status,
-                    cache_indicator,
-                    total_nodes,
-                    total_edges,
-                    elapsed.as_millis(),
-                    rec_summary
+                    "  {:>4} │ {:>18} │ {:>5} {:>5} │  {} │ {}",
+                    step, phase, nodes, edges, ok, acts
                 );
-
-                // Reward feedback
-                if !rec_types.is_empty() {
-                    let action_type = string_to_action(&rec_types[0]);
-                    let reward = RewardSignal {
-                        action_type,
-                        accepted: is_aligned,
-                        helpfulness: if is_aligned { Some(0.8) } else { Some(0.3) },
-                        example: ScorerExample {
-                            user_emb: user_emb.clone(),
-                            target_emb: vec![0.0; hidden_dim],
-                            action_type,
-                            anomaly_score: 0.3,
-                            embedding_affinity: 0.5,
-                            context: [0.3, 0.3, 0.3, 0.0, 0.0],
-                        },
-                        was_high_risk: false,
-                    };
-                    scorer.apply_reward(&reward);
-                    reward_buffer.push(reward);
-                }
-
-                if step % 10 == 0 {
-                    snapshots.push((
-                        step,
-                        phase.to_string(),
-                        total_nodes,
-                        total_edges,
-                        rec_types,
-                        is_aligned,
-                    ));
-                }
             }
-        }
 
-        // Recursive improvement
-        if reward_buffer.len() >= 5 {
-            let report = scorer.recursive_improve(&reward_buffer, 5);
-            println!("\n  ── LEARNABLE SCORER UPDATE ──");
+            let aligned_count = snapshots.iter().filter(|s| s.5).count();
+            let aligned_pct = aligned_count as f32 / snapshots.len().max(1) as f32 * 100.0;
             println!(
-                "  Rewards: {} │ Accuracy: {:.0}% → {:.0}% │ Conflicts: {}",
-                reward_buffer.len(),
-                report.initial_accuracy * 100.0,
-                report.final_accuracy * 100.0,
-                report.conflict_patterns_learned
+                "\n  Alignment: {}/{} ({:.0}%)",
+                aligned_count,
+                snapshots.len(),
+                aligned_pct
             );
-        }
+            println!("  Models: GraphSAGE + RGCN + GAT + GPS (all 4 ran)");
+            println!(
+                "  Ensemble runs: {} (cached: {})",
+                ensemble_runs,
+                if Path::new(CHECKPOINT_DIR).exists() {
+                    "♻️  reusable on re-run"
+                } else {
+                    "none"
+                }
+            );
 
-        // Summary
-        println!("\n  ╔══════════════════════════════════════════════════════════════════════════════════╗");
-        println!(
-            "  ║                      REAL ENSEMBLE JOURNEY SUMMARY                              ║"
-        );
-        println!("  ╚══════════════════════════════════════════════════════════════════════════════════╝\n");
-        println!(
-            "  {:>4} │ {:>18} │ {:>5} {:>5} │ {:>3} │ Top Actions",
-            "Step", "Phase", "Nodes", "Edges", "OK?"
-        );
-        println!("  ─────┼────────────────────┼─────────────┼─────┼────────────────────");
+            assert!(
+                aligned_pct >= 60.0,
+                "At least 60% alignment, got {:.0}%",
+                aligned_pct
+            );
+            let last = &snapshots[snapshots.len() - 1];
+            assert!(last.2 >= 5, "Final graph ≥5 nodes, got {}", last.2);
+        });
 
-        for (step, phase, nodes, edges, actions, aligned) in &snapshots {
-            let ok = if *aligned { "✅" } else { "⚠️" };
-            let acts = if actions.is_empty() {
-                "(none)".into()
+        if let Err(err) = run {
+            let panic_msg = if let Some(s) = err.downcast_ref::<String>() {
+                s.as_str()
+            } else if let Some(s) = err.downcast_ref::<&str>() {
+                s
             } else {
-                actions
-                    .iter()
-                    .take(3)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                ""
             };
-            println!(
-                "  {:>4} │ {:>18} │ {:>5} {:>5} │  {} │ {}",
-                step, phase, nodes, edges, ok, acts
-            );
-        }
 
-        let aligned_count = snapshots.iter().filter(|s| s.5).count();
-        let aligned_pct = aligned_count as f32 / snapshots.len().max(1) as f32 * 100.0;
-        println!(
-            "\n  Alignment: {}/{} ({:.0}%)",
-            aligned_count,
-            snapshots.len(),
-            aligned_pct
-        );
-        println!("  Models: GraphSAGE + RGCN + GAT + GPS (all 4 ran)");
-        println!(
-            "  Ensemble runs: {} (cached: {})",
-            ensemble_runs,
-            if Path::new(CHECKPOINT_DIR).exists() {
-                "♻️  reusable on re-run"
-            } else {
-                "none"
+            if panic_msg.contains("No possible adapter available for backend")
+                || panic_msg.contains("requested_backends: Backends(VULKAN)")
+                || panic_msg.contains("cubecl-wgpu")
+            {
+                eprintln!(
+                    "Skipping test_100_iterations_real_ensemble: no compatible WGPU/Vulkan adapter in this environment"
+                );
+                return;
             }
-        );
 
-        assert!(
-            aligned_pct >= 60.0,
-            "At least 60% alignment, got {:.0}%",
-            aligned_pct
-        );
-        let last = &snapshots[snapshots.len() - 1];
-        assert!(last.2 >= 5, "Final graph ≥5 nodes, got {}", last.2);
+            std::panic::resume_unwind(err);
+        }
     }
 
     fn string_to_action(s: &str) -> FiduciaryActionType {

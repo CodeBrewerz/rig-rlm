@@ -429,7 +429,8 @@ fn test_asymmetric_vs_symmetric_ab_comparison() {
     assert!(
         shift_3x > shift_1x,
         "❌ Asymmetric scorer should shift more on a high-risk miss. 1× shift: {:.4}, 3× shift: {:.4}",
-        shift_1x, shift_3x
+        shift_1x,
+        shift_3x
     );
 
     let amplification = shift_3x / shift_1x.max(1e-8);

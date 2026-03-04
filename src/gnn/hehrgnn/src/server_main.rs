@@ -68,7 +68,10 @@ async fn main() {
     println!("  Initializing GNN platform...");
     println!("    Hidden dim:    {}", config.hidden_dim);
     println!("    Num facts:     {}", config.num_facts);
-    println!("    Schema:        {}", config.schema_path.as_deref().unwrap_or("(built-in)"));
+    println!(
+        "    Schema:        {}",
+        config.schema_path.as_deref().unwrap_or("(built-in)")
+    );
     println!();
 
     let state = AppState::init(&config);
@@ -102,7 +105,9 @@ async fn main() {
     println!("    POST /embeddings          — get node embedding vector");
     println!("    POST /match/rank          — rank match candidates (link prediction)");
     println!("    POST /classify            — classify nodes (category/tax code)");
-    println!("    POST /categorize          — transaction category prediction (TopK-NN + GNN link prediction)");
+    println!(
+        "    POST /categorize          — transaction category prediction (TopK-NN + GNN link prediction)"
+    );
     println!("    POST /anomaly/score       — anomaly scores for nodes");
     println!("    POST /similarity/search   — kNN similarity search");
     println!("    POST /fiduciary/actions   — fiduciary next-action predictions (with RL scorer)");

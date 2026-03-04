@@ -278,11 +278,7 @@ impl Generation {
             }
         }
 
-        if specs.is_empty() {
-            None
-        } else {
-            Some(specs)
-        }
+        if specs.is_empty() { None } else { Some(specs) }
     }
 }
 
@@ -349,7 +345,10 @@ This updates the greeting."#;
     fn parse_no_diff_when_no_markers() {
         let input = "```diff\nsome random text without diff markers\n```";
         let parsed = Generation::parse(input);
-        assert!(!parsed.has_patch(), "should not detect diff without --- or +++");
+        assert!(
+            !parsed.has_patch(),
+            "should not detect diff without --- or +++"
+        );
     }
 
     #[test]

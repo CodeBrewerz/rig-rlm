@@ -26,6 +26,7 @@ pub enum Distribution {
 impl Distribution {
     /// Create a uniform categorical over `k` categories.
     pub fn uniform_categorical(k: usize) -> Self {
+        let k = k.max(1);
         let log_p = -(k as f64).ln();
         Distribution::Categorical {
             log_probs: vec![log_p; k],
@@ -34,8 +35,24 @@ impl Distribution {
 
     /// Create a categorical from raw (unnormalized) probabilities.
     pub fn categorical_from_probs(probs: &[f64]) -> Self {
-        let sum: f64 = probs.iter().sum();
-        let log_probs: Vec<f64> = probs.iter().map(|p| (p / sum).ln()).collect();
+        if probs.is_empty() {
+            return Distribution::uniform_categorical(1);
+        }
+
+        let mut clean: Vec<f64> = probs
+            .iter()
+            .map(|&p| if p.is_finite() { p.max(0.0) } else { 0.0 })
+            .collect();
+        let sum: f64 = clean.iter().sum();
+        if !sum.is_finite() || sum <= 1e-12 {
+            return Distribution::uniform_categorical(clean.len());
+        }
+
+        for p in &mut clean {
+            *p = (*p / sum).clamp(1e-12, 1.0);
+        }
+        let renorm: f64 = clean.iter().sum();
+        let log_probs: Vec<f64> = clean.iter().map(|p| (p / renorm).ln()).collect();
         Distribution::Categorical { log_probs }
     }
 
@@ -175,6 +192,21 @@ mod tests {
         let p1 = d.log_prob(1).exp();
         assert!((p0 - 0.3).abs() < 1e-10);
         assert!((p1 - 0.7).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_categorical_from_probs_handles_invalid_inputs() {
+        let d = Distribution::categorical_from_probs(&[f64::NAN, -1.0, 0.0]);
+        let total: f64 = (0..3).map(|x| d.log_prob(x).exp()).sum();
+        assert!(total.is_finite());
+        assert!((total - 1.0).abs() < 1e-8, "Sum = {}", total);
+
+        let d_empty = Distribution::categorical_from_probs(&[]);
+        let p0 = d_empty.log_prob(0).exp();
+        assert!(
+            p0 > 0.99 && p0 <= 1.0,
+            "single-class fallback should be 1.0"
+        );
     }
 
     #[test]

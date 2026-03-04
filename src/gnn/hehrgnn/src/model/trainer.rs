@@ -11,7 +11,7 @@
 //! 2. Feature refinement: adjust node features to improve embeddings (lighter).
 
 use burn::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::data::hetero_graph::HeteroGraph;
 use crate::model::backbone::NodeEmbeddings;
@@ -72,12 +72,46 @@ pub struct TrainReport {
     pub mean_emb_norm: f32,
 }
 
+/// Adapter distillation objective settings.
+#[derive(Debug, Clone)]
+pub struct AdapterDistillConfig {
+    /// Weight for KL(teacher || adapter) on link score distributions.
+    pub kl_weight: f32,
+    /// Weight for embedding cosine alignment penalty (1 - cosine).
+    pub cosine_weight: f32,
+    /// Temperature used to smooth score distributions before KL.
+    pub temperature: f32,
+}
+
+impl Default for AdapterDistillConfig {
+    fn default() -> Self {
+        Self {
+            kl_weight: 0.35,
+            cosine_weight: 0.05,
+            temperature: 1.0,
+        }
+    }
+}
+
+/// Minimal interface for JEPA SPSA training on persistent model weights.
+///
+/// Models implementing this expose their input projection matrices so trainer
+/// can run perturbation-based updates without autograd.
+pub trait JepaTrainable<B: Backend> {
+    fn forward_embeddings(&self, graph: &HeteroGraph<B>) -> NodeEmbeddings<B>;
+    fn num_input_weights(&self) -> usize;
+    fn get_input_weight(&self, idx: usize) -> Tensor<B, 2>;
+    fn set_input_weight(&mut self, idx: usize, weight: Tensor<B, 2>);
+}
+
 /// Extract positive edges from graph as (src_type, src_idx, dst_type, dst_idx).
 pub fn extract_positive_edges<B: Backend>(
     graph: &HeteroGraph<B>,
 ) -> Vec<(String, usize, String, usize)> {
     let mut edges = Vec::new();
-    for (edge_key, edge_index) in &graph.edge_index {
+    let mut edge_items: Vec<_> = graph.edge_index.iter().collect();
+    edge_items.sort_by(|(a, _), (b, _)| a.cmp(b));
+    for (edge_key, edge_index) in edge_items {
         let num_edges = edge_index.dims()[1];
         if num_edges == 0 {
             continue;
@@ -113,16 +147,91 @@ pub fn sample_negative_edges<B: Backend>(
     neg_ratio: usize,
 ) -> Vec<(String, usize, String, usize)> {
     let mut negatives = Vec::new();
+    if neg_ratio == 0 || positive.is_empty() {
+        return negatives;
+    }
+
+    // Fast membership check: (src_type, dst_type, src_idx) -> set(dst_idx) positives.
+    let mut positive_sets: HashMap<(String, String, usize), HashSet<usize>> = HashMap::new();
+    // Destination popularity by dst_type for harder negatives.
+    let mut dst_popularity: HashMap<String, HashMap<usize, usize>> = HashMap::new();
+    for (src_type, src_idx, dst_type, dst_idx) in positive {
+        positive_sets
+            .entry((src_type.clone(), dst_type.clone(), *src_idx))
+            .or_default()
+            .insert(*dst_idx);
+        let per_type = dst_popularity.entry(dst_type.clone()).or_default();
+        *per_type.entry(*dst_idx).or_insert(0) += 1;
+    }
+
+    let mut hard_negatives: HashMap<String, Vec<usize>> = HashMap::new();
+    for (dst_type, counts) in dst_popularity {
+        let mut ranked: Vec<(usize, usize)> = counts.into_iter().collect();
+        // Frequent destinations make stronger negatives than uniformly random nodes.
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        hard_negatives.insert(dst_type, ranked.into_iter().map(|(idx, _)| idx).collect());
+    }
+
+    let mut used_negatives: HashMap<(String, String, usize), HashSet<usize>> = HashMap::new();
     let mut seed: u64 = 42;
-    for (src_type, src_idx, dst_type, _) in positive {
-        let dst_count = *graph.node_counts.get(dst_type).unwrap_or(&1);
+    for (src_type, src_idx, dst_type, pos_dst) in positive {
+        let dst_count = *graph.node_counts.get(dst_type).unwrap_or(&0);
+        if dst_count == 0 {
+            continue;
+        }
+
+        let key = (src_type.clone(), dst_type.clone(), *src_idx);
+        let pos_set = positive_sets.get(&key);
+        let used = used_negatives.entry(key).or_default();
+        let hard = hard_negatives
+            .get(dst_type)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+
         for _ in 0..neg_ratio {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let neg_dst = (seed >> 33) as usize % dst_count;
+            let mut candidate = None;
+
+            // Try hard negatives first (popular destination nodes), then random.
+            for _attempt in 0..24 {
+                let take_hard = !hard.is_empty() && next_u64(&mut seed) % 100 < 65;
+                let neg_dst = if take_hard {
+                    let pick = (next_u64(&mut seed) as usize) % hard.len().min(12);
+                    hard[pick]
+                } else {
+                    (next_u64(&mut seed) as usize) % dst_count
+                };
+
+                let is_positive = pos_set.is_some_and(|s| s.contains(&neg_dst));
+                if !is_positive && !used.contains(&neg_dst) {
+                    candidate = Some(neg_dst);
+                    break;
+                }
+            }
+
+            // Fallback: allow duplicate negatives, but still avoid true positives.
+            if candidate.is_none() {
+                let start = (next_u64(&mut seed) as usize) % dst_count;
+                for off in 0..dst_count {
+                    let neg_dst = (start + off) % dst_count;
+                    if !pos_set.is_some_and(|s| s.contains(&neg_dst)) {
+                        candidate = Some(neg_dst);
+                        break;
+                    }
+                }
+            }
+
+            // Final degenerate fallback (fully connected anchor): keep length stable.
+            let neg_dst = candidate.unwrap_or(*pos_dst);
             negatives.push((src_type.clone(), *src_idx, dst_type.clone(), neg_dst));
+            used.insert(neg_dst);
         }
     }
     negatives
+}
+
+fn next_u64(seed: &mut u64) -> u64 {
+    *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+    *seed
 }
 
 /// Extract embeddings as plain float vectors from NodeEmbeddings.
@@ -229,6 +338,299 @@ pub fn compute_bpr_loss(
     total / n as f32
 }
 
+fn scheduled_temperature(base: f32, epoch: usize, total_epochs: usize) -> f32 {
+    let base = base.clamp(0.03, 2.0);
+    if total_epochs <= 1 {
+        return base;
+    }
+
+    let warm_epochs = (total_epochs / 5).max(1);
+    let cool_start = (total_epochs * 2) / 3;
+    let start = (base * 1.5).min(2.0);
+    let end = (base * 0.7).max(0.03);
+
+    if epoch < warm_epochs {
+        let t = epoch as f32 / warm_epochs as f32;
+        start + (base - start) * t
+    } else if epoch >= cool_start {
+        let span = (total_epochs - cool_start).max(1) as f32;
+        let t = (epoch - cool_start) as f32 / span;
+        base + (end - base) * t
+    } else {
+        base
+    }
+}
+
+fn mean_embedding_norm(embeddings: &HashMap<String, Vec<Vec<f32>>>) -> f32 {
+    let mut total = 0.0f32;
+    let mut count = 0usize;
+    for vecs in embeddings.values() {
+        for v in vecs {
+            total += v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            count += 1;
+        }
+    }
+    if count > 0 { total / count as f32 } else { 0.0 }
+}
+
+fn model_input_weight_norm_sq<B: Backend, M: JepaTrainable<B>>(model: &M) -> f32 {
+    let mut total = 0.0f32;
+    for i in 0..model.num_input_weights() {
+        let data: Vec<f32> = model
+            .get_input_weight(i)
+            .into_data()
+            .as_slice::<f32>()
+            .unwrap()
+            .to_vec();
+        total += data.iter().map(|w| w * w).sum::<f32>();
+    }
+    total
+}
+
+/// JEPA SPSA training over model input projection matrices.
+///
+/// Unlike feature-only refinement, this updates persistent model parameters
+/// (saved via checkpoints), improving consistency across pipeline runs.
+pub fn train_jepa_input_weights<B: Backend, M: JepaTrainable<B>>(
+    model: &mut M,
+    graph: &HeteroGraph<B>,
+    config: &TrainConfig,
+    temperature: f32,
+    uniformity_weight: f32,
+    use_edge_predictor: bool,
+) -> TrainReport {
+    let positive = extract_positive_edges(graph);
+    let negative = sample_negative_edges(graph, &positive, config.neg_ratio);
+
+    let initial_emb = embeddings_to_plain(&model.forward_embeddings(graph));
+    let initial_loss = crate::model::jepa::compute_jepa_loss(
+        &initial_emb,
+        &positive,
+        &negative,
+        temperature,
+        uniformity_weight,
+    );
+    let initial_auc = link_prediction_auc(&initial_emb, &positive, &negative);
+
+    let hidden_dim = config_hidden_dim(&initial_emb);
+    let mut edge_pred = if use_edge_predictor {
+        Some(crate::model::jepa::EdgePredictor::new(
+            hidden_dim,
+            hidden_dim * 2,
+            hidden_dim,
+        ))
+    } else {
+        None
+    };
+
+    let mut best_loss = initial_loss;
+    let mut patience_counter = 0usize;
+    let mut final_loss = initial_loss;
+    let mut final_auc = initial_auc;
+    let mut final_mean_emb_norm = mean_embedding_norm(&initial_emb);
+    let mut epochs_trained = 0usize;
+    let lr = config.lr as f32;
+
+    for epoch in 0..config.epochs {
+        let epoch_temp = scheduled_temperature(temperature, epoch, config.epochs);
+
+        match config.mode {
+            TrainMode::Fast => {
+                let eps = 0.01f32;
+                for li in 0..model.num_input_weights() {
+                    let w = model.get_input_weight(li);
+                    let dims = w.dims();
+                    let device = w.device();
+                    let w_data: Vec<f32> =
+                        w.clone().into_data().as_slice::<f32>().unwrap().to_vec();
+                    if w_data.is_empty() {
+                        continue;
+                    }
+
+                    let mut seed: u64 = (epoch as u64 * 7919 + li as u64 * 31).wrapping_add(211);
+                    let delta: Vec<f32> = (0..w_data.len())
+                        .map(|_| {
+                            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                            if (seed >> 33) % 2 == 0 { 1.0 } else { -1.0 }
+                        })
+                        .collect();
+
+                    let w_plus: Vec<f32> = w_data
+                        .iter()
+                        .zip(&delta)
+                        .map(|(w, d)| w + eps * d)
+                        .collect();
+                    let wp_tensor = Tensor::<B, 1>::from_data(w_plus.as_slice(), &device)
+                        .reshape([dims[0], dims[1]]);
+                    model.set_input_weight(li, wp_tensor);
+                    let emb_plus = embeddings_to_plain(&model.forward_embeddings(graph));
+                    let loss_plus = crate::model::jepa::compute_jepa_loss(
+                        &emb_plus,
+                        &positive,
+                        &negative,
+                        epoch_temp,
+                        uniformity_weight,
+                    );
+
+                    let w_minus: Vec<f32> = w_data
+                        .iter()
+                        .zip(&delta)
+                        .map(|(w, d)| w - eps * d)
+                        .collect();
+                    let wm_tensor = Tensor::<B, 1>::from_data(w_minus.as_slice(), &device)
+                        .reshape([dims[0], dims[1]]);
+                    model.set_input_weight(li, wm_tensor);
+                    let emb_minus = embeddings_to_plain(&model.forward_embeddings(graph));
+                    let loss_minus = crate::model::jepa::compute_jepa_loss(
+                        &emb_minus,
+                        &positive,
+                        &negative,
+                        epoch_temp,
+                        uniformity_weight,
+                    );
+
+                    let grad_scalar = (loss_plus - loss_minus) / (2.0 * eps);
+                    let w_updated: Vec<f32> = w_data
+                        .iter()
+                        .zip(&delta)
+                        .map(|(w, d)| w - lr * grad_scalar * d)
+                        .collect();
+                    let wu_tensor = Tensor::<B, 1>::from_data(w_updated.as_slice(), &device)
+                        .reshape([dims[0], dims[1]]);
+                    model.set_input_weight(li, wu_tensor);
+
+                    if config.weight_decay > 0.0 {
+                        let wd = 1.0 - config.weight_decay as f32;
+                        let w_decayed = model.get_input_weight(li) * wd;
+                        model.set_input_weight(li, w_decayed);
+                    }
+                }
+            }
+            TrainMode::Full => {
+                let eps = 0.005f32;
+                let base_emb = embeddings_to_plain(&model.forward_embeddings(graph));
+                let base_loss = crate::model::jepa::compute_jepa_loss(
+                    &base_emb,
+                    &positive,
+                    &negative,
+                    epoch_temp,
+                    uniformity_weight,
+                );
+
+                for li in 0..model.num_input_weights() {
+                    let w = model.get_input_weight(li);
+                    let dims = w.dims();
+                    let device = w.device();
+                    let mut w_data: Vec<f32> =
+                        w.clone().into_data().as_slice::<f32>().unwrap().to_vec();
+                    let total = w_data.len();
+                    if total == 0 {
+                        continue;
+                    }
+
+                    let count = ((total as f64 * config.perturb_frac) as usize).max(1);
+                    let mut seed: u64 = (epoch as u64).wrapping_mul(31) + li as u64 + 17;
+
+                    for _ in 0..count {
+                        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        let idx = (seed >> 33) as usize % total;
+                        let orig = w_data[idx];
+
+                        w_data[idx] = orig + eps;
+                        let pw = Tensor::<B, 1>::from_data(w_data.as_slice(), &device)
+                            .reshape([dims[0], dims[1]]);
+                        model.set_input_weight(li, pw);
+                        let p_emb = embeddings_to_plain(&model.forward_embeddings(graph));
+                        let p_loss = crate::model::jepa::compute_jepa_loss(
+                            &p_emb,
+                            &positive,
+                            &negative,
+                            epoch_temp,
+                            uniformity_weight,
+                        );
+                        let grad = (p_loss - base_loss) / eps;
+                        w_data[idx] = orig - lr * grad;
+                    }
+
+                    let fw = Tensor::<B, 1>::from_data(w_data.as_slice(), &device)
+                        .reshape([dims[0], dims[1]]);
+                    model.set_input_weight(li, fw);
+
+                    if config.weight_decay > 0.0 {
+                        let wd = 1.0 - config.weight_decay as f32;
+                        let w_decayed = model.get_input_weight(li) * wd;
+                        model.set_input_weight(li, w_decayed);
+                    }
+                }
+            }
+        }
+
+        let post_emb = embeddings_to_plain(&model.forward_embeddings(graph));
+        let post_loss = crate::model::jepa::compute_jepa_loss(
+            &post_emb,
+            &positive,
+            &negative,
+            epoch_temp,
+            uniformity_weight,
+        );
+        let post_auc = link_prediction_auc(&post_emb, &positive, &negative);
+        let uniform = crate::model::jepa::compute_uniformity_loss(&post_emb);
+
+        if let Some(ref mut pred) = edge_pred {
+            pred.spsa_step(
+                &post_emb,
+                &positive,
+                &negative,
+                config.lr as f32,
+                epoch_temp,
+                epoch,
+            );
+        }
+
+        final_loss = post_loss;
+        final_auc = post_auc;
+        final_mean_emb_norm = mean_embedding_norm(&post_emb);
+        epochs_trained = epoch + 1;
+
+        if epoch % 5 == 0 || epoch == config.epochs.saturating_sub(1) {
+            eprintln!(
+                "  [train:jepa:weights] epoch {}: loss={:.4}, auc={:.4}, uniform={:.4}, temp={:.3}",
+                epoch, post_loss, post_auc, uniform, epoch_temp
+            );
+        }
+
+        if post_loss < best_loss - 0.001 {
+            best_loss = post_loss;
+            patience_counter = 0;
+        } else {
+            patience_counter += 1;
+            if patience_counter >= config.patience {
+                return TrainReport {
+                    epochs_trained,
+                    initial_loss,
+                    final_loss,
+                    initial_auc,
+                    final_auc,
+                    early_stopped: true,
+                    weight_norm_sq: model_input_weight_norm_sq(model),
+                    mean_emb_norm: final_mean_emb_norm,
+                };
+            }
+        }
+    }
+
+    TrainReport {
+        epochs_trained,
+        initial_loss,
+        final_loss,
+        initial_auc,
+        final_auc,
+        early_stopped: false,
+        weight_norm_sq: model_input_weight_norm_sq(model),
+        mean_emb_norm: final_mean_emb_norm,
+    }
+}
+
 /// Train a GraphSAGE model's weights.
 ///
 /// Dispatches to either Full (per-weight) or Fast (SPSA) mode based on config.
@@ -274,11 +676,7 @@ pub fn train_graphsage<B: Backend>(
                     let delta: Vec<f32> = (0..w_data.len())
                         .map(|_| {
                             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                            if (seed >> 33) % 2 == 0 {
-                                1.0
-                            } else {
-                                -1.0
-                            }
+                            if (seed >> 33) % 2 == 0 { 1.0 } else { -1.0 }
                         })
                         .collect();
 
@@ -415,11 +813,7 @@ pub fn train_graphsage<B: Backend>(
                     count += 1;
                 }
             }
-            if count > 0 {
-                total / count as f32
-            } else {
-                0.0
-            }
+            if count > 0 { total / count as f32 } else { 0.0 }
         };
 
         final_loss = post_loss;
@@ -536,11 +930,7 @@ pub fn train_with_probe_reward<B: Backend>(
             let delta: Vec<f32> = (0..w_data.len())
                 .map(|_| {
                     seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                    if (seed >> 33) % 2 == 0 {
-                        1.0
-                    } else {
-                        -1.0
-                    }
+                    if (seed >> 33) % 2 == 0 { 1.0 } else { -1.0 }
                 })
                 .collect();
 
@@ -725,11 +1115,7 @@ pub fn train_adapter<B: Backend>(
             let delta: Vec<f32> = (0..total)
                 .map(|_| {
                     seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                    if (seed >> 33) % 2 == 0 {
-                        1.0
-                    } else {
-                        -1.0
-                    }
+                    if (seed >> 33) % 2 == 0 { 1.0 } else { -1.0 }
                 })
                 .collect();
 
@@ -805,11 +1191,7 @@ pub fn train_adapter<B: Backend>(
             let delta: Vec<f32> = (0..total)
                 .map(|_| {
                     seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                    if (seed >> 33) % 2 == 0 {
-                        1.0
-                    } else {
-                        -1.0
-                    }
+                    if (seed >> 33) % 2 == 0 { 1.0 } else { -1.0 }
                 })
                 .collect();
 
@@ -889,11 +1271,7 @@ pub fn train_adapter<B: Backend>(
             let delta: Vec<f32> = (0..a_data.len())
                 .map(|_| {
                     seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                    if (seed >> 33) % 2 == 0 {
-                        1.0
-                    } else {
-                        -1.0
-                    }
+                    if (seed >> 33) % 2 == 0 { 1.0 } else { -1.0 }
                 })
                 .collect();
 
@@ -966,11 +1344,7 @@ pub fn train_adapter<B: Backend>(
             let delta_b: Vec<f32> = (0..b_data.len())
                 .map(|_| {
                     seed_b = seed_b.wrapping_mul(6364136223846793005).wrapping_add(1);
-                    if (seed_b >> 33) % 2 == 0 {
-                        1.0
-                    } else {
-                        -1.0
-                    }
+                    if (seed_b >> 33) % 2 == 0 { 1.0 } else { -1.0 }
                 })
                 .collect();
 
@@ -1076,6 +1450,298 @@ pub fn train_adapter<B: Backend>(
         early_stopped: false,
         weight_norm_sq: 0.0,
         mean_emb_norm: 0.0,
+    }
+}
+
+fn adapter_distill_objective(
+    student_emb: &HashMap<String, Vec<Vec<f32>>>,
+    teacher_emb: &HashMap<String, Vec<Vec<f32>>>,
+    positive: &[(String, usize, String, usize)],
+    negative: &[(String, usize, String, usize)],
+    all_edges: &[(String, usize, String, usize)],
+    teacher_scores_scaled: &[f32],
+    distill: &AdapterDistillConfig,
+) -> (f32, f32, f32, f32) {
+    let bpr = compute_bpr_loss(student_emb, positive, negative);
+    let student_scores = crate::model::lora::compute_link_scores(student_emb, all_edges);
+    let temp = distill.temperature.max(1e-3);
+    let student_scaled: Vec<f32> = student_scores.iter().map(|s| *s / temp).collect();
+    let kl = crate::model::lora::kl_divergence(teacher_scores_scaled, &student_scaled);
+    let cosine = crate::model::lora::avg_cosine_similarity(teacher_emb, student_emb);
+    let cosine_penalty = (1.0 - cosine).max(0.0);
+    let total = bpr + distill.kl_weight * kl + distill.cosine_weight * cosine_penalty;
+    (total, bpr, kl, cosine)
+}
+
+/// Adapter training with teacher-student distillation objective.
+///
+/// Phase 1: standard adapter BPR training.
+/// Phase 2: KL + cosine distillation against teacher embeddings.
+pub fn train_adapter_with_distillation<B: Backend>(
+    model: &mut crate::model::graphsage::GraphSageModel<B>,
+    graph: &HeteroGraph<B>,
+    config: &TrainConfig,
+    teacher_embeddings: &HashMap<String, Vec<Vec<f32>>>,
+    distill: &AdapterDistillConfig,
+) -> TrainReport {
+    if model.input_adapters.is_none() {
+        return train_adapter(model, graph, config);
+    }
+
+    let base = train_adapter(model, graph, config);
+
+    let positive = extract_positive_edges(graph);
+    let negative = sample_negative_edges(graph, &positive, config.neg_ratio);
+    let all_edges: Vec<(String, usize, String, usize)> =
+        positive.iter().chain(negative.iter()).cloned().collect();
+
+    let temp = distill.temperature.max(1e-3);
+    let teacher_scores = crate::model::lora::compute_link_scores(teacher_embeddings, &all_edges);
+    let teacher_scores_scaled: Vec<f32> = teacher_scores.iter().map(|s| *s / temp).collect();
+
+    let mut post_emb = embeddings_to_plain(&model.forward(graph));
+    let (mut best_loss, _, mut best_kl, mut best_cos) = adapter_distill_objective(
+        &post_emb,
+        teacher_embeddings,
+        &positive,
+        &negative,
+        &all_edges,
+        &teacher_scores_scaled,
+        distill,
+    );
+    let mut final_auc = link_prediction_auc(&post_emb, &positive, &negative);
+    let mut final_loss = best_loss;
+    let mut patience_counter = 0usize;
+    let mut distill_epochs_trained = 0usize;
+    let distill_epochs = (config.epochs / 2).clamp(5, 30);
+    let eps = 0.01f32;
+    let lr = (config.lr as f32) * 0.8;
+
+    for epoch in 0..distill_epochs {
+        // Distill blend weights.
+        {
+            let blend_val = model.input_adapters.as_ref().unwrap().blend_weights.val();
+            let blend_dims = blend_val.dims();
+            let device = blend_val.device();
+            let blend_data: Vec<f32> = blend_val
+                .clone()
+                .into_data()
+                .as_slice::<f32>()
+                .unwrap()
+                .to_vec();
+            let total = blend_data.len();
+
+            let mut seed: u64 = (epoch as u64 * 12391).wrapping_add(501);
+            let delta: Vec<f32> = (0..total)
+                .map(|_| {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    if (seed >> 33) % 2 == 0 { 1.0 } else { -1.0 }
+                })
+                .collect();
+
+            let w_plus: Vec<f32> = blend_data
+                .iter()
+                .zip(&delta)
+                .map(|(w, d)| w + eps * d)
+                .collect();
+            let bp = Tensor::<B, 1>::from_data(w_plus.as_slice(), &device)
+                .reshape([blend_dims[0], blend_dims[1]]);
+            model.input_adapters.as_mut().unwrap().blend_weights = model
+                .input_adapters
+                .as_ref()
+                .unwrap()
+                .blend_weights
+                .clone()
+                .map(|_| bp);
+            let emb_plus = embeddings_to_plain(&model.forward(graph));
+            let (loss_plus, _, _, _) = adapter_distill_objective(
+                &emb_plus,
+                teacher_embeddings,
+                &positive,
+                &negative,
+                &all_edges,
+                &teacher_scores_scaled,
+                distill,
+            );
+
+            let w_minus: Vec<f32> = blend_data
+                .iter()
+                .zip(&delta)
+                .map(|(w, d)| w - eps * d)
+                .collect();
+            let bm = Tensor::<B, 1>::from_data(w_minus.as_slice(), &device)
+                .reshape([blend_dims[0], blend_dims[1]]);
+            model.input_adapters.as_mut().unwrap().blend_weights = model
+                .input_adapters
+                .as_ref()
+                .unwrap()
+                .blend_weights
+                .clone()
+                .map(|_| bm);
+            let emb_minus = embeddings_to_plain(&model.forward(graph));
+            let (loss_minus, _, _, _) = adapter_distill_objective(
+                &emb_minus,
+                teacher_embeddings,
+                &positive,
+                &negative,
+                &all_edges,
+                &teacher_scores_scaled,
+                distill,
+            );
+
+            let grad = (loss_plus - loss_minus) / (2.0 * eps);
+            let w_updated: Vec<f32> = blend_data
+                .iter()
+                .zip(&delta)
+                .map(|(w, d)| w - lr * grad * d)
+                .collect();
+            let wu = Tensor::<B, 1>::from_data(w_updated.as_slice(), &device)
+                .reshape([blend_dims[0], blend_dims[1]]);
+            model.input_adapters.as_mut().unwrap().blend_weights = model
+                .input_adapters
+                .as_ref()
+                .unwrap()
+                .blend_weights
+                .clone()
+                .map(|_| wu);
+        }
+
+        // Distill DoRA magnitudes.
+        {
+            let mag_val = model.input_adapters.as_ref().unwrap().magnitudes.val();
+            let mag_dims = mag_val.dims();
+            let device = mag_val.device();
+            let mag_data: Vec<f32> = mag_val
+                .clone()
+                .into_data()
+                .as_slice::<f32>()
+                .unwrap()
+                .to_vec();
+            let total = mag_data.len();
+
+            let mut seed: u64 = (epoch as u64 * 16127).wrapping_add(913);
+            let delta: Vec<f32> = (0..total)
+                .map(|_| {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    if (seed >> 33) % 2 == 0 { 1.0 } else { -1.0 }
+                })
+                .collect();
+
+            let w_plus: Vec<f32> = mag_data
+                .iter()
+                .zip(&delta)
+                .map(|(w, d)| w + eps * d)
+                .collect();
+            let mp = Tensor::<B, 1>::from_data(w_plus.as_slice(), &device)
+                .reshape([mag_dims[0], mag_dims[1]]);
+            model.input_adapters.as_mut().unwrap().magnitudes = model
+                .input_adapters
+                .as_ref()
+                .unwrap()
+                .magnitudes
+                .clone()
+                .map(|_| mp);
+            let emb_plus = embeddings_to_plain(&model.forward(graph));
+            let (loss_plus, _, _, _) = adapter_distill_objective(
+                &emb_plus,
+                teacher_embeddings,
+                &positive,
+                &negative,
+                &all_edges,
+                &teacher_scores_scaled,
+                distill,
+            );
+
+            let w_minus: Vec<f32> = mag_data
+                .iter()
+                .zip(&delta)
+                .map(|(w, d)| w - eps * d)
+                .collect();
+            let mm = Tensor::<B, 1>::from_data(w_minus.as_slice(), &device)
+                .reshape([mag_dims[0], mag_dims[1]]);
+            model.input_adapters.as_mut().unwrap().magnitudes = model
+                .input_adapters
+                .as_ref()
+                .unwrap()
+                .magnitudes
+                .clone()
+                .map(|_| mm);
+            let emb_minus = embeddings_to_plain(&model.forward(graph));
+            let (loss_minus, _, _, _) = adapter_distill_objective(
+                &emb_minus,
+                teacher_embeddings,
+                &positive,
+                &negative,
+                &all_edges,
+                &teacher_scores_scaled,
+                distill,
+            );
+
+            let grad = (loss_plus - loss_minus) / (2.0 * eps);
+            let mag_lr = lr * 0.5;
+            let w_updated: Vec<f32> = mag_data
+                .iter()
+                .zip(&delta)
+                .map(|(w, d)| w - mag_lr * grad * d)
+                .collect();
+            let mu = Tensor::<B, 1>::from_data(w_updated.as_slice(), &device)
+                .reshape([mag_dims[0], mag_dims[1]]);
+            model.input_adapters.as_mut().unwrap().magnitudes = model
+                .input_adapters
+                .as_ref()
+                .unwrap()
+                .magnitudes
+                .clone()
+                .map(|_| mu);
+        }
+
+        post_emb = embeddings_to_plain(&model.forward(graph));
+        let (distill_loss, _bpr, kl, cos) = adapter_distill_objective(
+            &post_emb,
+            teacher_embeddings,
+            &positive,
+            &negative,
+            &all_edges,
+            &teacher_scores_scaled,
+            distill,
+        );
+        final_auc = link_prediction_auc(&post_emb, &positive, &negative);
+        final_loss = distill_loss;
+        distill_epochs_trained = epoch + 1;
+
+        if epoch % 5 == 0 || epoch == distill_epochs.saturating_sub(1) {
+            eprintln!(
+                "  [adapter:distill] epoch {}: total={:.4}, kl={:.5}, cos={:.4}, auc={:.4}",
+                epoch, distill_loss, kl, cos, final_auc
+            );
+        }
+
+        if distill_loss < best_loss - 0.0005 {
+            best_loss = distill_loss;
+            best_kl = kl;
+            best_cos = cos;
+            patience_counter = 0;
+        } else {
+            patience_counter += 1;
+            if patience_counter >= (config.patience / 2).max(3) {
+                eprintln!(
+                    "  [adapter:distill] Early stopping at epoch {}, best_kl={:.5}, best_cos={:.4}",
+                    epoch, best_kl, best_cos
+                );
+                break;
+            }
+        }
+    }
+
+    TrainReport {
+        epochs_trained: base.epochs_trained + distill_epochs_trained,
+        initial_loss: base.initial_loss,
+        final_loss,
+        initial_auc: base.initial_auc,
+        final_auc,
+        early_stopped: base.early_stopped || distill_epochs_trained < distill_epochs,
+        weight_norm_sq: 0.0,
+        mean_emb_norm: mean_embedding_norm(&post_emb),
     }
 }
 
@@ -1386,6 +2052,7 @@ pub fn train_jepa<B: Backend>(
     let mut epochs_trained = 0;
 
     for epoch in 0..config.epochs {
+        let epoch_temp = scheduled_temperature(temperature, epoch, config.epochs);
         let emb = model_forward(graph);
         let plain = embeddings_to_plain(&emb);
 
@@ -1394,7 +2061,7 @@ pub fn train_jepa<B: Backend>(
             &plain,
             &positive,
             &negative,
-            temperature,
+            epoch_temp,
             uniformity_weight,
         );
         let auc = link_prediction_auc(&plain, &positive, &negative);
@@ -1407,7 +2074,7 @@ pub fn train_jepa<B: Backend>(
                 &positive,
                 &negative,
                 config.lr as f32,
-                temperature,
+                epoch_temp,
                 epoch,
             );
         }
@@ -1448,8 +2115,8 @@ pub fn train_jepa<B: Backend>(
 
         if epoch % 5 == 0 || epoch == config.epochs - 1 {
             eprintln!(
-                "  [train:jepa] epoch {}: loss={:.4}, auc={:.4}, uniform={:.4}",
-                epoch, jepa_loss, auc, uniform
+                "  [train:jepa] epoch {}: loss={:.4}, auc={:.4}, uniform={:.4}, temp={:.3}",
+                epoch, jepa_loss, auc, uniform, epoch_temp
             );
         }
 
@@ -1525,6 +2192,7 @@ pub fn train_bpr_jepa<B: Backend>(
     let mut epochs_trained = 0;
 
     for epoch in 0..config.epochs {
+        let predictor_temp = scheduled_temperature(0.5, epoch, config.epochs);
         let emb = model_forward(graph);
         let plain = embeddings_to_plain(&emb);
         let bpr_loss = compute_bpr_loss(&plain, &positive, &negative);
@@ -1536,7 +2204,14 @@ pub fn train_bpr_jepa<B: Backend>(
 
         // Train edge predictor if enabled
         if let Some(ref mut pred) = edge_pred {
-            pred.spsa_step(&plain, &positive, &negative, config.lr as f32, 0.5, epoch);
+            pred.spsa_step(
+                &plain,
+                &positive,
+                &negative,
+                config.lr as f32,
+                predictor_temp,
+                epoch,
+            );
         }
 
         // Cosine-aware feature refinement:
@@ -1601,8 +2276,8 @@ pub fn train_bpr_jepa<B: Backend>(
 
         if epoch % 5 == 0 || epoch == config.epochs - 1 {
             eprintln!(
-                "  [train:bpr+jepa] epoch {}: bpr={:.4}, auc={:.4}, uniform={:.4}",
-                epoch, bpr_loss, auc, uniform
+                "  [train:bpr+jepa] epoch {}: bpr={:.4}, auc={:.4}, uniform={:.4}, pred_temp={:.3}",
+                epoch, bpr_loss, auc, uniform, predictor_temp
             );
         }
 

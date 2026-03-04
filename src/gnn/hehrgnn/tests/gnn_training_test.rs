@@ -7,7 +7,7 @@ use burn::backend::NdArray;
 use burn::prelude::*;
 use std::collections::HashMap;
 
-use hehrgnn::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
+use hehrgnn::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
 use hehrgnn::data::hetero_graph::EdgeType;
 use hehrgnn::model::gat::GatConfig;
 use hehrgnn::model::graph_transformer::GraphTransformerConfig;
@@ -71,7 +71,8 @@ fn build_financial_graph() -> (Vec<GraphFact>, GraphBuildConfig) {
     let config = GraphBuildConfig {
         node_feat_dim: 16,
         add_reverse_edges: true,
-        add_self_loops: true, add_positional_encoding: true,
+        add_self_loops: true,
+        add_positional_encoding: true,
     };
     (facts, config)
 }
@@ -136,7 +137,7 @@ fn test_graphsage_training_improves_auc() {
             patience: 10,
             perturb_frac: 0.5,
             mode: TrainMode::Fast,
-                weight_decay: 0.01,
+            weight_decay: 0.01,
         },
     );
 
@@ -376,7 +377,7 @@ fn test_multi_run_learning_with_checkpoints() {
             patience: 20,
             perturb_frac: 0.5,
             mode: TrainMode::Fast,
-                weight_decay: 0.01,
+            weight_decay: 0.01,
         },
     );
 
@@ -531,7 +532,7 @@ fn test_multi_run_learning_with_checkpoints() {
             patience: 20,
             perturb_frac: 0.4,
             mode: TrainMode::Fast,
-                weight_decay: 0.01,
+            weight_decay: 0.01,
         },
     );
 

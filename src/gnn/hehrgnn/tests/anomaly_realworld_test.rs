@@ -33,7 +33,7 @@ mod tests {
 
     use hehrgnn::data::graph_builder::GraphBuildConfig;
     use hehrgnn::data::hetero_graph::EdgeType;
-    use hehrgnn::ingest::feature_engineer::{engineer_features, FeatureConfig};
+    use hehrgnn::ingest::feature_engineer::{FeatureConfig, engineer_features};
     use hehrgnn::ingest::json_loader::{build_graph_from_export, load_from_json};
     use hehrgnn::model::graphsage::GraphSageModelConfig;
     use hehrgnn::server::state::PlainEmbeddings;
@@ -218,7 +218,8 @@ mod tests {
         let graph_config = GraphBuildConfig {
             node_feat_dim: 16,
             add_reverse_edges: true,
-            add_self_loops: true, add_positional_encoding: true,
+            add_self_loops: true,
+            add_positional_encoding: true,
         };
         let mut graph = build_graph_from_export::<B>(&export, &graph_config, &device);
 
@@ -469,11 +470,7 @@ mod tests {
 
             // Signal 3: User-merchant novelty
             let novelty = if let Some(known) = user_known_merchants.get(&user) {
-                if known.contains(&merch) {
-                    0.0
-                } else {
-                    1.0
-                }
+                if known.contains(&merch) { 0.0 } else { 1.0 }
             } else {
                 1.0 // Unknown user → novel
             };
@@ -526,7 +523,9 @@ mod tests {
             "  {:>10} │ {:>7} │ {:>12} │ {:>8} │ {:>6} │ {:>5} │ {:>7} │ {:>9} │ {}",
             "TX", "User", "Merchant", "Amount", "Graph", "Amt-Z", "Novel", "COMPOSITE", "Result"
         );
-        println!("  ──────────┼─────────┼──────────────┼──────────┼────────┼───────┼─────────┼───────────┼─────────");
+        println!(
+            "  ──────────┼─────────┼──────────────┼──────────┼────────┼───────┼─────────┼───────────┼─────────"
+        );
 
         for s in &all_scores {
             let flagged = s.composite > threshold;
@@ -603,11 +602,19 @@ mod tests {
             let flagged = s.composite > threshold;
 
             let reason = match s.name.as_str() {
-                "tx_ANOM1" => "💰 $1,000 at McDonalds (normal avg: $15) → amount z-score catches it",
-                "tx_ANOM2" => "💰 $5,000 at Shell Gas (normal avg: $50) → amount z-score catches it",
+                "tx_ANOM1" => {
+                    "💰 $1,000 at McDonalds (normal avg: $15) → amount z-score catches it"
+                }
+                "tx_ANOM2" => {
+                    "💰 $5,000 at Shell Gas (normal avg: $50) → amount z-score catches it"
+                }
                 "tx_ANOM3" => "💰 $3,000 at Starbucks (normal avg: $7) → amount z-score catches it",
-                "tx_ANOM4" => "🏪 $50 at CryptoExchange → graph structure (isolated node) + novelty (Dave never shops here)",
-                "tx_ANOM5" => "💰 $10,000 at Amazon → novelty (Eve NEVER shops at Amazon) + amount z-score ($10K vs avg $80)",
+                "tx_ANOM4" => {
+                    "🏪 $50 at CryptoExchange → graph structure (isolated node) + novelty (Dave never shops here)"
+                }
+                "tx_ANOM5" => {
+                    "💰 $10,000 at Amazon → novelty (Eve NEVER shops at Amazon) + amount z-score ($10K vs avg $80)"
+                }
                 _ => "unknown",
             };
 

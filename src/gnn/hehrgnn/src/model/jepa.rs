@@ -31,6 +31,7 @@ pub fn compute_infonce_loss(
     negative: &[(String, usize, String, usize)],
     temperature: f32,
 ) -> f32 {
+    let temperature = temperature.max(1e-3);
     let n = positive.len().min(negative.len());
     if n == 0 {
         return 0.0;
@@ -68,6 +69,7 @@ pub fn compute_infonce_loss(
         let max_val = neg_sims.iter().cloned().fold(numerator, f32::max);
         let sum_exp: f32 =
             (numerator - max_val).exp() + neg_sims.iter().map(|s| (s - max_val).exp()).sum::<f32>();
+        let sum_exp = sum_exp.max(1e-20);
         let log_denominator = max_val + sum_exp.ln();
 
         // InfoNCE loss = -log(exp(pos) / sum(exp(all)))
@@ -101,7 +103,7 @@ pub fn compute_uniformity_loss(embeddings: &HashMap<String, Vec<Vec<f32>>>) -> f
 
     // Sample pairs (limit to 200 pairs for efficiency)
     let max_pairs = 200.min(n * (n - 1) / 2);
-    let mut sum_exp = 0.0f32;
+    let mut log_terms = Vec::with_capacity(max_pairs);
     let mut count = 0;
     let mut seed: u64 = 42;
 
@@ -120,14 +122,28 @@ pub fn compute_uniformity_loss(embeddings: &HashMap<String, Vec<Vec<f32>>>) -> f
             .map(|(a, b)| (a - b).powi(2))
             .sum();
 
-        sum_exp += (-2.0 * dist_sq).exp();
+        log_terms.push((-2.0 * dist_sq).clamp(-80.0, 20.0));
         count += 1;
     }
 
-    if count > 0 {
-        (sum_exp / count as f32).ln()
+    if count == 0 || log_terms.is_empty() {
+        return 0.0;
+    }
+
+    // log(mean(exp(x))) with log-sum-exp stabilization.
+    let max_log = log_terms.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    if !max_log.is_finite() {
+        return -20.0;
+    }
+    let sum_exp: f32 = log_terms.iter().map(|x| (*x - max_log).exp()).sum();
+    if !sum_exp.is_finite() || sum_exp <= 0.0 {
+        return -20.0;
+    }
+    let mean_log = max_log + (sum_exp / count as f32).ln();
+    if mean_log.is_finite() {
+        mean_log.clamp(-30.0, 30.0)
     } else {
-        0.0
+        -20.0
     }
 }
 
@@ -267,11 +283,7 @@ impl EdgePredictor {
         let delta: Vec<f32> = (0..flat.len())
             .map(|_| {
                 seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                if (seed >> 33) % 2 == 0 {
-                    1.0
-                } else {
-                    -1.0
-                }
+                if (seed >> 33) % 2 == 0 { 1.0 } else { -1.0 }
             })
             .collect();
 
@@ -303,6 +315,7 @@ impl EdgePredictor {
         negative: &[(String, usize, String, usize)],
         temperature: f32,
     ) -> f32 {
+        let temperature = temperature.max(1e-3);
         let n = positive.len().min(negative.len());
         if n == 0 {
             return 0.0;
@@ -328,6 +341,7 @@ impl EdgePredictor {
             let max_val = neg_sims.iter().cloned().fold(pos_sim, f32::max);
             let sum_exp = (pos_sim - max_val).exp()
                 + neg_sims.iter().map(|s| (s - max_val).exp()).sum::<f32>();
+            let sum_exp = sum_exp.max(1e-20);
             total += -(pos_sim - max_val - sum_exp.ln()).max(-10.0);
         }
         total / n as f32
@@ -390,6 +404,28 @@ fn cosine_sim(
     emb_cosine(&a, &b)
 }
 
+fn epoch_temperature(base: f32, epoch: usize, total_epochs: usize) -> f32 {
+    let base = base.clamp(0.03, 2.0);
+    if total_epochs <= 1 {
+        return base;
+    }
+    let warm = (total_epochs / 5).max(1);
+    let cool_start = (total_epochs * 2) / 3;
+    let start = (base * 1.5).min(2.0);
+    let end = (base * 0.7).max(0.03);
+
+    if epoch < warm {
+        let t = epoch as f32 / warm as f32;
+        start + (base - start) * t
+    } else if epoch >= cool_start {
+        let span = (total_epochs - cool_start).max(1) as f32;
+        let t = (epoch - cool_start) as f32 / span;
+        base + (end - base) * t
+    } else {
+        base
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════
 // HEHRGNN JEPA Training
 // ═══════════════════════════════════════════════════════════════
@@ -446,7 +482,13 @@ pub fn train_hehrgnn_jepa<B: Backend>(
 
     // Get initial embeddings and compute initial loss
     let initial_emb = extract_entity_emb_map::<B>(&model.embeddings.entity_embedding.weight.val());
-    let initial_loss = entity_infonce_loss(&initial_emb, &positive_pairs, num_entities, 0.1);
+    let base_temperature = 0.1f32;
+    let initial_loss = entity_infonce_loss(
+        &initial_emb,
+        &positive_pairs,
+        num_entities,
+        base_temperature,
+    );
     let initial_uniformity = compute_uniformity_loss(&initial_emb);
 
     let mut best_loss = initial_loss;
@@ -455,6 +497,7 @@ pub fn train_hehrgnn_jepa<B: Backend>(
     let mut final_uniformity = initial_uniformity;
 
     for epoch in 0..epochs {
+        let epoch_temp = epoch_temperature(base_temperature, epoch, epochs);
         let eps = 0.01f32;
 
         // Get current weights
@@ -466,11 +509,7 @@ pub fn train_hehrgnn_jepa<B: Backend>(
         let delta: Vec<f32> = (0..w_data.len())
             .map(|_| {
                 seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                if (seed >> 33) % 2 == 0 {
-                    1.0
-                } else {
-                    -1.0
-                }
+                if (seed >> 33) % 2 == 0 { 1.0 } else { -1.0 }
             })
             .collect();
 
@@ -489,7 +528,7 @@ pub fn train_hehrgnn_jepa<B: Backend>(
             .clone()
             .map(|_| wp_tensor);
         let emb_plus = extract_entity_emb_map::<B>(&model.embeddings.entity_embedding.weight.val());
-        let loss_plus = entity_infonce_loss(&emb_plus, &positive_pairs, num_entities, 0.1)
+        let loss_plus = entity_infonce_loss(&emb_plus, &positive_pairs, num_entities, epoch_temp)
             + uniformity_weight * compute_uniformity_loss(&emb_plus);
 
         // -ε*δ perturbation
@@ -508,7 +547,7 @@ pub fn train_hehrgnn_jepa<B: Backend>(
             .map(|_| wm_tensor);
         let emb_minus =
             extract_entity_emb_map::<B>(&model.embeddings.entity_embedding.weight.val());
-        let loss_minus = entity_infonce_loss(&emb_minus, &positive_pairs, num_entities, 0.1)
+        let loss_minus = entity_infonce_loss(&emb_minus, &positive_pairs, num_entities, epoch_temp)
             + uniformity_weight * compute_uniformity_loss(&emb_minus);
 
         // SPSA gradient and update
@@ -529,7 +568,8 @@ pub fn train_hehrgnn_jepa<B: Backend>(
 
         let current_emb =
             extract_entity_emb_map::<B>(&model.embeddings.entity_embedding.weight.val());
-        let current_loss = entity_infonce_loss(&current_emb, &positive_pairs, num_entities, 0.1);
+        let current_loss =
+            entity_infonce_loss(&current_emb, &positive_pairs, num_entities, epoch_temp);
         let current_uniform = compute_uniformity_loss(&current_emb);
         let combined = current_loss + uniformity_weight * current_uniform;
 
@@ -538,8 +578,8 @@ pub fn train_hehrgnn_jepa<B: Backend>(
 
         if epoch % 5 == 0 || epoch == epochs - 1 {
             eprintln!(
-                "  [hehrgnn:jepa] epoch {}: infonce={:.4}, uniform={:.4}",
-                epoch, current_loss, current_uniform
+                "  [hehrgnn:jepa] epoch {}: infonce={:.4}, uniform={:.4}, temp={:.3}",
+                epoch, current_loss, current_uniform, epoch_temp
             );
         }
 
@@ -580,6 +620,7 @@ fn entity_infonce_loss(
     num_entities: usize,
     temperature: f32,
 ) -> f32 {
+    let temperature = temperature.max(1e-3);
     let entities = match emb_map.get("entity") {
         Some(e) => e,
         None => return 0.0,
@@ -616,6 +657,7 @@ fn entity_infonce_loss(
         let max_val = neg_sims.iter().cloned().fold(pos_sim, f32::max);
         let sum_exp =
             (pos_sim - max_val).exp() + neg_sims.iter().map(|s| (s - max_val).exp()).sum::<f32>();
+        let sum_exp = sum_exp.max(1e-20);
         total += -(pos_sim - max_val - sum_exp.ln()).max(-10.0);
     }
 

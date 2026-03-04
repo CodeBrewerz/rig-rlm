@@ -311,6 +311,21 @@ pub struct GraphTransformerModel<B: Backend> {
 }
 
 impl<B: Backend> GraphTransformerModel<B> {
+    fn align_feature_dim(features: Tensor<B, 2>, expected_dim: usize) -> Tensor<B, 2> {
+        let [num_nodes, in_dim] = features.dims();
+        if in_dim == expected_dim {
+            return features;
+        }
+
+        if in_dim > expected_dim {
+            features.slice([0..num_nodes, 0..expected_dim])
+        } else {
+            let device = features.device();
+            let pad = Tensor::<B, 2>::zeros([num_nodes, expected_dim - in_dim], &device);
+            Tensor::cat(vec![features, pad], 1)
+        }
+    }
+
     pub fn attach_adapter(&mut self, adapter: crate::model::lora::HeteroBasisAdapter<B>) {
         self.input_adapters = Some(adapter);
     }
@@ -331,11 +346,13 @@ impl<B: Backend> GraphTransformerModel<B> {
         let mut embeddings = NodeEmbeddings::new();
         for (i, nt) in self.node_type_keys.iter().enumerate() {
             if let Some(feat) = graph.node_features.get(nt) {
-                let mut projected = self.input_projs[i].forward(feat.clone());
+                let expected_in = self.input_projs[i].weight.val().dims()[0];
+                let aligned_features = Self::align_feature_dim(feat.clone(), expected_in);
+                let mut projected = self.input_projs[i].forward(aligned_features.clone());
 
                 // DoRA: y = m * normalize(base + adapter)
                 if let Some(ref adapter) = self.input_adapters {
-                    projected = adapter.dora_forward(projected, feat.clone(), nt);
+                    projected = adapter.dora_forward(projected, aligned_features, nt);
                 }
 
                 // Add learnable node-type embedding (KumoRFM §2.3)
@@ -406,10 +423,28 @@ impl GraphTransformerConfig {
     }
 }
 
+impl<B: Backend> crate::model::trainer::JepaTrainable<B> for GraphTransformerModel<B> {
+    fn forward_embeddings(&self, graph: &HeteroGraph<B>) -> NodeEmbeddings<B> {
+        self.forward(graph)
+    }
+
+    fn num_input_weights(&self) -> usize {
+        self.input_projs.len()
+    }
+
+    fn get_input_weight(&self, idx: usize) -> Tensor<B, 2> {
+        self.input_projs[idx].weight.val()
+    }
+
+    fn set_input_weight(&mut self, idx: usize, weight: Tensor<B, 2>) {
+        self.input_projs[idx].weight = self.input_projs[idx].weight.clone().map(|_| weight);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
+    use crate::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
     use burn::backend::NdArray;
 
     type B = NdArray;

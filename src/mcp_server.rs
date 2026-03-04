@@ -4,12 +4,9 @@
 //! MCP client (Claude Desktop, VS Code, Cursor, etc.) can call them.
 
 use rmcp::{
-    ErrorData as McpError, ServerHandler,
-    handler::server::tool::ToolRouter,
-    handler::server::wrapper::Parameters,
-    model::*,
-    schemars::JsonSchema,
-    tool, tool_handler, tool_router,
+    ErrorData as McpError, ServerHandler, handler::server::tool::ToolRouter,
+    handler::server::wrapper::Parameters, model::*, schemars::JsonSchema, tool, tool_handler,
+    tool_router,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -69,11 +66,10 @@ impl AgentMcpServer {
     ///
     /// Delegates to the running Restate server (localhost:8080) so the
     /// task gets full durable execution, lifecycle hooks, and persistence.
-    #[tool(description = "Run a task through the AI agent (LLM + code execution loop via Restate). Returns the agent's final answer.")]
-    async fn run_task(
-        &self,
-        params: Parameters<TaskParams>,
-    ) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Run a task through the AI agent (LLM + code execution loop via Restate). Returns the agent's final answer."
+    )]
+    async fn run_task(&self, params: Parameters<TaskParams>) -> Result<CallToolResult, McpError> {
         let task = &params.0.task;
         let key = format!("mcp-{}", uuid::Uuid::new_v4());
         let url = format!("http://localhost:8080/AgentWorkflow/{key}/run");
@@ -102,19 +98,21 @@ impl AgentMcpServer {
                     }
                     Ok(CallToolResult::success(vec![Content::text(text)]))
                 } else {
-                    Ok(CallToolResult::error(vec![Content::text(
-                        format!("Agent returned HTTP {status}: {text}"),
-                    )]))
+                    Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Agent returned HTTP {status}: {text}"
+                    ))]))
                 }
             }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(
-                format!("Failed to reach agent server: {e}. Is `restate-server` running?"),
-            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to reach agent server: {e}. Is `restate-server` running?"
+            ))])),
         }
     }
 
     /// Execute Python code in the sandbox and return the output.
-    #[tool(description = "Execute Python code in the sandbox. Returns stdout/stderr output. Code is checked against the execution policy first.")]
+    #[tool(
+        description = "Execute Python code in the sandbox. Returns stdout/stderr output. Code is checked against the execution policy first."
+    )]
     async fn execute_python(
         &self,
         params: Parameters<CodeParams>,
@@ -124,9 +122,10 @@ impl AgentMcpServer {
         let eval = policy.evaluate(&params.0.code);
 
         if eval.is_denied() {
-            return Ok(CallToolResult::error(vec![Content::text(
-                format!("Execution denied by policy: {}", eval.reason()),
-            )]));
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Execution denied by policy: {}",
+                eval.reason()
+            ))]));
         }
 
         // Execute via the REPL
@@ -134,14 +133,16 @@ impl AgentMcpServer {
         let command = crate::repl::Command::RunCode(params.0.code.clone());
         match repl.run_command(command) {
             Ok(output) => Ok(CallToolResult::success(vec![Content::text(output)])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(
-                format!("Execution error: {e}"),
-            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Execution error: {e}"
+            ))])),
         }
     }
 
     /// Apply a unified diff patch to files on disk.
-    #[tool(description = "Apply a unified diff patch to files. Use standard unified diff format with --- a/path and +++ b/path headers.")]
+    #[tool(
+        description = "Apply a unified diff patch to files. Use standard unified diff format with --- a/path and +++ b/path headers."
+    )]
     async fn apply_patch(
         &self,
         params: Parameters<PatchParams>,
@@ -150,9 +151,10 @@ impl AgentMcpServer {
         let policy = crate::exec_policy::ExecPolicy::standard();
         let eval = policy.evaluate(&params.0.patch);
         if eval.is_denied() {
-            return Ok(CallToolResult::error(vec![Content::text(
-                format!("Patch denied by policy: {}", eval.reason()),
-            )]));
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Patch denied by policy: {}",
+                eval.reason()
+            ))]));
         }
 
         // Parse and apply
@@ -167,18 +169,20 @@ impl AgentMcpServer {
                         summary.join("\n"),
                     )]))
                 }
-                Err(e) => Ok(CallToolResult::error(vec![Content::text(
-                    format!("Failed to apply patch: {e}"),
-                )])),
+                Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to apply patch: {e}"
+                ))])),
             },
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(
-                format!("Failed to parse patch: {e}"),
-            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to parse patch: {e}"
+            ))])),
         }
     }
 
     /// Check if a command is allowed by the execution policy.
-    #[tool(description = "Check if a shell command or code snippet is allowed by the execution policy. Returns the policy decision (allow/deny/review) and matching rules.")]
+    #[tool(
+        description = "Check if a shell command or code snippet is allowed by the execution policy. Returns the policy decision (allow/deny/review) and matching rules."
+    )]
     async fn check_policy(
         &self,
         params: Parameters<PolicyParams>,
@@ -202,9 +206,7 @@ impl ServerHandler for AgentMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: ProtocolVersion::V_2025_03_26,
-            capabilities: ServerCapabilities::builder()
-                .enable_tools()
-                .build(),
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation {
                 name: "rig-rlm".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
@@ -247,10 +249,22 @@ mod tests {
         let server = AgentMcpServer::new(PathBuf::from("/tmp"));
         let tools = server.tool_router.list_all();
         let tool_names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-        assert!(tool_names.iter().any(|n| n == "run_task"), "should have run_task: {tool_names:?}");
-        assert!(tool_names.iter().any(|n| n == "execute_python"), "should have execute_python: {tool_names:?}");
-        assert!(tool_names.iter().any(|n| n == "apply_patch"), "should have apply_patch: {tool_names:?}");
-        assert!(tool_names.iter().any(|n| n == "check_policy"), "should have check_policy: {tool_names:?}");
+        assert!(
+            tool_names.iter().any(|n| n == "run_task"),
+            "should have run_task: {tool_names:?}"
+        );
+        assert!(
+            tool_names.iter().any(|n| n == "execute_python"),
+            "should have execute_python: {tool_names:?}"
+        );
+        assert!(
+            tool_names.iter().any(|n| n == "apply_patch"),
+            "should have apply_patch: {tool_names:?}"
+        );
+        assert!(
+            tool_names.iter().any(|n| n == "check_policy"),
+            "should have check_policy: {tool_names:?}"
+        );
     }
 
     #[tokio::test]
@@ -263,7 +277,10 @@ mod tests {
             .await
             .unwrap();
         let text = extract_text(&result);
-        assert!(text.contains("Allowed: true"), "safe command should be allowed: {text}");
+        assert!(
+            text.contains("Allowed: true"),
+            "safe command should be allowed: {text}"
+        );
     }
 
     #[tokio::test]
@@ -276,7 +293,10 @@ mod tests {
             .await
             .unwrap();
         let text = extract_text(&result);
-        assert!(text.contains("Allowed: false"), "dangerous command should be denied: {text}");
+        assert!(
+            text.contains("Allowed: false"),
+            "dangerous command should be denied: {text}"
+        );
     }
 
     #[tokio::test]
@@ -288,13 +308,15 @@ mod tests {
         let server = AgentMcpServer::new(dir.clone());
         let result = server
             .apply_patch(Parameters(PatchParams {
-                patch: "--- /dev/null\n+++ b/hello.txt\n@@ -0,0 +1 @@\n+hello world\n"
-                    .to_string(),
+                patch: "--- /dev/null\n+++ b/hello.txt\n@@ -0,0 +1 @@\n+hello world\n".to_string(),
             }))
             .await
             .unwrap();
         let text = extract_text(&result);
-        assert!(text.contains("created"), "should report file created: {text}");
+        assert!(
+            text.contains("created"),
+            "should report file created: {text}"
+        );
         assert!(dir.join("hello.txt").exists());
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -15,14 +15,14 @@ use burn::backend::NdArray;
 use burn::prelude::*;
 use std::collections::HashMap;
 
-use crate::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
+use crate::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
 use crate::data::hetero_graph::{EdgeType, HeteroGraph};
 use crate::eval::learnable_scorer::{LearnableScorer, ScorerConfig};
 use crate::model::backbone::NodeEmbeddings;
 use crate::model::gat::GatConfig;
 use crate::model::graph_transformer::GraphTransformerConfig;
 use crate::model::graphsage::GraphSageModelConfig;
-use crate::model::lora::{init_hetero_basis_adapter, LoraConfig};
+use crate::model::lora::{LoraConfig, init_hetero_basis_adapter};
 use crate::model::mhc::MhcRgcnConfig;
 use crate::model::rgcn::RgcnConfig;
 use crate::model::trainer::*;
@@ -103,9 +103,10 @@ pub fn run_pipeline(
     let build_config = GraphBuildConfig {
         node_feat_dim: config.hidden_dim,
         add_reverse_edges: true,
-        add_self_loops: true, add_positional_encoding: true,
+        add_self_loops: true,
+        add_positional_encoding: true,
     };
-    let mut graph = build_hetero_graph::<B>(facts, &build_config, &device);
+    let graph = build_hetero_graph::<B>(facts, &build_config, &device);
     let node_types: Vec<String> = graph.node_types().iter().map(|s| s.to_string()).collect();
     let edge_types: Vec<EdgeType> = graph.edge_types().iter().map(|e| (*e).clone()).collect();
     let gh = config.graph_hash;
@@ -167,15 +168,15 @@ pub fn run_pipeline(
     let pre_emb = embeddings_to_plain(&sage_model.forward(&graph));
     report.pre_train_auc = link_prediction_auc(&pre_emb, &positive, &negative);
 
-    // Train with JEPA (InfoNCE + uniformity) — synergy with DoRA adapter
-    let sage_fwd = |g: &HeteroGraph<B>| -> NodeEmbeddings<B> { sage_model.forward(g) };
-    let train_report = train_jepa(
-        &mut graph,
-        &sage_fwd,
+    // Train adapter first, then JEPA directly on persistent input projection weights.
+    let _adapter_report = train_adapter(&mut sage_model, &graph, &config.train_config);
+    let train_report = train_jepa_input_weights(
+        &mut sage_model,
+        &graph,
         &config.train_config,
-        0.1,   // temperature τ
-        0.5,   // uniformity weight λ
-        false, // no edge predictor
+        0.12, // base temperature τ (scheduled internally)
+        0.35, // uniformity weight λ
+        true, // edge predictor on
     );
     report.post_train_auc = train_report.final_auc;
     report.train_report = Some(train_report.clone());
@@ -203,7 +204,7 @@ pub fn run_pipeline(
 
     // ── 2. RGCN + mHC + JEPA (best combo: +4.2% AUC) ──
     // Use mHC-enhanced RGCN with 8 layers + 4 streams for depth without over-smoothing
-    let mhc_rgcn_model = {
+    let mut mhc_rgcn_model = {
         let fresh = MhcRgcnConfig {
             in_dim: config.hidden_dim,
             hidden_dim: config.hidden_dim,
@@ -236,15 +237,14 @@ pub fn run_pipeline(
         }
     };
 
-    // Train with JEPA (InfoNCE + uniformity)
-    let rgcn_fwd = |g: &HeteroGraph<B>| -> NodeEmbeddings<B> { mhc_rgcn_model.forward(g) };
-    let rgcn_train = train_jepa(
-        &mut graph,
-        &rgcn_fwd,
+    // Train with JEPA on persistent weights
+    let rgcn_train = train_jepa_input_weights(
+        &mut mhc_rgcn_model,
+        &graph,
         &config.train_config,
-        0.1,   // temperature τ
-        0.5,   // uniformity weight λ
-        false, // no edge predictor
+        0.12,
+        0.30,
+        true,
     );
     eprintln!(
         "  [pipeline] RGCN trained: auc={:.4} (mHC+JEPA, 8 layers)",
@@ -266,7 +266,7 @@ pub fn run_pipeline(
     all_embeddings.insert("rgcn".into(), rgcn_emb);
 
     // ── 3. GAT: load or init ──
-    let gat_model = {
+    let mut gat_model = {
         let fresh = GatConfig {
             in_dim: config.hidden_dim,
             hidden_dim: config.hidden_dim,
@@ -296,9 +296,15 @@ pub fn run_pipeline(
             fresh
         }
     };
-    // Train GAT with JEPA (optimal: +4.5% AUC from JEPA comparison test)
-    let gat_fwd = |g: &HeteroGraph<B>| -> NodeEmbeddings<B> { gat_model.forward(g) };
-    let gat_train = train_jepa(&mut graph, &gat_fwd, &config.train_config, 0.1, 0.5, false);
+    // Train GAT with JEPA on persistent weights.
+    let gat_train = train_jepa_input_weights(
+        &mut gat_model,
+        &graph,
+        &config.train_config,
+        0.12,
+        0.30,
+        true,
+    );
     eprintln!(
         "  [pipeline] GAT trained: auc={:.4} (JEPA)",
         gat_train.final_auc
@@ -319,7 +325,7 @@ pub fn run_pipeline(
     all_embeddings.insert("gat".into(), gat_emb);
 
     // ── 4. GPS Transformer: load or init ──
-    let gps_model = {
+    let mut gps_model = {
         let fresh = GraphTransformerConfig {
             in_dim: config.hidden_dim,
             hidden_dim: config.hidden_dim,
@@ -351,15 +357,14 @@ pub fn run_pipeline(
             fresh
         }
     };
-    // Train GPS with JEPA (optimal combo: +3.8% AUC)
-    let gps_fwd = |g: &HeteroGraph<B>| -> NodeEmbeddings<B> { gps_model.forward(g) };
-    let gps_train = train_jepa(
-        &mut graph,
-        &gps_fwd,
+    // Train GPS with JEPA on persistent weights.
+    let gps_train = train_jepa_input_weights(
+        &mut gps_model,
+        &graph,
         &config.train_config,
-        0.1,   // temperature τ
-        0.5,   // uniformity weight λ
-        false, // no edge predictor
+        0.12,
+        0.30,
+        true,
     );
     eprintln!(
         "  [pipeline] GPS trained: auc={:.4} (JEPA)",

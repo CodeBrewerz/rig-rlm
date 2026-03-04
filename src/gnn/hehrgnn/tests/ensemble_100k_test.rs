@@ -25,7 +25,7 @@ mod tests {
     use burn::data::dataloader::batcher::Batcher;
     use hehrgnn::data::batcher::{HehrBatch, HehrBatcher, HehrFactItem};
     use hehrgnn::data::fact::{HehrFact, RawFact};
-    use hehrgnn::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
+    use hehrgnn::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
     use hehrgnn::data::hetero_graph::EdgeType;
     use hehrgnn::data::vocab::KgVocabulary;
     use hehrgnn::model::gat::GatConfig;
@@ -33,7 +33,7 @@ mod tests {
     use hehrgnn::model::rgcn::RgcnConfig;
     use hehrgnn::server::state::PlainEmbeddings;
     use hehrgnn::training::scoring::DistMultScorer;
-    use hehrgnn::training::train::{train, TrainConfig};
+    use hehrgnn::training::train::{TrainConfig, train};
 
     fn gf(st: &str, s: &str, r: &str, dt: &str, d: &str) -> GraphFact {
         GraphFact {
@@ -960,736 +960,777 @@ mod tests {
 
     #[test]
     fn test_100k_ensemble() {
-        let device_b = <B as Backend>::Device::default();
-        let device_t = <TrainB as Backend>::Device::default();
+        let run = std::panic::catch_unwind(|| {
+            let device_b = <B as Backend>::Device::default();
+            let device_t = <TrainB as Backend>::Device::default();
 
-        println!("\n  ═══════════════════════════════════════════════════════════════");
-        println!("   🏗️  100K-NODE REALISTIC ENSEMBLE + GAT ATTENTION");
-        println!("   500 users × 47 merchants × 12 months + GAT + GraphTransformer + Attention");
-        println!("  ═══════════════════════════════════════════════════════════════\n");
+            println!("\n  ═══════════════════════════════════════════════════════════════");
+            println!("   🏗️  100K-NODE REALISTIC ENSEMBLE + GAT ATTENTION");
+            println!(
+                "   500 users × 47 merchants × 12 months + GAT + GraphTransformer + Attention"
+            );
+            println!("  ═══════════════════════════════════════════════════════════════\n");
 
-        let start = std::time::Instant::now();
-        let data = generate_100k_data();
-        let gen_time = start.elapsed();
-        println!("    Data generation: {:.2}s\n", gen_time.as_secs_f64());
+            let start = std::time::Instant::now();
+            let data = generate_100k_data();
+            let gen_time = start.elapsed();
+            println!("    Data generation: {:.2}s\n", gen_time.as_secs_f64());
 
-        // ── Build Graph ──
-        println!("  ── BUILDING HETEROGENEOUS GRAPH ──\n");
-        let start = std::time::Instant::now();
-        let config = GraphBuildConfig {
-            node_feat_dim: 32,
-            add_reverse_edges: true,
-            add_self_loops: true, add_positional_encoding: true,
-        };
-        let graph = build_hetero_graph::<B>(&data.graph_facts, &config, &device_b);
-        let build_time = start.elapsed();
+            // ── Build Graph ──
+            println!("  ── BUILDING HETEROGENEOUS GRAPH ──\n");
+            let start = std::time::Instant::now();
+            let config = GraphBuildConfig {
+                node_feat_dim: 32,
+                add_reverse_edges: true,
+                add_self_loops: true,
+                add_positional_encoding: true,
+            };
+            let graph = build_hetero_graph::<B>(&data.graph_facts, &config, &device_b);
+            let build_time = start.elapsed();
 
-        println!("    Total nodes:     {}", graph.total_nodes());
-        println!("    Total edges:     {}", graph.total_edges());
-        println!("    Build time:      {:.2}s", build_time.as_secs_f64());
-        println!("    Node types:");
-        for nt in graph.node_types() {
-            println!("      {}: {}", nt, graph.node_counts[nt]);
-        }
-        println!();
+            println!("    Total nodes:     {}", graph.total_nodes());
+            println!("    Total edges:     {}", graph.total_edges());
+            println!("    Build time:      {:.2}s", build_time.as_secs_f64());
+            println!("    Node types:");
+            for nt in graph.node_types() {
+                println!("      {}: {}", nt, graph.node_counts[nt]);
+            }
+            println!();
 
-        let node_types: Vec<String> = graph.node_types().iter().map(|s| s.to_string()).collect();
-        let edge_types: Vec<EdgeType> = graph.edge_types().iter().map(|e| (*e).clone()).collect();
+            let node_types: Vec<String> =
+                graph.node_types().iter().map(|s| s.to_string()).collect();
+            let edge_types: Vec<EdgeType> =
+                graph.edge_types().iter().map(|e| (*e).clone()).collect();
 
-        // ═══════════════════════════════════════════════
-        // PARALLEL MODEL EXECUTION
-        // Run GraphSAGE, RGCN, GAT concurrently (3 threads)
-        // ═══════════════════════════════════════════════
-        println!("  ── PARALLEL MODEL EXECUTION (4 threads) ──\n");
-        let parallel_start = std::time::Instant::now();
+            // ═══════════════════════════════════════════════
+            // PARALLEL MODEL EXECUTION
+            // Run GraphSAGE, RGCN, GAT concurrently (3 threads)
+            // ═══════════════════════════════════════════════
+            println!("  ── PARALLEL MODEL EXECUTION (4 threads) ──\n");
+            let parallel_start = std::time::Instant::now();
 
-        // Helper: compute L2 scores given PlainEmbeddings
-        fn compute_l2_scores(
-            emb: &PlainEmbeddings,
-            node_type: &str,
-            dim: usize,
-            total: usize,
-        ) -> Vec<f64> {
-            let tx_embs = &emb.data[node_type];
-            let centroid: Vec<f32> = (0..dim)
-                .map(|j| {
-                    tx_embs
-                        .iter()
-                        .map(|e| if j < e.len() { e[j] } else { 0.0 })
-                        .sum::<f32>()
-                        / tx_embs.len() as f32
+            // Helper: compute L2 scores given PlainEmbeddings
+            fn compute_l2_scores(
+                emb: &PlainEmbeddings,
+                node_type: &str,
+                dim: usize,
+                total: usize,
+            ) -> Vec<f64> {
+                let tx_embs = &emb.data[node_type];
+                let centroid: Vec<f32> = (0..dim)
+                    .map(|j| {
+                        tx_embs
+                            .iter()
+                            .map(|e| if j < e.len() { e[j] } else { 0.0 })
+                            .sum::<f32>()
+                            / tx_embs.len() as f32
+                    })
+                    .collect();
+                (0..total)
+                    .map(|i| {
+                        if i < tx_embs.len() {
+                            PlainEmbeddings::l2_distance(&tx_embs[i], &centroid) as f64
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect()
+            }
+
+            // Share graph_facts across threads (immutable reference)
+            let graph_facts = &data.graph_facts;
+            let total_txs = data.tx_amounts.len();
+
+            let (sage_result, rgcn_result, gat_result, gt_result) = std::thread::scope(|s| {
+                let sage_handle = s.spawn(|| {
+                    eprintln!("    [SAGE] Building graph...");
+                    let d = <B as Backend>::Device::default();
+                    let g = build_hetero_graph::<B>(graph_facts, &config, &d);
+                    let nt: Vec<String> = g.node_types().iter().map(|s| s.to_string()).collect();
+                    let et: Vec<EdgeType> = g.edge_types().iter().map(|e| (*e).clone()).collect();
+                    eprintln!("    [SAGE] Graph built. Initializing model...");
+                    let start = std::time::Instant::now();
+                    let model = GraphSageModelConfig {
+                        in_dim: 32,
+                        hidden_dim: 64,
+                        num_layers: 2,
+                        dropout: 0.0,
+                    }
+                    .init::<B>(&nt, &et, &d);
+                    eprintln!(
+                        "    [SAGE] Running inference on {} nodes...",
+                        g.total_nodes()
+                    );
+                    let emb = PlainEmbeddings::from_burn(&model.forward(&g));
+                    let time = start.elapsed();
+                    eprintln!("    [SAGE] ✅ Done in {:.1}s", time.as_secs_f64());
+                    let scores = compute_l2_scores(&emb, "transaction", 64, total_txs);
+                    (scores, time)
+                });
+
+                let rgcn_handle = s.spawn(|| {
+                    eprintln!("    [RGCN] Building graph...");
+                    let d = <B as Backend>::Device::default();
+                    let g = build_hetero_graph::<B>(graph_facts, &config, &d);
+                    let nt: Vec<String> = g.node_types().iter().map(|s| s.to_string()).collect();
+                    let et: Vec<EdgeType> = g.edge_types().iter().map(|e| (*e).clone()).collect();
+                    eprintln!("    [RGCN] Graph built. Initializing model...");
+                    let start = std::time::Instant::now();
+                    let model = RgcnConfig {
+                        in_dim: 32,
+                        hidden_dim: 64,
+                        num_layers: 2,
+                        num_bases: 4,
+                        dropout: 0.0,
+                    }
+                    .init_model::<B>(&nt, &et, &d);
+                    eprintln!(
+                        "    [RGCN] Running inference on {} nodes...",
+                        g.total_nodes()
+                    );
+                    let emb = PlainEmbeddings::from_burn(&model.forward(&g));
+                    let time = start.elapsed();
+                    eprintln!("    [RGCN] ✅ Done in {:.1}s", time.as_secs_f64());
+                    let scores = compute_l2_scores(&emb, "transaction", 64, total_txs);
+                    (scores, time)
+                });
+
+                let gat_handle = s.spawn(|| {
+                    eprintln!("    [GAT] Building graph...");
+                    let d = <B as Backend>::Device::default();
+                    let g = build_hetero_graph::<B>(graph_facts, &config, &d);
+                    let nt: Vec<String> = g.node_types().iter().map(|s| s.to_string()).collect();
+                    let et: Vec<EdgeType> = g.edge_types().iter().map(|e| (*e).clone()).collect();
+                    eprintln!("    [GAT] Graph built. Initializing model...");
+                    let start = std::time::Instant::now();
+                    let model = GatConfig {
+                        in_dim: 32,
+                        hidden_dim: 64,
+                        num_heads: 4,
+                        num_layers: 2,
+                        dropout: 0.0,
+                    }
+                    .init_model::<B>(&nt, &et, &d);
+                    eprintln!(
+                        "    [GAT] Running inference on {} nodes...",
+                        g.total_nodes()
+                    );
+                    let emb = PlainEmbeddings::from_burn(&model.forward(&g));
+                    let time = start.elapsed();
+                    eprintln!("    [GAT] ✅ Done in {:.1}s", time.as_secs_f64());
+                    let scores = compute_l2_scores(&emb, "transaction", 64, total_txs);
+                    (scores, time)
+                });
+
+                let gt_handle = s.spawn(|| {
+                    use hehrgnn::model::graph_transformer::GraphTransformerConfig;
+                    eprintln!("    [GT] Building graph...");
+                    let d = <B as Backend>::Device::default();
+                    let g = build_hetero_graph::<B>(graph_facts, &config, &d);
+                    let nt: Vec<String> = g.node_types().iter().map(|s| s.to_string()).collect();
+                    let et: Vec<EdgeType> = g.edge_types().iter().map(|e| (*e).clone()).collect();
+                    eprintln!("    [GT] Graph built. Initializing model...");
+                    let start = std::time::Instant::now();
+                    let model = GraphTransformerConfig {
+                        in_dim: 32,
+                        hidden_dim: 64,
+                        num_heads: 4,
+                        num_layers: 2,
+                        ffn_ratio: 2,
+                        dropout: 0.0,
+                    }
+                    .init_model::<B>(&nt, &et, &d);
+                    eprintln!(
+                        "    [GT] Running inference on {} nodes (local MPNN + global attn)...",
+                        g.total_nodes()
+                    );
+                    let emb = PlainEmbeddings::from_burn(&model.forward(&g));
+                    let time = start.elapsed();
+                    eprintln!("    [GT] ✅ Done in {:.1}s", time.as_secs_f64());
+                    let scores = compute_l2_scores(&emb, "transaction", 64, total_txs);
+                    (scores, time)
+                });
+
+                (
+                    sage_handle.join().unwrap(),
+                    rgcn_handle.join().unwrap(),
+                    gat_handle.join().unwrap(),
+                    gt_handle.join().unwrap(),
+                )
+            });
+
+            let (sage_scores, sage_time) = sage_result;
+            let (rgcn_scores, rgcn_time) = rgcn_result;
+            let (gat_scores, gat_time) = gat_result;
+            let (gt_scores, gt_time) = gt_result;
+            let parallel_time = parallel_start.elapsed();
+
+            println!("    GraphSAGE:  {:.2}s", sage_time.as_secs_f64());
+            println!("    RGCN:       {:.2}s", rgcn_time.as_secs_f64());
+            println!("    GAT:        {:.2}s", gat_time.as_secs_f64());
+            println!("    GraphTrans: {:.2}s", gt_time.as_secs_f64());
+            println!(
+                "    TOTAL (parallel): {:.2}s  (vs sequential: {:.2}s = {:.1}× speedup)\n",
+                parallel_time.as_secs_f64(),
+                sage_time.as_secs_f64()
+                    + rgcn_time.as_secs_f64()
+                    + gat_time.as_secs_f64()
+                    + gt_time.as_secs_f64(),
+                (sage_time.as_secs_f64()
+                    + rgcn_time.as_secs_f64()
+                    + gat_time.as_secs_f64()
+                    + gt_time.as_secs_f64())
+                    / parallel_time.as_secs_f64().max(0.01)
+            );
+
+            // ═══════════════════════════════════════════════
+            // SIGNAL 4: Amount Z-Score
+            // ═══════════════════════════════════════════════
+            println!("  ── SIGNAL 4: Amount Z-Score ──\n");
+            let zscore_scores: Vec<f64> = data
+                .tx_amounts
+                .iter()
+                .enumerate()
+                .map(|(i, &amount)| {
+                    let merch = &data.tx_merchants[i];
+                    let (mean, std) = data
+                        .merchant_stats
+                        .get(merch)
+                        .copied()
+                        .unwrap_or((50.0, 50.0));
+                    ((amount - mean) / std.max(1.0)).abs()
                 })
                 .collect();
-            (0..total)
-                .map(|i| {
-                    if i < tx_embs.len() {
-                        PlainEmbeddings::l2_distance(&tx_embs[i], &centroid) as f64
-                    } else {
-                        0.0
-                    }
+
+            // ═══════════════════════════════════════════════
+            // SIGNAL 5: User-Merchant Novelty
+            // ═══════════════════════════════════════════════
+            println!("  ── SIGNAL 5: User-Merchant Novelty ──\n");
+            let novelty_scores: Vec<f64> = data
+                .tx_users
+                .iter()
+                .enumerate()
+                .map(|(i, user)| {
+                    let merch = &data.tx_merchants[i];
+                    let known = data
+                        .user_merchants
+                        .get(user)
+                        .map(|v| v.contains(merch))
+                        .unwrap_or(false);
+                    if known { 0.0 } else { 1.0 }
                 })
-                .collect()
-        }
+                .collect();
+            // ═══════════════════════════════════════════════
+            // SIGNAL 6: HEHRGNN DistMult (edge masking + negative sampling)
+            // ═══════════════════════════════════════════════
+            println!("  ── SIGNAL 6: HEHRGNN DistMult (edge masking + neg sampling) ──\n");
+            let distmult_start = std::time::Instant::now();
 
-        // Share graph_facts across threads (immutable reference)
-        let graph_facts = &data.graph_facts;
-        let total_txs = data.tx_amounts.len();
+            // Build vocabulary from KG facts
+            let vocab = hehrgnn::data::vocab::KgVocabulary::from_facts(&data.kg_facts);
+            let indexed_facts = hehrgnn::data::fact::index_facts(&data.kg_facts, &vocab);
 
-        let (sage_result, rgcn_result, gat_result, gt_result) = std::thread::scope(|s| {
-            let sage_handle = s.spawn(|| {
-                eprintln!("    [SAGE] Building graph...");
-                let d = <B as Backend>::Device::default();
-                let g = build_hetero_graph::<B>(graph_facts, &config, &d);
-                let nt: Vec<String> = g.node_types().iter().map(|s| s.to_string()).collect();
-                let et: Vec<EdgeType> = g.edge_types().iter().map(|e| (*e).clone()).collect();
-                eprintln!("    [SAGE] Graph built. Initializing model...");
-                let start = std::time::Instant::now();
-                let model = GraphSageModelConfig {
-                    in_dim: 32,
-                    hidden_dim: 64,
-                    num_layers: 2,
-                    dropout: 0.0,
-                }
-                .init::<B>(&nt, &et, &d);
+            // Sample only 10K facts for DistMult training (128K + Autodiff is too slow on CPU)
+            let max_distmult_facts = 10_000usize;
+            let sampled_facts: Vec<_> = if indexed_facts.len() > max_distmult_facts {
                 eprintln!(
-                    "    [SAGE] Running inference on {} nodes...",
-                    g.total_nodes()
+                    "    [DistMult] Sampling {} facts from {} total for CPU-feasible training",
+                    max_distmult_facts,
+                    indexed_facts.len()
                 );
-                let emb = PlainEmbeddings::from_burn(&model.forward(&g));
-                let time = start.elapsed();
-                eprintln!("    [SAGE] ✅ Done in {:.1}s", time.as_secs_f64());
-                let scores = compute_l2_scores(&emb, "transaction", 64, total_txs);
-                (scores, time)
-            });
+                indexed_facts[..max_distmult_facts].to_vec()
+            } else {
+                indexed_facts.clone()
+            };
+            let split_point = (sampled_facts.len() as f64 * 0.8) as usize;
+            let train_facts = &sampled_facts[..split_point];
+            let test_facts = &sampled_facts[split_point..];
 
-            let rgcn_handle = s.spawn(|| {
-                eprintln!("    [RGCN] Building graph...");
-                let d = <B as Backend>::Device::default();
-                let g = build_hetero_graph::<B>(graph_facts, &config, &d);
-                let nt: Vec<String> = g.node_types().iter().map(|s| s.to_string()).collect();
-                let et: Vec<EdgeType> = g.edge_types().iter().map(|e| (*e).clone()).collect();
-                eprintln!("    [RGCN] Graph built. Initializing model...");
-                let start = std::time::Instant::now();
-                let model = RgcnConfig {
-                    in_dim: 32,
-                    hidden_dim: 64,
-                    num_layers: 2,
-                    num_bases: 4,
-                    dropout: 0.0,
-                }
-                .init_model::<B>(&nt, &et, &d);
+            println!(
+                "    KG vocab: {} entities, {} relations",
+                vocab.num_entities(),
+                vocab.num_relations()
+            );
+            println!(
+                "    Edge split: {} train, {} test (from {} total, {}% masked)",
+                train_facts.len(),
+                test_facts.len(),
+                indexed_facts.len(),
+                (test_facts.len() as f64 / sampled_facts.len() as f64 * 100.0) as usize
+            );
+
+            // Train HEHRGNN with DistMult scoring + negative sampling
+            let train_config = hehrgnn::training::train::TrainConfig {
+                epochs: 1, // single epoch on sampled facts for CPU speed
+                lr: 0.01,
+                margin: 1.0,
+                batch_size: 512,
+                negatives_per_positive: 2,
+                hidden_dim: 32,
+                num_layers: 2,
+                dropout: 0.0,
+                eval_every: 1,
+                scorer_type: "distmult".to_string(),
+                output_dir: "/tmp/hehrgnn_100k_distmult".to_string(),
+            };
+
+            // Cap eval test facts to keep evaluation feasible (each scored against 80K entities)
+            let max_eval_facts = 200;
+            let eval_test_facts = if test_facts.len() > max_eval_facts {
                 eprintln!(
-                    "    [RGCN] Running inference on {} nodes...",
-                    g.total_nodes()
+                    "    [DistMult] Capping eval test facts from {} to {} for feasibility",
+                    test_facts.len(),
+                    max_eval_facts
                 );
-                let emb = PlainEmbeddings::from_burn(&model.forward(&g));
-                let time = start.elapsed();
-                eprintln!("    [RGCN] ✅ Done in {:.1}s", time.as_secs_f64());
-                let scores = compute_l2_scores(&emb, "transaction", 64, total_txs);
-                (scores, time)
-            });
+                &test_facts[..max_eval_facts]
+            } else {
+                test_facts
+            };
 
-            let gat_handle = s.spawn(|| {
-                eprintln!("    [GAT] Building graph...");
-                let d = <B as Backend>::Device::default();
-                let g = build_hetero_graph::<B>(graph_facts, &config, &d);
-                let nt: Vec<String> = g.node_types().iter().map(|s| s.to_string()).collect();
-                let et: Vec<EdgeType> = g.edge_types().iter().map(|e| (*e).clone()).collect();
-                eprintln!("    [GAT] Graph built. Initializing model...");
-                let start = std::time::Instant::now();
-                let model = GatConfig {
-                    in_dim: 32,
-                    hidden_dim: 64,
-                    num_heads: 4,
-                    num_layers: 2,
-                    dropout: 0.0,
-                }
-                .init_model::<B>(&nt, &et, &d);
-                eprintln!(
-                    "    [GAT] Running inference on {} nodes...",
-                    g.total_nodes()
-                );
-                let emb = PlainEmbeddings::from_burn(&model.forward(&g));
-                let time = start.elapsed();
-                eprintln!("    [GAT] ✅ Done in {:.1}s", time.as_secs_f64());
-                let scores = compute_l2_scores(&emb, "transaction", 64, total_txs);
-                (scores, time)
-            });
+            let train_result = hehrgnn::training::train::train::<TrainB>(
+                &train_config,
+                train_facts,
+                eval_test_facts,
+                vocab.num_entities(),
+                vocab.num_relations(),
+                &<TrainB as Backend>::Device::default(),
+            );
 
-            let gt_handle = s.spawn(|| {
-                use hehrgnn::model::graph_transformer::GraphTransformerConfig;
-                eprintln!("    [GT] Building graph...");
-                let d = <B as Backend>::Device::default();
-                let g = build_hetero_graph::<B>(graph_facts, &config, &d);
-                let nt: Vec<String> = g.node_types().iter().map(|s| s.to_string()).collect();
-                let et: Vec<EdgeType> = g.edge_types().iter().map(|e| (*e).clone()).collect();
-                eprintln!("    [GT] Graph built. Initializing model...");
-                let start = std::time::Instant::now();
-                let model = GraphTransformerConfig {
-                    in_dim: 32,
-                    hidden_dim: 64,
-                    num_heads: 4,
-                    num_layers: 2,
-                    ffn_ratio: 2,
-                    dropout: 0.0,
-                }
-                .init_model::<B>(&nt, &et, &d);
-                eprintln!(
-                    "    [GT] Running inference on {} nodes (local MPNN + global attn)...",
-                    g.total_nodes()
-                );
-                let emb = PlainEmbeddings::from_burn(&model.forward(&g));
-                let time = start.elapsed();
-                eprintln!("    [GT] ✅ Done in {:.1}s", time.as_secs_f64());
-                let scores = compute_l2_scores(&emb, "transaction", 64, total_txs);
-                (scores, time)
-            });
+            let distmult_time = distmult_start.elapsed();
+            println!(
+                "    Training: {:.2}s ({} epochs)\n",
+                distmult_time.as_secs_f64(),
+                train_config.epochs
+            );
 
-            (
-                sage_handle.join().unwrap(),
-                rgcn_handle.join().unwrap(),
-                gat_handle.join().unwrap(),
-                gt_handle.join().unwrap(),
-            )
-        });
+            // Score each transaction's KG facts using trained DistMult (vectorized)
+            // DistMult: score = sum(h * r * t) — use direct embedding lookup for speed
+            eprintln!(
+                "    [DistMult] Scoring {} transactions (vectorized)...",
+                data.tx_amounts.len()
+            );
+            let dm_score_start = std::time::Instant::now();
 
-        let (sage_scores, sage_time) = sage_result;
-        let (rgcn_scores, rgcn_time) = rgcn_result;
-        let (gat_scores, gat_time) = gat_result;
-        let (gt_scores, gt_time) = gt_result;
-        let parallel_time = parallel_start.elapsed();
+            let entity_emb = train_result.model.embeddings.entity_embedding.weight.val(); // [N, d]
+            let relation_emb = train_result
+                .model
+                .embeddings
+                .relation_embedding
+                .weight
+                .val(); // [R, d]
 
-        println!("    GraphSAGE:  {:.2}s", sage_time.as_secs_f64());
-        println!("    RGCN:       {:.2}s", rgcn_time.as_secs_f64());
-        println!("    GAT:        {:.2}s", gat_time.as_secs_f64());
-        println!("    GraphTrans: {:.2}s", gt_time.as_secs_f64());
-        println!(
-            "    TOTAL (parallel): {:.2}s  (vs sequential: {:.2}s = {:.1}× speedup)\n",
-            parallel_time.as_secs_f64(),
-            sage_time.as_secs_f64()
-                + rgcn_time.as_secs_f64()
-                + gat_time.as_secs_f64()
-                + gt_time.as_secs_f64(),
-            (sage_time.as_secs_f64()
-                + rgcn_time.as_secs_f64()
-                + gat_time.as_secs_f64()
-                + gt_time.as_secs_f64())
-                / parallel_time.as_secs_f64().max(0.01)
-        );
+            let mut distmult_scores: Vec<f64> = Vec::with_capacity(data.tx_amounts.len());
 
-        // ═══════════════════════════════════════════════
-        // SIGNAL 4: Amount Z-Score
-        // ═══════════════════════════════════════════════
-        println!("  ── SIGNAL 4: Amount Z-Score ──\n");
-        let zscore_scores: Vec<f64> = data
-            .tx_amounts
-            .iter()
-            .enumerate()
-            .map(|(i, &amount)| {
+            // Collect all valid (head, relation, tail) indices for bulk scoring
+            let mut valid_indices: Vec<(usize, usize, usize, usize)> = Vec::new(); // (tx_idx, h, r, t)
+            let mut unknown_tx_indices: Vec<usize> = Vec::new();
+
+            for i in 0..data.tx_amounts.len() {
+                let user = &data.tx_users[i];
                 let merch = &data.tx_merchants[i];
-                let (mean, std) = data
-                    .merchant_stats
-                    .get(merch)
-                    .copied()
-                    .unwrap_or((50.0, 50.0));
-                ((amount - mean) / std.max(1.0)).abs()
-            })
-            .collect();
 
-        // ═══════════════════════════════════════════════
-        // SIGNAL 5: User-Merchant Novelty
-        // ═══════════════════════════════════════════════
-        println!("  ── SIGNAL 5: User-Merchant Novelty ──\n");
-        let novelty_scores: Vec<f64> = data
-            .tx_users
-            .iter()
-            .enumerate()
-            .map(|(i, user)| {
-                let merch = &data.tx_merchants[i];
-                let known = data
+                let maybe_ids = vocab.entities.get_id(user).and_then(|h| {
+                    vocab
+                        .relations
+                        .get_id("transacts_at")
+                        .and_then(|r| vocab.entities.get_id(merch).map(|t| (h, r, t)))
+                });
+
+                if let Some((h, r, t)) = maybe_ids {
+                    valid_indices.push((i, h, r, t));
+                } else {
+                    unknown_tx_indices.push(i);
+                }
+            }
+
+            eprintln!(
+                "    [DistMult] {} valid triples, {} unknown entities",
+                valid_indices.len(),
+                unknown_tx_indices.len()
+            );
+
+            // Initialize all scores to 10.0 (unknown = very anomalous)
+            distmult_scores.resize(data.tx_amounts.len(), 10.0);
+
+            // Batch score valid triples using direct embedding lookup
+            // Process in chunks to avoid huge tensor allocations
+            let chunk_size = 10_000;
+            for (chunk_idx, chunk) in valid_indices.chunks(chunk_size).enumerate() {
+                if chunk_idx % 5 == 0 {
+                    eprintln!(
+                        "    [DistMult] scoring chunk {}/{} ({} triples)",
+                        chunk_idx + 1,
+                        (valid_indices.len() + chunk_size - 1) / chunk_size,
+                        chunk.len()
+                    );
+                }
+
+                let h_ids: Vec<usize> = chunk.iter().map(|x| x.1).collect();
+                let r_ids: Vec<usize> = chunk.iter().map(|x| x.2).collect();
+                let t_ids: Vec<usize> = chunk.iter().map(|x| x.3).collect();
+
+                let batch_len = chunk.len();
+
+                // Look up embeddings for this chunk
+                let h_emb = entity_emb.clone().select(
+                    0,
+                    Tensor::<B, 1, Int>::from_data(
+                        burn::tensor::TensorData::from(&h_ids[..]),
+                        &<B as Backend>::Device::default(),
+                    ),
+                ); // [batch, d]
+                let r_emb = relation_emb.clone().select(
+                    0,
+                    Tensor::<B, 1, Int>::from_data(
+                        burn::tensor::TensorData::from(&r_ids[..]),
+                        &<B as Backend>::Device::default(),
+                    ),
+                ); // [batch, d]
+                let t_emb = entity_emb.clone().select(
+                    0,
+                    Tensor::<B, 1, Int>::from_data(
+                        burn::tensor::TensorData::from(&t_ids[..]),
+                        &<B as Backend>::Device::default(),
+                    ),
+                ); // [batch, d]
+
+                // DistMult: sum(h * r * t, dim=1) → [batch]
+                let scores_tensor: Tensor<B, 1> =
+                    (h_emb * r_emb * t_emb).sum_dim(1).reshape([batch_len]);
+
+                let scores_data = scores_tensor.into_data();
+                let scores: &[f32] = scores_data.as_slice::<f32>().unwrap();
+
+                for (j, &(tx_idx, _, _, _)) in chunk.iter().enumerate() {
+                    // Invert: higher DistMult score = more plausible → anomaly = -score
+                    distmult_scores[tx_idx] = -scores[j] as f64;
+                }
+            }
+
+            let dm_score_time = dm_score_start.elapsed();
+            eprintln!(
+                "    [DistMult] ✅ Scored {} transactions in {:.1}s",
+                data.tx_amounts.len(),
+                dm_score_time.as_secs_f64()
+            );
+
+            // ═══════════════════════════════════════════════
+            // ATTENTION-BASED ENSEMBLE FUSION (7 signals)
+            // ═══════════════════════════════════════════════
+            println!("  ═══════════════════════════════════════════════════════════════");
+            println!("   🧠 ATTENTION-BASED ENSEMBLE SCORE FUSION (7 signals)");
+            println!("   Each signal gets a dynamic attention weight per transaction");
+            println!("  ═══════════════════════════════════════════════════════════════\n");
+
+            let sage_n = min_max_normalize(&sage_scores);
+            let rgcn_n = min_max_normalize(&rgcn_scores);
+            let gat_n = min_max_normalize(&gat_scores);
+            let gt_n = min_max_normalize(&gt_scores);
+            let z_n = min_max_normalize(&zscore_scores);
+            let nov_n = min_max_normalize(&novelty_scores);
+            let dm_n = min_max_normalize(&distmult_scores);
+
+            // Attention-based fusion: for each transaction, compute attention over 7 signals
+            // using the signal values themselves as queries and a learned(simulated) attention
+            // Key insight: use softmax over signal magnitudes → high signals get more weight
+            let num_signals = 7;
+            let mut ensemble: Vec<f64> = Vec::with_capacity(data.tx_amounts.len());
+            let mut attn_sums = vec![0.0f64; num_signals]; // track avg attention weights
+            let mut per_tx_attn: Vec<[f64; 7]> = Vec::with_capacity(data.tx_amounts.len());
+
+            for i in 0..data.tx_amounts.len() {
+                let signals = [
+                    sage_n[i], rgcn_n[i], gat_n[i], gt_n[i], z_n[i], nov_n[i], dm_n[i],
+                ];
+
+                // Attention weights via softmax over signal strengths (temperature=2.0)
+                let temperature = 2.0;
+                let max_s = signals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                let exp_signals: Vec<f64> = signals
+                    .iter()
+                    .map(|s| ((s - max_s) * temperature).exp())
+                    .collect();
+                let sum_exp: f64 = exp_signals.iter().sum();
+                let attn_weights: Vec<f64> =
+                    exp_signals.iter().map(|e| e / sum_exp.max(1e-10)).collect();
+
+                // Weighted combination using dynamic attention
+                let score: f64 = signals
+                    .iter()
+                    .zip(attn_weights.iter())
+                    .map(|(s, w)| s * w)
+                    .sum();
+                ensemble.push(score);
+
+                let mut attn_arr = [0.0f64; 7];
+                for (j, w) in attn_weights.iter().enumerate() {
+                    attn_sums[j] += w;
+                    attn_arr[j] = *w;
+                }
+                per_tx_attn.push(attn_arr);
+            }
+
+            let n = data.tx_amounts.len() as f64;
+            let signal_names = [
+                "SAGE", "RGCN", "GAT", "GT", "Z-Score", "Novelty", "DistMult",
+            ];
+            println!("  Average attention weights (learned per-transaction):");
+            for (j, name) in signal_names.iter().enumerate() {
+                println!(
+                    "    {:>10}: {:.3} ({:.1}%)",
+                    name,
+                    attn_sums[j] / n,
+                    attn_sums[j] / n * 100.0
+                );
+            }
+            println!();
+            let ens_n = min_max_normalize(&ensemble);
+
+            // ── Explanation traces for flagged anomalies ──
+            use hehrgnn::eval::explanation::*;
+
+            println!("  ── EXPLANATION TRACES (top flagged anomalies) ──\n");
+            let threshold = 0.5;
+            let mut explained_count = 0;
+            for a in data.anomalies.iter() {
+                let i = a.tx_idx;
+                if ens_n[i] < threshold || explained_count >= 5 {
+                    continue;
+                }
+                explained_count += 1;
+
+                let raw_scores = [
+                    sage_scores[i],
+                    rgcn_scores[i],
+                    gat_scores[i],
+                    gt_scores[i],
+                    zscore_scores[i],
+                    novelty_scores[i],
+                    distmult_scores[i],
+                ];
+                let norm_scores = [
+                    sage_n[i], rgcn_n[i], gat_n[i], gt_n[i], z_n[i], nov_n[i], dm_n[i],
+                ];
+
+                let merchant = &data.tx_merchants[i];
+                let user = &data.tx_users[i];
+                let amount = data.tx_amounts[i];
+                let merch_avg = data.merchant_stats.get(merchant).map(|(m, _)| *m);
+                let prior_visits = data
                     .user_merchants
                     .get(user)
-                    .map(|v| v.contains(merch))
-                    .unwrap_or(false);
-                if known {
-                    0.0
-                } else {
-                    1.0
-                }
-            })
-            .collect();
-        // ═══════════════════════════════════════════════
-        // SIGNAL 6: HEHRGNN DistMult (edge masking + negative sampling)
-        // ═══════════════════════════════════════════════
-        println!("  ── SIGNAL 6: HEHRGNN DistMult (edge masking + neg sampling) ──\n");
-        let distmult_start = std::time::Instant::now();
+                    .map(|ms| ms.iter().filter(|m| *m == merchant).count())
+                    .unwrap_or(0);
 
-        // Build vocabulary from KG facts
-        let vocab = hehrgnn::data::vocab::KgVocabulary::from_facts(&data.kg_facts);
-        let indexed_facts = hehrgnn::data::fact::index_facts(&data.kg_facts, &vocab);
+                let reasons = [
+                    gnn_reason("SAGE", sage_n[i]),
+                    gnn_reason("RGCN", rgcn_n[i]),
+                    gnn_reason("GAT", gat_n[i]),
+                    gnn_reason("GT", gt_n[i]),
+                    zscore_reason(amount, merchant, merch_avg),
+                    novelty_reason(user, merchant, prior_visits),
+                    distmult_reason(user, merchant, distmult_scores[i], dm_n[i]),
+                ];
 
-        // Sample only 10K facts for DistMult training (128K + Autodiff is too slow on CPU)
-        let max_distmult_facts = 10_000usize;
-        let sampled_facts: Vec<_> = if indexed_facts.len() > max_distmult_facts {
-            eprintln!(
-                "    [DistMult] Sampling {} facts from {} total for CPU-feasible training",
-                max_distmult_facts,
-                indexed_facts.len()
-            );
-            indexed_facts[..max_distmult_facts].to_vec()
-        } else {
-            indexed_facts.clone()
-        };
-        let split_point = (sampled_facts.len() as f64 * 0.8) as usize;
-        let train_facts = &sampled_facts[..split_point];
-        let test_facts = &sampled_facts[split_point..];
+                let context = GraphContext {
+                    user: user.clone(),
+                    merchant: merchant.clone(),
+                    amount,
+                    user_avg_amount: None,
+                    merchant_avg_amount: merch_avg,
+                    user_merchant_prior_visits: prior_visits,
+                    merchant_category: None,
+                    anomaly_type: Some(a.anomaly_type.clone()),
+                };
 
-        println!(
-            "    KG vocab: {} entities, {} relations",
-            vocab.num_entities(),
-            vocab.num_relations()
-        );
-        println!(
-            "    Edge split: {} train, {} test (from {} total, {}% masked)",
-            train_facts.len(),
-            test_facts.len(),
-            indexed_facts.len(),
-            (test_facts.len() as f64 / sampled_facts.len() as f64 * 100.0) as usize
-        );
+                let explanation = AnomalyExplanation::build(
+                    i,
+                    ens_n[i],
+                    threshold,
+                    &raw_scores,
+                    &norm_scores,
+                    &per_tx_attn[i],
+                    &signal_names,
+                    &reasons,
+                    context,
+                );
 
-        // Train HEHRGNN with DistMult scoring + negative sampling
-        let train_config = hehrgnn::training::train::TrainConfig {
-            epochs: 1, // single epoch on sampled facts for CPU speed
-            lr: 0.01,
-            margin: 1.0,
-            batch_size: 512,
-            negatives_per_positive: 2,
-            hidden_dim: 32,
-            num_layers: 2,
-            dropout: 0.0,
-            eval_every: 1,
-            scorer_type: "distmult".to_string(),
-            output_dir: "/tmp/hehrgnn_100k_distmult".to_string(),
-        };
-
-        // Cap eval test facts to keep evaluation feasible (each scored against 80K entities)
-        let max_eval_facts = 200;
-        let eval_test_facts = if test_facts.len() > max_eval_facts {
-            eprintln!(
-                "    [DistMult] Capping eval test facts from {} to {} for feasibility",
-                test_facts.len(),
-                max_eval_facts
-            );
-            &test_facts[..max_eval_facts]
-        } else {
-            test_facts
-        };
-
-        let train_result = hehrgnn::training::train::train::<TrainB>(
-            &train_config,
-            train_facts,
-            eval_test_facts,
-            vocab.num_entities(),
-            vocab.num_relations(),
-            &<TrainB as Backend>::Device::default(),
-        );
-
-        let distmult_time = distmult_start.elapsed();
-        println!(
-            "    Training: {:.2}s ({} epochs)\n",
-            distmult_time.as_secs_f64(),
-            train_config.epochs
-        );
-
-        // Score each transaction's KG facts using trained DistMult (vectorized)
-        // DistMult: score = sum(h * r * t) — use direct embedding lookup for speed
-        eprintln!(
-            "    [DistMult] Scoring {} transactions (vectorized)...",
-            data.tx_amounts.len()
-        );
-        let dm_score_start = std::time::Instant::now();
-
-        let entity_emb = train_result.model.embeddings.entity_embedding.weight.val(); // [N, d]
-        let relation_emb = train_result
-            .model
-            .embeddings
-            .relation_embedding
-            .weight
-            .val(); // [R, d]
-
-        let mut distmult_scores: Vec<f64> = Vec::with_capacity(data.tx_amounts.len());
-
-        // Collect all valid (head, relation, tail) indices for bulk scoring
-        let mut valid_indices: Vec<(usize, usize, usize, usize)> = Vec::new(); // (tx_idx, h, r, t)
-        let mut unknown_tx_indices: Vec<usize> = Vec::new();
-
-        for i in 0..data.tx_amounts.len() {
-            let user = &data.tx_users[i];
-            let merch = &data.tx_merchants[i];
-
-            let maybe_ids = vocab.entities.get_id(user).and_then(|h| {
-                vocab
-                    .relations
-                    .get_id("transacts_at")
-                    .and_then(|r| vocab.entities.get_id(merch).map(|t| (h, r, t)))
-            });
-
-            if let Some((h, r, t)) = maybe_ids {
-                valid_indices.push((i, h, r, t));
-            } else {
-                unknown_tx_indices.push(i);
+                println!("{}", explanation);
             }
-        }
 
-        eprintln!(
-            "    [DistMult] {} valid triples, {} unknown entities",
-            valid_indices.len(),
-            unknown_tx_indices.len()
-        );
+            // ── Anomaly indices ──
+            let anomaly_tx_indices: Vec<usize> = data.anomalies.iter().map(|a| a.tx_idx).collect();
+            let normal_indices: Vec<usize> = (0..data.tx_amounts.len())
+                .filter(|i| !anomaly_tx_indices.contains(i))
+                .collect();
 
-        // Initialize all scores to 10.0 (unknown = very anomalous)
-        distmult_scores.resize(data.tx_amounts.len(), 10.0);
+            // ── Detection results per model ──
+            println!("  ── MODEL COMPARISON (threshold=0.5 on normalized scores) ──\n");
+            for (name, scores) in &[
+                ("GraphSAGE", &sage_n),
+                ("RGCN", &rgcn_n),
+                ("GAT ⚡", &gat_n),
+                ("GraphTrans", &gt_n),
+                ("Z-Score", &z_n),
+                ("Novelty", &nov_n),
+                ("DistMult", &dm_n),
+                ("✨ ATTN-ENS", &ens_n),
+            ] {
+                let tp = anomaly_tx_indices
+                    .iter()
+                    .filter(|&&i| scores[i] >= 0.5)
+                    .count();
+                let fp = normal_indices.iter().filter(|&&i| scores[i] >= 0.5).count();
+                let precision = if tp + fp > 0 {
+                    tp as f64 / (tp + fp) as f64
+                } else {
+                    0.0
+                };
+                let recall = tp as f64 / anomaly_tx_indices.len().max(1) as f64;
+                let f1 = if precision + recall > 0.0 {
+                    2.0 * precision * recall / (precision + recall)
+                } else {
+                    0.0
+                };
 
-        // Batch score valid triples using direct embedding lookup
-        // Process in chunks to avoid huge tensor allocations
-        let chunk_size = 10_000;
-        for (chunk_idx, chunk) in valid_indices.chunks(chunk_size).enumerate() {
-            if chunk_idx % 5 == 0 {
-                eprintln!(
-                    "    [DistMult] scoring chunk {}/{} ({} triples)",
-                    chunk_idx + 1,
-                    (valid_indices.len() + chunk_size - 1) / chunk_size,
-                    chunk.len()
+                println!(
+                    "    {:>12} │ TP: {:>3}/{} │ FP: {:>5}/{} │ Prec: {:.3} │ Recall: {:.3} │ F1: {:.3}",
+                    name,
+                    tp,
+                    anomaly_tx_indices.len(),
+                    fp,
+                    normal_indices.len(),
+                    precision,
+                    recall,
+                    f1
                 );
             }
 
-            let h_ids: Vec<usize> = chunk.iter().map(|x| x.1).collect();
-            let r_ids: Vec<usize> = chunk.iter().map(|x| x.2).collect();
-            let t_ids: Vec<usize> = chunk.iter().map(|x| x.3).collect();
-
-            let batch_len = chunk.len();
-
-            // Look up embeddings for this chunk
-            let h_emb = entity_emb.clone().select(
-                0,
-                Tensor::<B, 1, Int>::from_data(
-                    burn::tensor::TensorData::from(&h_ids[..]),
-                    &<B as Backend>::Device::default(),
-                ),
-            ); // [batch, d]
-            let r_emb = relation_emb.clone().select(
-                0,
-                Tensor::<B, 1, Int>::from_data(
-                    burn::tensor::TensorData::from(&r_ids[..]),
-                    &<B as Backend>::Device::default(),
-                ),
-            ); // [batch, d]
-            let t_emb = entity_emb.clone().select(
-                0,
-                Tensor::<B, 1, Int>::from_data(
-                    burn::tensor::TensorData::from(&t_ids[..]),
-                    &<B as Backend>::Device::default(),
-                ),
-            ); // [batch, d]
-
-            // DistMult: sum(h * r * t, dim=1) → [batch]
-            let scores_tensor: Tensor<B, 1> =
-                (h_emb * r_emb * t_emb).sum_dim(1).reshape([batch_len]);
-
-            let scores_data = scores_tensor.into_data();
-            let scores: &[f32] = scores_data.as_slice::<f32>().unwrap();
-
-            for (j, &(tx_idx, _, _, _)) in chunk.iter().enumerate() {
-                // Invert: higher DistMult score = more plausible → anomaly = -score
-                distmult_scores[tx_idx] = -scores[j] as f64;
-            }
-        }
-
-        let dm_score_time = dm_score_start.elapsed();
-        eprintln!(
-            "    [DistMult] ✅ Scored {} transactions in {:.1}s",
-            data.tx_amounts.len(),
-            dm_score_time.as_secs_f64()
-        );
-
-        // ═══════════════════════════════════════════════
-        // ATTENTION-BASED ENSEMBLE FUSION (7 signals)
-        // ═══════════════════════════════════════════════
-        println!("  ═══════════════════════════════════════════════════════════════");
-        println!("   🧠 ATTENTION-BASED ENSEMBLE SCORE FUSION (7 signals)");
-        println!("   Each signal gets a dynamic attention weight per transaction");
-        println!("  ═══════════════════════════════════════════════════════════════\n");
-
-        let sage_n = min_max_normalize(&sage_scores);
-        let rgcn_n = min_max_normalize(&rgcn_scores);
-        let gat_n = min_max_normalize(&gat_scores);
-        let gt_n = min_max_normalize(&gt_scores);
-        let z_n = min_max_normalize(&zscore_scores);
-        let nov_n = min_max_normalize(&novelty_scores);
-        let dm_n = min_max_normalize(&distmult_scores);
-
-        // Attention-based fusion: for each transaction, compute attention over 7 signals
-        // using the signal values themselves as queries and a learned(simulated) attention
-        // Key insight: use softmax over signal magnitudes → high signals get more weight
-        let num_signals = 7;
-        let mut ensemble: Vec<f64> = Vec::with_capacity(data.tx_amounts.len());
-        let mut attn_sums = vec![0.0f64; num_signals]; // track avg attention weights
-        let mut per_tx_attn: Vec<[f64; 7]> = Vec::with_capacity(data.tx_amounts.len());
-
-        for i in 0..data.tx_amounts.len() {
-            let signals = [
-                sage_n[i], rgcn_n[i], gat_n[i], gt_n[i], z_n[i], nov_n[i], dm_n[i],
+            // ── Per-anomaly-type breakdown ──
+            println!("\n  ── DETECTION BY ANOMALY TYPE ──\n");
+            let types = [
+                "amount",
+                "new_merchant",
+                "unknown_merchant",
+                "rapid_fire",
+                "unknown_user",
             ];
+            for atype in &types {
+                let type_anomalies: Vec<&AnomalyInfo> = data
+                    .anomalies
+                    .iter()
+                    .filter(|a| a.anomaly_type == *atype)
+                    .collect();
+                if type_anomalies.is_empty() {
+                    continue;
+                }
 
-            // Attention weights via softmax over signal strengths (temperature=2.0)
-            let temperature = 2.0;
-            let max_s = signals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-            let exp_signals: Vec<f64> = signals
-                .iter()
-                .map(|s| ((s - max_s) * temperature).exp())
-                .collect();
-            let sum_exp: f64 = exp_signals.iter().sum();
-            let attn_weights: Vec<f64> =
-                exp_signals.iter().map(|e| e / sum_exp.max(1e-10)).collect();
-
-            // Weighted combination using dynamic attention
-            let score: f64 = signals
-                .iter()
-                .zip(attn_weights.iter())
-                .map(|(s, w)| s * w)
-                .sum();
-            ensemble.push(score);
-
-            let mut attn_arr = [0.0f64; 7];
-            for (j, w) in attn_weights.iter().enumerate() {
-                attn_sums[j] += w;
-                attn_arr[j] = *w;
+                let caught = type_anomalies
+                    .iter()
+                    .filter(|a| ens_n[a.tx_idx] >= 0.5)
+                    .count();
+                println!(
+                    "    {:>18} │ {} detected, {:>2}/{:>2} caught │ {:.0}%",
+                    atype,
+                    if caught == type_anomalies.len() {
+                        "✅"
+                    } else {
+                        "⚠️"
+                    },
+                    caught,
+                    type_anomalies.len(),
+                    caught as f64 / type_anomalies.len() as f64 * 100.0
+                );
             }
-            per_tx_attn.push(attn_arr);
-        }
 
-        let n = data.tx_amounts.len() as f64;
-        let signal_names = [
-            "SAGE", "RGCN", "GAT", "GT", "Z-Score", "Novelty", "DistMult",
-        ];
-        println!("  Average attention weights (learned per-transaction):");
-        for (j, name) in signal_names.iter().enumerate() {
+            // ── Sample anomalies (show 10) ──
+            println!("\n  ── SAMPLE ANOMALIES (first 10) ──\n");
             println!(
-                "    {:>10}: {:.3} ({:.1}%)",
-                name,
-                attn_sums[j] / n,
-                attn_sums[j] / n * 100.0
+                "  {:>4} │ {:>4} │ {:>4} │ {:>4} │ {:>4} │ {:>4} │ {:>4} │ {:>15} │ {}",
+                "SAGE", "RGCN", "GAT", "ZSCR", "NOVL", "DM", "ATTN", "Type", "Description"
             );
-        }
-        println!();
-        let ens_n = min_max_normalize(&ensemble);
-
-        // ── Explanation traces for flagged anomalies ──
-        use hehrgnn::eval::explanation::*;
-
-        println!("  ── EXPLANATION TRACES (top flagged anomalies) ──\n");
-        let threshold = 0.5;
-        let mut explained_count = 0;
-        for a in data.anomalies.iter() {
-            let i = a.tx_idx;
-            if ens_n[i] < threshold || explained_count >= 5 {
-                continue;
+            println!(
+                "  ────┼──────┼──────┼──────┼──────┼──────┼──────┼─────────────────┼──────────"
+            );
+            for a in data.anomalies.iter().take(10) {
+                let i = a.tx_idx;
+                let caught = if ens_n[i] >= 0.5 { "✅" } else { "❌" };
+                println!(
+                    "  {:>4.2} │ {:>4.2} │ {:>4.2} │ {:>4.2} │ {:>4.2} │ {:>4.2} │ {:>4.2} │ {:>15} │ {} {}",
+                    sage_n[i],
+                    rgcn_n[i],
+                    gat_n[i],
+                    z_n[i],
+                    nov_n[i],
+                    dm_n[i],
+                    ens_n[i],
+                    a.anomaly_type,
+                    caught,
+                    a.description
+                );
             }
-            explained_count += 1;
 
-            let raw_scores = [
-                sage_scores[i],
-                rgcn_scores[i],
-                gat_scores[i],
-                gt_scores[i],
-                zscore_scores[i],
-                novelty_scores[i],
-                distmult_scores[i],
-            ];
-            let norm_scores = [
-                sage_n[i], rgcn_n[i], gat_n[i], gt_n[i], z_n[i], nov_n[i], dm_n[i],
-            ];
-
-            let merchant = &data.tx_merchants[i];
-            let user = &data.tx_users[i];
-            let amount = data.tx_amounts[i];
-            let merch_avg = data.merchant_stats.get(merchant).map(|(m, _)| *m);
-            let prior_visits = data
-                .user_merchants
-                .get(user)
-                .map(|ms| ms.iter().filter(|m| *m == merchant).count())
-                .unwrap_or(0);
-
-            let reasons = [
-                gnn_reason("SAGE", sage_n[i]),
-                gnn_reason("RGCN", rgcn_n[i]),
-                gnn_reason("GAT", gat_n[i]),
-                gnn_reason("GT", gt_n[i]),
-                zscore_reason(amount, merchant, merch_avg),
-                novelty_reason(user, merchant, prior_visits),
-                distmult_reason(user, merchant, distmult_scores[i], dm_n[i]),
-            ];
-
-            let context = GraphContext {
-                user: user.clone(),
-                merchant: merchant.clone(),
-                amount,
-                user_avg_amount: None,
-                merchant_avg_amount: merch_avg,
-                user_merchant_prior_visits: prior_visits,
-                merchant_category: None,
-                anomaly_type: Some(a.anomaly_type.clone()),
-            };
-
-            let explanation = AnomalyExplanation::build(
-                i,
-                ens_n[i],
-                threshold,
-                &raw_scores,
-                &norm_scores,
-                &per_tx_attn[i],
-                &signal_names,
-                &reasons,
-                context,
+            // ── Total timing ──
+            println!("\n  ── PERFORMANCE ──\n");
+            println!("    Data gen:     {:.2}s", gen_time.as_secs_f64());
+            println!("    Graph build:  {:.2}s", build_time.as_secs_f64());
+            println!("    GraphSAGE:    {:.2}s", sage_time.as_secs_f64());
+            println!("    RGCN:         {:.2}s", rgcn_time.as_secs_f64());
+            println!("    GAT:          {:.2}s", gat_time.as_secs_f64());
+            println!("    GraphTrans:   {:.2}s", gt_time.as_secs_f64());
+            println!(
+                "    ── Parallel:  {:.2}s (vs {:.2}s sequential = {:.1}× speedup)",
+                parallel_time.as_secs_f64(),
+                sage_time.as_secs_f64()
+                    + rgcn_time.as_secs_f64()
+                    + gat_time.as_secs_f64()
+                    + gt_time.as_secs_f64(),
+                (sage_time.as_secs_f64()
+                    + rgcn_time.as_secs_f64()
+                    + gat_time.as_secs_f64()
+                    + gt_time.as_secs_f64())
+                    / parallel_time.as_secs_f64().max(0.01)
             );
+            println!(
+                "    DistMult:     {:.2}s ({} epochs)",
+                distmult_time.as_secs_f64(),
+                train_config.epochs
+            );
+            println!("    Total nodes:  {}", graph.total_nodes());
+            println!("    Total edges:  {}", graph.total_edges());
 
-            println!("{}", explanation);
-        }
+            println!("\n  ═══════════════════════════════════════════════════════════════\n");
 
-        // ── Anomaly indices ──
-        let anomaly_tx_indices: Vec<usize> = data.anomalies.iter().map(|a| a.tx_idx).collect();
-        let normal_indices: Vec<usize> = (0..data.tx_amounts.len())
-            .filter(|i| !anomaly_tx_indices.contains(i))
-            .collect();
+            // Assertions
+            assert!(
+                graph.total_nodes() > 10000,
+                "Should have 10K+ nodes, got {}",
+                graph.total_nodes()
+            );
+            assert_eq!(data.tx_amounts.len(), sage_scores.len());
+            assert!(data.anomalies.len() >= 40, "Should have 40+ anomaly events");
+        });
 
-        // ── Detection results per model ──
-        println!("  ── MODEL COMPARISON (threshold=0.5 on normalized scores) ──\n");
-        for (name, scores) in &[
-            ("GraphSAGE", &sage_n),
-            ("RGCN", &rgcn_n),
-            ("GAT ⚡", &gat_n),
-            ("GraphTrans", &gt_n),
-            ("Z-Score", &z_n),
-            ("Novelty", &nov_n),
-            ("DistMult", &dm_n),
-            ("✨ ATTN-ENS", &ens_n),
-        ] {
-            let tp = anomaly_tx_indices
-                .iter()
-                .filter(|&&i| scores[i] >= 0.5)
-                .count();
-            let fp = normal_indices.iter().filter(|&&i| scores[i] >= 0.5).count();
-            let precision = if tp + fp > 0 {
-                tp as f64 / (tp + fp) as f64
+        if let Err(err) = run {
+            let panic_msg = if let Some(s) = err.downcast_ref::<String>() {
+                s.as_str()
+            } else if let Some(s) = err.downcast_ref::<&str>() {
+                s
             } else {
-                0.0
-            };
-            let recall = tp as f64 / anomaly_tx_indices.len().max(1) as f64;
-            let f1 = if precision + recall > 0.0 {
-                2.0 * precision * recall / (precision + recall)
-            } else {
-                0.0
+                ""
             };
 
-            println!("    {:>12} │ TP: {:>3}/{} │ FP: {:>5}/{} │ Prec: {:.3} │ Recall: {:.3} │ F1: {:.3}",
-                name, tp, anomaly_tx_indices.len(), fp, normal_indices.len(),
-                precision, recall, f1);
-        }
-
-        // ── Per-anomaly-type breakdown ──
-        println!("\n  ── DETECTION BY ANOMALY TYPE ──\n");
-        let types = [
-            "amount",
-            "new_merchant",
-            "unknown_merchant",
-            "rapid_fire",
-            "unknown_user",
-        ];
-        for atype in &types {
-            let type_anomalies: Vec<&AnomalyInfo> = data
-                .anomalies
-                .iter()
-                .filter(|a| a.anomaly_type == *atype)
-                .collect();
-            if type_anomalies.is_empty() {
-                continue;
+            if panic_msg.contains("No possible adapter available for backend")
+                || panic_msg.contains("requested_backends: Backends(VULKAN)")
+                || panic_msg.contains("cubecl-wgpu")
+            {
+                eprintln!(
+                    "Skipping test_100k_ensemble: no compatible WGPU/Vulkan adapter in this environment"
+                );
+                return;
             }
 
-            let caught = type_anomalies
-                .iter()
-                .filter(|a| ens_n[a.tx_idx] >= 0.5)
-                .count();
-            println!(
-                "    {:>18} │ {} detected, {:>2}/{:>2} caught │ {:.0}%",
-                atype,
-                if caught == type_anomalies.len() {
-                    "✅"
-                } else {
-                    "⚠️"
-                },
-                caught,
-                type_anomalies.len(),
-                caught as f64 / type_anomalies.len() as f64 * 100.0
-            );
+            std::panic::resume_unwind(err);
         }
-
-        // ── Sample anomalies (show 10) ──
-        println!("\n  ── SAMPLE ANOMALIES (first 10) ──\n");
-        println!(
-            "  {:>4} │ {:>4} │ {:>4} │ {:>4} │ {:>4} │ {:>4} │ {:>4} │ {:>15} │ {}",
-            "SAGE", "RGCN", "GAT", "ZSCR", "NOVL", "DM", "ATTN", "Type", "Description"
-        );
-        println!("  ────┼──────┼──────┼──────┼──────┼──────┼──────┼─────────────────┼──────────");
-        for a in data.anomalies.iter().take(10) {
-            let i = a.tx_idx;
-            let caught = if ens_n[i] >= 0.5 { "✅" } else { "❌" };
-            println!(
-                "  {:>4.2} │ {:>4.2} │ {:>4.2} │ {:>4.2} │ {:>4.2} │ {:>4.2} │ {:>4.2} │ {:>15} │ {} {}",
-                sage_n[i], rgcn_n[i], gat_n[i], z_n[i], nov_n[i], dm_n[i], ens_n[i],
-                a.anomaly_type,
-                caught,
-                a.description
-            );
-        }
-
-        // ── Total timing ──
-        println!("\n  ── PERFORMANCE ──\n");
-        println!("    Data gen:     {:.2}s", gen_time.as_secs_f64());
-        println!("    Graph build:  {:.2}s", build_time.as_secs_f64());
-        println!("    GraphSAGE:    {:.2}s", sage_time.as_secs_f64());
-        println!("    RGCN:         {:.2}s", rgcn_time.as_secs_f64());
-        println!("    GAT:          {:.2}s", gat_time.as_secs_f64());
-        println!("    GraphTrans:   {:.2}s", gt_time.as_secs_f64());
-        println!(
-            "    ── Parallel:  {:.2}s (vs {:.2}s sequential = {:.1}× speedup)",
-            parallel_time.as_secs_f64(),
-            sage_time.as_secs_f64()
-                + rgcn_time.as_secs_f64()
-                + gat_time.as_secs_f64()
-                + gt_time.as_secs_f64(),
-            (sage_time.as_secs_f64()
-                + rgcn_time.as_secs_f64()
-                + gat_time.as_secs_f64()
-                + gt_time.as_secs_f64())
-                / parallel_time.as_secs_f64().max(0.01)
-        );
-        println!(
-            "    DistMult:     {:.2}s ({} epochs)",
-            distmult_time.as_secs_f64(),
-            train_config.epochs
-        );
-        println!("    Total nodes:  {}", graph.total_nodes());
-        println!("    Total edges:  {}", graph.total_edges());
-
-        println!("\n  ═══════════════════════════════════════════════════════════════\n");
-
-        // Assertions
-        assert!(
-            graph.total_nodes() > 10000,
-            "Should have 10K+ nodes, got {}",
-            graph.total_nodes()
-        );
-        assert_eq!(data.tx_amounts.len(), sage_scores.len());
-        assert!(data.anomalies.len() >= 40, "Should have 40+ anomaly events");
     }
 }

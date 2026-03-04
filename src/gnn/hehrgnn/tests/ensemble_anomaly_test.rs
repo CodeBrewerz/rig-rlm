@@ -23,14 +23,14 @@ mod tests {
     use burn::data::dataloader::batcher::Batcher;
     use hehrgnn::data::batcher::{HehrBatch, HehrBatcher, HehrFactItem};
     use hehrgnn::data::fact::{HehrFact, RawFact};
-    use hehrgnn::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
+    use hehrgnn::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
     use hehrgnn::data::hetero_graph::EdgeType;
     use hehrgnn::data::vocab::KgVocabulary;
     use hehrgnn::model::graphsage::GraphSageModelConfig;
     use hehrgnn::model::rgcn::RgcnConfig;
     use hehrgnn::server::state::PlainEmbeddings;
     use hehrgnn::training::scoring::DistMultScorer;
-    use hehrgnn::training::train::{train, TrainConfig};
+    use hehrgnn::training::train::{TrainConfig, train};
 
     fn gfact(st: &str, s: &str, r: &str, dt: &str, d: &str) -> GraphFact {
         GraphFact {
@@ -458,7 +458,8 @@ mod tests {
         let config = GraphBuildConfig {
             node_feat_dim: 32,
             add_reverse_edges: true,
-            add_self_loops: true, add_positional_encoding: true,
+            add_self_loops: true,
+            add_positional_encoding: true,
         };
         let graph = build_hetero_graph::<B>(&graph_facts, &config, &device_b);
 
@@ -776,9 +777,17 @@ mod tests {
 
             let separable = min_anomaly > max_normal;
 
-            println!("    {:>12} │ TP: {}/{} │ FP: {:>2} │ Prec: {:.2} │ Recall: {:.2} │ F1: {:.2} │ Sep: {}",
-                name, tp, anomaly_idx.len(), fp, precision, recall, f1,
-                if separable { "✅" } else { "❌" });
+            println!(
+                "    {:>12} │ TP: {}/{} │ FP: {:>2} │ Prec: {:.2} │ Recall: {:.2} │ F1: {:.2} │ Sep: {}",
+                name,
+                tp,
+                anomaly_idx.len(),
+                fp,
+                precision,
+                recall,
+                f1,
+                if separable { "✅" } else { "❌" }
+            );
         }
 
         // ── Per-anomaly: which model catches which? ──

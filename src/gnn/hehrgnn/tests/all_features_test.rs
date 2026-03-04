@@ -9,13 +9,13 @@
 use burn::backend::NdArray;
 use burn::prelude::*;
 
-use hehrgnn::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
+use hehrgnn::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
 use hehrgnn::data::hetero_graph::{EdgeType, HeteroGraph};
 use hehrgnn::model::backbone::NodeEmbeddings;
 use hehrgnn::model::gat::GatConfig;
 use hehrgnn::model::graph_transformer::GraphTransformerConfig;
 use hehrgnn::model::graphsage::GraphSageModelConfig;
-use hehrgnn::model::lora::{init_hetero_basis_adapter, LoraConfig};
+use hehrgnn::model::lora::{LoraConfig, init_hetero_basis_adapter};
 use hehrgnn::model::mhc::{MhcGatConfig, MhcGpsConfig, MhcGraphSageConfig, MhcRgcnConfig};
 use hehrgnn::model::rgcn::RgcnConfig;
 use hehrgnn::model::trainer::*;
@@ -52,7 +52,8 @@ fn build_test_graph() -> HeteroGraph<B> {
         &GraphBuildConfig {
             node_feat_dim: 16,
             add_reverse_edges: true,
-            add_self_loops: true, add_positional_encoding: true,
+            add_self_loops: true,
+            add_positional_encoding: true,
         },
         &device,
     )
@@ -372,7 +373,9 @@ fn test_all_features_all_models() {
                 " ".repeat(20 - star.len() - format!("{:+.1}", delta).len())
             );
         }
-        println!("  ╠══════════════════════════════════════════════════════════════════════════════════╣");
+        println!(
+            "  ╠══════════════════════════════════════════════════════════════════════════════════╣"
+        );
     }
     println!(
         "  ╚══════════════════════════════════════════════════════════════════════════════════╝"

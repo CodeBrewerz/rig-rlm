@@ -21,7 +21,6 @@
 //!   Phase 3 (recursive):    self-improve by replaying successful predictions
 
 use super::fiduciary::{FiduciaryActionType, FiduciaryAxes};
-use std::collections::HashMap;
 
 // ═══════════════════════════════════════════════════════════════
 // Learnable Scorer MLP
@@ -203,11 +202,15 @@ impl LearnableScorer {
         // User embedding (padded/truncated to fit)
         let emb_dim = (self.input_dim - NUM_ACTIONS - NUM_CONTEXT) / 2;
         for i in 0..emb_dim {
-            input.push(example.user_emb.get(i).copied().unwrap_or(0.0));
+            input.push(sanitize_embedding(
+                example.user_emb.get(i).copied().unwrap_or(0.0),
+            ));
         }
         // Target embedding
         for i in 0..emb_dim {
-            input.push(example.target_emb.get(i).copied().unwrap_or(0.0));
+            input.push(sanitize_embedding(
+                example.target_emb.get(i).copied().unwrap_or(0.0),
+            ));
         }
         // Action one-hot
         let action_idx = action_to_index(example.action_type);
@@ -215,10 +218,10 @@ impl LearnableScorer {
             input.push(if i == action_idx { 1.0 } else { 0.0 });
         }
         // Context features
-        input.push(example.anomaly_score);
-        input.push(example.embedding_affinity);
+        input.push(sanitize_unit(example.anomaly_score));
+        input.push(sanitize_signed_unit(example.embedding_affinity));
         for &c in &example.context {
-            input.push(c);
+            input.push(sanitize_unit(c));
         }
         input
     }
@@ -389,7 +392,7 @@ impl LearnableScorer {
                 }
 
                 // Backprop: output → h2_gated
-                let grad_h2_gated = backprop_linear(&self.w3, &grad_output, &h2_gated);
+                let grad_h2_gated = backprop_linear(&self.w3, &grad_output);
 
                 // Backprop through anomaly gate: grad_h2 = grad_h2_gated ⊙ gate
                 // grad_gate = grad_h2_gated ⊙ h2
@@ -413,13 +416,17 @@ impl LearnableScorer {
                     self.b_anomaly_gate[i] -= self.lr * grad_gate[i] * dgate_db;
                 }
 
-                // Backprop through ReLU layers
-                let grad_h1 = backprop_layer(&self.w2, &grad_h2, &h1);
+                // Backprop through ReLU layers.
+                // h2 = ReLU(z2), so apply ReLU derivative at h2 before propagating to h1.
+                let grad_z2 = relu_backward(&grad_h2, &h2);
+                let grad_h1 = backprop_linear(&self.w2, &grad_z2);
+                // h1 = ReLU(z1), so convert gradient wrt h1 to gradient wrt z1 for w1 update.
+                let grad_z1 = relu_backward(&grad_h1, &h1);
 
                 // Update MLP weights
                 update_weights(&mut self.w3, &mut self.b3, &h2_gated, &grad_output, self.lr);
-                update_weights(&mut self.w2, &mut self.b2, &h1, &grad_h2, self.lr);
-                update_weights(&mut self.w1, &mut self.b1, &input, &grad_h1, self.lr);
+                update_weights(&mut self.w2, &mut self.b2, &h1, &grad_z2, self.lr);
+                update_weights(&mut self.w1, &mut self.b1, &input, &grad_z1, self.lr);
 
                 self.samples_seen += 1;
             }
@@ -435,6 +442,10 @@ impl LearnableScorer {
 
     /// Learn axis weights by minimizing score prediction error.
     fn learn_axis_weights(&mut self, examples: &[ScorerExample], labels: &[ScorerLabel]) {
+        if examples.is_empty() {
+            return;
+        }
+
         let mut weight_grad = [0.0f32; 6];
 
         for (example, label) in examples.iter().zip(labels.iter()) {
@@ -458,14 +469,21 @@ impl LearnableScorer {
 
         // SGD update + normalize
         let n = examples.len() as f32;
+        if !n.is_finite() || n <= 0.0 {
+            return;
+        }
         for i in 0..6 {
             self.axis_weights[i] -= self.lr * weight_grad[i] / n;
             self.axis_weights[i] = self.axis_weights[i].max(0.01); // keep positive
         }
         // Normalize to sum to 1
         let sum: f32 = self.axis_weights.iter().sum();
-        for w in &mut self.axis_weights {
-            *w /= sum;
+        if !sum.is_finite() || sum <= 1e-8 {
+            self.axis_weights = [0.25, 0.25, 0.15, 0.15, 0.10, 0.10];
+        } else {
+            for w in &mut self.axis_weights {
+                *w /= sum;
+            }
         }
     }
 
@@ -475,15 +493,12 @@ impl LearnableScorer {
     /// When a user rejects → negative reward → weaken.
     pub fn apply_reward(&mut self, reward: &RewardSignal) {
         let input = self.build_input(&reward.example);
+        let anomaly_score = sanitize_unit(reward.example.anomaly_score);
 
         // Forward pass with anomaly gate
         let h1 = matmul_bias_relu(&self.w1, &self.b1, &input);
         let h2 = matmul_bias_relu(&self.w2, &self.b2, &h1);
-        let gate = anomaly_gate(
-            &self.w_anomaly_gate,
-            &self.b_anomaly_gate,
-            reward.example.anomaly_score,
-        );
+        let gate = anomaly_gate(&self.w_anomaly_gate, &self.b_anomaly_gate, anomaly_score);
         let h2_gated: Vec<f32> = h2.iter().zip(gate.iter()).map(|(h, g)| h * g).collect();
         let output = matmul_bias(&self.w3, &self.b3, &h2_gated);
 
@@ -501,7 +516,13 @@ impl LearnableScorer {
         } else {
             -1.0
         };
-        let reward_strength = reward.helpfulness.unwrap_or(0.5) * base_reward;
+        let helpfulness = reward.helpfulness.unwrap_or(0.5);
+        let helpfulness = if helpfulness.is_finite() {
+            helpfulness.clamp(0.0, 2.0)
+        } else {
+            0.5
+        };
+        let reward_strength = (helpfulness * base_reward).clamp(-10.0, 10.0);
 
         let mut grad_output = vec![0.0f32; OUTPUT_DIM];
         grad_output[NUM_AXES] = -reward_strength;
@@ -512,7 +533,7 @@ impl LearnableScorer {
         }
 
         // Backprop through gated path
-        let grad_h2_gated = backprop_linear(&self.w3, &grad_output, &h2_gated);
+        let grad_h2_gated = backprop_linear(&self.w3, &grad_output);
 
         // Gate gradients
         let grad_h2: Vec<f32> = grad_h2_gated
@@ -531,14 +552,16 @@ impl LearnableScorer {
         // Update anomaly gate
         for i in 0..self.hidden_dim2 {
             let g_i = gate[i];
-            let dgate_dw = g_i * (1.0 - g_i) * reward.example.anomaly_score;
+            let dgate_dw = g_i * (1.0 - g_i) * anomaly_score;
             let dgate_db = g_i * (1.0 - g_i);
             self.w_anomaly_gate[i] -= reward_lr * grad_gate[i] * dgate_dw;
             self.b_anomaly_gate[i] -= reward_lr * grad_gate[i] * dgate_db;
         }
 
-        // Backprop through ReLU layers
-        let grad_h1 = backprop_layer(&self.w2, &grad_h2, &h1);
+        // Backprop through ReLU layers with correct ReLU derivatives.
+        let grad_z2 = relu_backward(&grad_h2, &h2);
+        let grad_h1 = backprop_linear(&self.w2, &grad_z2);
+        let grad_z1 = relu_backward(&grad_h1, &h1);
 
         update_weights(
             &mut self.w3,
@@ -547,8 +570,8 @@ impl LearnableScorer {
             &grad_output,
             reward_lr,
         );
-        update_weights(&mut self.w2, &mut self.b2, &h1, &grad_h2, reward_lr);
-        update_weights(&mut self.w1, &mut self.b1, &input, &grad_h1, reward_lr);
+        update_weights(&mut self.w2, &mut self.b2, &h1, &grad_z2, reward_lr);
+        update_weights(&mut self.w1, &mut self.b1, &input, &grad_z1, reward_lr);
 
         self.samples_seen += 1;
 
@@ -683,6 +706,7 @@ fn matmul_bias_relu(w: &[Vec<f32>], b: &[f32], x: &[f32]) -> Vec<f32> {
 }
 
 fn sigmoid(x: f32) -> f32 {
+    let x = if x.is_finite() { x } else { 0.0 };
     1.0 / (1.0 + (-x.clamp(-20.0, 20.0)).exp())
 }
 
@@ -696,7 +720,7 @@ fn anomaly_gate(w: &[f32], b: &[f32], anomaly_score: f32) -> Vec<f32> {
 }
 
 /// Backprop through a linear layer (no ReLU activation — for gated paths).
-fn backprop_linear(w: &[Vec<f32>], grad_out: &[f32], _input: &[f32]) -> Vec<f32> {
+fn backprop_linear(w: &[Vec<f32>], grad_out: &[f32]) -> Vec<f32> {
     let in_dim = w[0].len();
     let mut grad_in = vec![0.0f32; in_dim];
     for (i, row) in w.iter().enumerate() {
@@ -708,20 +732,12 @@ fn backprop_linear(w: &[Vec<f32>], grad_out: &[f32], _input: &[f32]) -> Vec<f32>
     grad_in
 }
 
-fn backprop_layer(w: &[Vec<f32>], grad_out: &[f32], activation: &[f32]) -> Vec<f32> {
-    let in_dim = w[0].len();
-    let mut grad_in = vec![0.0f32; in_dim];
-
-    for (i, row) in w.iter().enumerate() {
-        let g = grad_out[i];
-        // ReLU derivative: pass gradient only if activation > 0
-        for j in 0..in_dim {
-            if activation[j] > 0.0 {
-                grad_in[j] += g * row[j];
-            }
-        }
-    }
-    grad_in
+fn relu_backward(grad_out: &[f32], relu_output: &[f32]) -> Vec<f32> {
+    grad_out
+        .iter()
+        .zip(relu_output.iter())
+        .map(|(&g, &y)| if y > 0.0 { g } else { 0.0 })
+        .collect()
 }
 
 fn update_weights(w: &mut [Vec<f32>], b: &mut [f32], input: &[f32], grad: &[f32], lr: f32) {
@@ -756,5 +772,29 @@ fn action_to_index(action: FiduciaryActionType) -> usize {
         FiduciaryActionType::ShouldReconcile => 15,
         FiduciaryActionType::ShouldReviewRecurring => 16,
         FiduciaryActionType::ShouldRevalueAsset => 17,
+    }
+}
+
+fn sanitize_unit(v: f32) -> f32 {
+    if v.is_finite() {
+        v.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn sanitize_signed_unit(v: f32) -> f32 {
+    if v.is_finite() {
+        v.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn sanitize_embedding(v: f32) -> f32 {
+    if v.is_finite() {
+        v.clamp(-10.0, 10.0)
+    } else {
+        0.0
     }
 }

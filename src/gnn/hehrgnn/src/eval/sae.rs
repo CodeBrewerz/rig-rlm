@@ -305,7 +305,7 @@ impl SparseAutoencoder {
             .filter(|(_, v)| **v > 0.0)
             .map(|(i, v)| (i, *v))
             .collect();
-        active.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        active.sort_by(|a, b| b.1.total_cmp(&a.1));
         active
     }
 
@@ -561,7 +561,7 @@ pub fn label_features(
     }
 
     // Sort by correlation strength
-    labels.sort_by(|a, b| b.correlation.partial_cmp(&a.correlation).unwrap());
+    labels.sort_by(|a, b| b.correlation.total_cmp(&a.correlation));
     labels
 }
 

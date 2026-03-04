@@ -80,9 +80,11 @@ impl FlowAccumulator {
         let sum_ids: Vec<NodeId> = self.sum_flows.keys().copied().collect();
         for sum_id in &sum_ids {
             let edge_flows = circuit.sum_edge_flows(*sum_id);
-            let acc = self.sum_flows.get_mut(sum_id).unwrap();
-            for (i, f) in edge_flows.iter().enumerate() {
-                acc[i] += f;
+            if let Some(acc) = self.sum_flows.get_mut(sum_id) {
+                let n = acc.len().min(edge_flows.len());
+                for i in 0..n {
+                    acc[i] += edge_flows[i];
+                }
             }
         }
 

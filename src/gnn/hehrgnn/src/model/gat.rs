@@ -184,12 +184,22 @@ impl<B: Backend> GatLayer<B> {
                 // Attention scores: dot product of Q and K, scaled
                 // a_ij = (q_i · k_j) / sqrt(head_dim)
                 let scale = (self.head_dim as f64).sqrt();
-                let attn_scores = (queries.clone() * keys).sum_dim(1); // [E, 1]
-                let attn_scores = attn_scores / scale; // scaled dot-product
+                let attn_scores = (queries.clone() * keys).sum_dim(1) / scale; // [E, 1]
+                let attn_scores = attn_scores.clamp(-20.0, 20.0);
+                let attn_exp = attn_scores.exp();
 
-                // Softmax per destination (using exp and scatter for softmax approximation)
-                // For numerical stability, use LeakyReLU (GAT-style) instead of full softmax
-                let attn_weights = burn::tensor::activation::sigmoid(attn_scores.clone()); // [E, 1]
+                // True softmax normalization per destination node.
+                let attn_scatter = dst_indices.clone().reshape([num_edges, 1]);
+                let attn_sum_per_dst = Tensor::<B, 2>::zeros([dst_count, 1], &device).scatter(
+                    0,
+                    attn_scatter.clone(),
+                    attn_exp.clone(),
+                    burn::tensor::IndexingUpdateOp::Add,
+                );
+                let denom = attn_sum_per_dst
+                    .select(0, dst_indices.clone())
+                    .clamp_min(1e-6);
+                let attn_weights = attn_exp / denom; // [E, 1]
 
                 // Weighted values
                 let weighted = values * attn_weights.clone().repeat_dim(1, self.hidden_dim); // [E, H]
@@ -287,6 +297,21 @@ impl GatConfig {
 }
 
 impl<B: Backend> GatModel<B> {
+    fn align_feature_dim(features: Tensor<B, 2>, expected_dim: usize) -> Tensor<B, 2> {
+        let [num_nodes, in_dim] = features.dims();
+        if in_dim == expected_dim {
+            return features;
+        }
+
+        if in_dim > expected_dim {
+            features.slice([0..num_nodes, 0..expected_dim])
+        } else {
+            let device = features.device();
+            let pad = Tensor::<B, 2>::zeros([num_nodes, expected_dim - in_dim], &device);
+            Tensor::cat(vec![features, pad], 1)
+        }
+    }
+
     pub fn attach_adapter(&mut self, adapter: crate::model::lora::HeteroBasisAdapter<B>) {
         self.input_adapters = Some(adapter);
     }
@@ -307,11 +332,13 @@ impl<B: Backend> GatModel<B> {
         let mut embeddings = NodeEmbeddings::new();
         for (node_type, features) in &graph.node_features {
             if let Some(idx) = self.node_type_keys.iter().position(|k| k == node_type) {
-                let mut projected = self.input_linears[idx].forward(features.clone());
+                let expected_in = self.input_linears[idx].weight.val().dims()[0];
+                let aligned_features = Self::align_feature_dim(features.clone(), expected_in);
+                let mut projected = self.input_linears[idx].forward(aligned_features.clone());
 
                 // DoRA: y = m * normalize(base + adapter)
                 if let Some(ref adapter) = self.input_adapters {
-                    projected = adapter.dora_forward(projected, features.clone(), node_type);
+                    projected = adapter.dora_forward(projected, aligned_features, node_type);
                 }
 
                 // Add learnable node-type embedding (KumoRFM §2.3)
@@ -331,10 +358,28 @@ impl<B: Backend> GatModel<B> {
     }
 }
 
+impl<B: Backend> crate::model::trainer::JepaTrainable<B> for GatModel<B> {
+    fn forward_embeddings(&self, graph: &HeteroGraph<B>) -> NodeEmbeddings<B> {
+        self.forward(graph)
+    }
+
+    fn num_input_weights(&self) -> usize {
+        self.input_linears.len()
+    }
+
+    fn get_input_weight(&self, idx: usize) -> Tensor<B, 2> {
+        self.input_linears[idx].weight.val()
+    }
+
+    fn set_input_weight(&mut self, idx: usize, weight: Tensor<B, 2>) {
+        self.input_linears[idx].weight = self.input_linears[idx].weight.clone().map(|_| weight);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
+    use crate::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
     use burn::backend::NdArray;
 
     type TestBackend = NdArray;

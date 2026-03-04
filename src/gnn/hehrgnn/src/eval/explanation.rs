@@ -89,7 +89,7 @@ impl AnomalyExplanation {
             .collect();
 
         // Sort by contribution (highest first)
-        signals.sort_by(|a, b| b.contribution.partial_cmp(&a.contribution).unwrap());
+        signals.sort_by(|a, b| b.contribution.total_cmp(&a.contribution));
 
         // Top 3 factors = top 3 signals with non-trivial contributions
         let top_factors: Vec<String> = signals

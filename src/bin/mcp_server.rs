@@ -31,7 +31,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-    eprintln!("🔌 MCP Server starting on stdio (work_dir: {})", work_dir.display());
+    eprintln!(
+        "🔌 MCP Server starting on stdio (work_dir: {})",
+        work_dir.display()
+    );
 
     let server = AgentMcpServer::new(work_dir);
     let service = server

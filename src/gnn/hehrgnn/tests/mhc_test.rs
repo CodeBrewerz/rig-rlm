@@ -8,7 +8,7 @@
 use burn::backend::NdArray;
 use burn::prelude::*;
 
-use hehrgnn::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
+use hehrgnn::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
 use hehrgnn::data::hetero_graph::EdgeType;
 use hehrgnn::model::graphsage::GraphSageModelConfig;
 use hehrgnn::model::mhc::MhcGraphSageConfig;
@@ -20,24 +20,84 @@ fn build_test_graph() -> hehrgnn::data::hetero_graph::HeteroGraph<B> {
     let device = <B as Backend>::Device::default();
     let facts = vec![
         // Users own accounts
-        GraphFact { src: ("user".into(), "alice".into()), relation: "owns".into(), dst: ("account".into(), "acc1".into()) },
-        GraphFact { src: ("user".into(), "bob".into()), relation: "owns".into(), dst: ("account".into(), "acc2".into()) },
-        GraphFact { src: ("user".into(), "carol".into()), relation: "owns".into(), dst: ("account".into(), "acc3".into()) },
+        GraphFact {
+            src: ("user".into(), "alice".into()),
+            relation: "owns".into(),
+            dst: ("account".into(), "acc1".into()),
+        },
+        GraphFact {
+            src: ("user".into(), "bob".into()),
+            relation: "owns".into(),
+            dst: ("account".into(), "acc2".into()),
+        },
+        GraphFact {
+            src: ("user".into(), "carol".into()),
+            relation: "owns".into(),
+            dst: ("account".into(), "acc3".into()),
+        },
         // Transactions posted to accounts
-        GraphFact { src: ("tx".into(), "tx1".into()), relation: "posted_to".into(), dst: ("account".into(), "acc1".into()) },
-        GraphFact { src: ("tx".into(), "tx2".into()), relation: "posted_to".into(), dst: ("account".into(), "acc1".into()) },
-        GraphFact { src: ("tx".into(), "tx3".into()), relation: "posted_to".into(), dst: ("account".into(), "acc2".into()) },
-        GraphFact { src: ("tx".into(), "tx4".into()), relation: "posted_to".into(), dst: ("account".into(), "acc3".into()) },
+        GraphFact {
+            src: ("tx".into(), "tx1".into()),
+            relation: "posted_to".into(),
+            dst: ("account".into(), "acc1".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx2".into()),
+            relation: "posted_to".into(),
+            dst: ("account".into(), "acc1".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx3".into()),
+            relation: "posted_to".into(),
+            dst: ("account".into(), "acc2".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx4".into()),
+            relation: "posted_to".into(),
+            dst: ("account".into(), "acc3".into()),
+        },
         // Transactions at merchants
-        GraphFact { src: ("tx".into(), "tx1".into()), relation: "at".into(), dst: ("merchant".into(), "walmart".into()) },
-        GraphFact { src: ("tx".into(), "tx2".into()), relation: "at".into(), dst: ("merchant".into(), "amazon".into()) },
-        GraphFact { src: ("tx".into(), "tx3".into()), relation: "at".into(), dst: ("merchant".into(), "walmart".into()) },
-        GraphFact { src: ("tx".into(), "tx4".into()), relation: "at".into(), dst: ("merchant".into(), "target".into()) },
+        GraphFact {
+            src: ("tx".into(), "tx1".into()),
+            relation: "at".into(),
+            dst: ("merchant".into(), "walmart".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx2".into()),
+            relation: "at".into(),
+            dst: ("merchant".into(), "amazon".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx3".into()),
+            relation: "at".into(),
+            dst: ("merchant".into(), "walmart".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx4".into()),
+            relation: "at".into(),
+            dst: ("merchant".into(), "target".into()),
+        },
         // Categories
-        GraphFact { src: ("tx".into(), "tx1".into()), relation: "has_cat".into(), dst: ("category".into(), "groceries".into()) },
-        GraphFact { src: ("tx".into(), "tx2".into()), relation: "has_cat".into(), dst: ("category".into(), "electronics".into()) },
-        GraphFact { src: ("tx".into(), "tx3".into()), relation: "has_cat".into(), dst: ("category".into(), "groceries".into()) },
-        GraphFact { src: ("tx".into(), "tx4".into()), relation: "has_cat".into(), dst: ("category".into(), "retail".into()) },
+        GraphFact {
+            src: ("tx".into(), "tx1".into()),
+            relation: "has_cat".into(),
+            dst: ("category".into(), "groceries".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx2".into()),
+            relation: "has_cat".into(),
+            dst: ("category".into(), "electronics".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx3".into()),
+            relation: "has_cat".into(),
+            dst: ("category".into(), "groceries".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx4".into()),
+            relation: "has_cat".into(),
+            dst: ("category".into(), "retail".into()),
+        },
     ];
 
     build_hetero_graph::<B>(
@@ -45,7 +105,8 @@ fn build_test_graph() -> hehrgnn::data::hetero_graph::HeteroGraph<B> {
         &GraphBuildConfig {
             node_feat_dim: 16,
             add_reverse_edges: true,
-            add_self_loops: true, add_positional_encoding: true,
+            add_self_loops: true,
+            add_positional_encoding: true,
         },
         &device,
     )
@@ -59,7 +120,12 @@ fn avg_pairwise_cosine(embeddings: &burn::tensor::Tensor<B, 2>) -> f32 {
         return 0.0;
     }
 
-    let data: Vec<f32> = embeddings.clone().into_data().as_slice::<f32>().unwrap().to_vec();
+    let data: Vec<f32> = embeddings
+        .clone()
+        .into_data()
+        .as_slice::<f32>()
+        .unwrap()
+        .to_vec();
     let n = dims[0];
     let d = dims[1];
     let mut total_cos = 0.0f32;
@@ -83,7 +149,11 @@ fn avg_pairwise_cosine(embeddings: &burn::tensor::Tensor<B, 2>) -> f32 {
         }
     }
 
-    if count > 0 { total_cos / count as f32 } else { 0.0 }
+    if count > 0 {
+        total_cos / count as f32
+    } else {
+        0.0
+    }
 }
 
 /// Compute embedding variance (higher = more discriminative).
@@ -141,8 +211,14 @@ fn test_mhc_vs_standard_depth() {
 
         println!(
             "    Depth {:2}: avg_cosine={:.4}  variance={:.6}  {}",
-            depth, avg_cos, avg_var,
-            if avg_cos > 0.95 { "⚠️  OVER-SMOOTHED" } else { "✅ ok" }
+            depth,
+            avg_cos,
+            avg_var,
+            if avg_cos > 0.95 {
+                "⚠️  OVER-SMOOTHED"
+            } else {
+                "✅ ok"
+            }
         );
     }
 
@@ -178,8 +254,14 @@ fn test_mhc_vs_standard_depth() {
 
         println!(
             "    Depth {:2}: avg_cosine={:.4}  variance={:.6}  {}",
-            depth, avg_cos, avg_var,
-            if avg_cos > 0.95 { "⚠️  OVER-SMOOTHED" } else { "✅ ok" }
+            depth,
+            avg_cos,
+            avg_var,
+            if avg_cos > 0.95 {
+                "⚠️  OVER-SMOOTHED"
+            } else {
+                "✅ ok"
+            }
         );
     }
 
@@ -213,8 +295,13 @@ fn test_mhc_vs_standard_depth() {
     }
     println!(
         "    Depth  8: avg_cosine={:.4}  variance={:.6}  {}",
-        avg_cos, avg_var,
-        if avg_cos > 0.95 { "⚠️  OVER-SMOOTHED" } else { "✅ ok" }
+        avg_cos,
+        avg_var,
+        if avg_cos > 0.95 {
+            "⚠️  OVER-SMOOTHED"
+        } else {
+            "✅ ok"
+        }
     );
     println!("    mHC overhead params: {}", model.param_count());
 
@@ -261,8 +348,14 @@ fn test_sinkhorn_properties() {
 
         println!(
             "    n={}: max_row_err={:.6}  max_col_err={:.6}  {}",
-            n, max_row_err, max_col_err,
-            if max_row_err < 0.01 && max_col_err < 0.01 { "✅" } else { "❌" }
+            n,
+            max_row_err,
+            max_col_err,
+            if max_row_err < 0.01 && max_col_err < 0.01 {
+                "✅"
+            } else {
+                "❌"
+            }
         );
         assert!(max_row_err < 0.01, "Row sums not close to 1 for n={}", n);
         assert!(max_col_err < 0.01, "Col sums not close to 1 for n={}", n);

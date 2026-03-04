@@ -8,10 +8,10 @@
 pub mod monad;
 
 // Infrastructure
+pub mod a2a_server;
 pub mod apply_patch;
 pub mod cancellation;
 pub mod exec_policy;
-pub mod a2a_server;
 pub mod mcp_server;
 pub mod persistence;
 pub mod safety;

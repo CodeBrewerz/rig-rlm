@@ -3,11 +3,8 @@
 //! Adds calibrated probabilities, lift factors, and counterfactual scenarios
 //! to fiduciary recommendations using the trained Probabilistic Circuit.
 
-use std::collections::HashMap;
-
 use super::bridge::{
-    self, discretize_affinity, discretize_anomaly, discretize_degree, discretize_priority,
-    NUM_CATEGORIES, NUM_PC_VARS, VAR_NAMES,
+    discretize_affinity, discretize_anomaly, discretize_degree, discretize_priority,
 };
 use super::circuit::CompiledCircuit;
 use super::query;
@@ -73,7 +70,32 @@ const AFFINITY_LABELS: [&str; 5] = [
 ];
 const DEGREE_LABELS: [&str; 5] = ["isolated", "leaf", "normal", "connected", "hub"];
 const PRIORITY_LABELS: [&str; 5] = ["very_low", "low", "medium", "high", "very_high"];
-const OUTCOME_LABELS: [&str; 5] = ["safe", "low_risk", "moderate", "risky", "very_risky"];
+
+fn sanitize_prob(p: f64) -> f64 {
+    if p.is_finite() {
+        p.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn normalized_entropy(probs: &[f64]) -> f64 {
+    if probs.is_empty() {
+        return 1.0;
+    }
+    let mut h = 0.0f64;
+    for &p in probs {
+        if p > 1e-12 && p.is_finite() {
+            h -= p * p.ln();
+        }
+    }
+    let h_max = (probs.len() as f64).ln();
+    if h_max <= 1e-12 {
+        1.0
+    } else {
+        (h / h_max).clamp(0.0, 1.0)
+    }
+}
 
 /// Run PC analysis for a fiduciary action candidate.
 ///
@@ -108,15 +130,25 @@ pub fn analyze(
     let probs = outcome_probs.get(&4).cloned().unwrap_or(vec![0.2; 5]);
 
     let outcome_dist = OutcomeDistribution {
-        safe: *probs.get(0).unwrap_or(&0.2),
-        low_risk: *probs.get(1).unwrap_or(&0.2),
-        moderate: *probs.get(2).unwrap_or(&0.2),
-        risky: *probs.get(3).unwrap_or(&0.2),
-        very_risky: *probs.get(4).unwrap_or(&0.2),
+        safe: sanitize_prob(*probs.get(0).unwrap_or(&0.2)),
+        low_risk: sanitize_prob(*probs.get(1).unwrap_or(&0.2)),
+        moderate: sanitize_prob(*probs.get(2).unwrap_or(&0.2)),
+        risky: sanitize_prob(*probs.get(3).unwrap_or(&0.2)),
+        very_risky: sanitize_prob(*probs.get(4).unwrap_or(&0.2)),
     };
 
-    // Risk probability = P(risky) + P(very_risky)
-    let risk_probability = outcome_dist.risky + outcome_dist.very_risky;
+    // Risk probability = P(risky) + P(very_risky), with entropy-aware fallback:
+    // when the PC posterior is high-entropy (uncertain/near-uniform), blend in
+    // a conservative feature prior so risk remains discriminative.
+    let pc_risk = sanitize_prob(outcome_dist.risky + outcome_dist.very_risky);
+    let entropy = normalized_entropy(&probs);
+    let confidence = 1.0 - entropy; // 1.0 = sharp posterior, 0.0 = flat posterior
+    let affinity_term = 0.5 * (1.0 - affinity.clamp(-1.0, 1.0) as f64);
+    let degree_term = if degree_disc == 0 { 0.15 } else { 0.0 };
+    let prior_risk = sanitize_prob(
+        anomaly_score.clamp(0.0, 1.0) as f64 * 0.75 + affinity_term * 0.10 + degree_term,
+    );
+    let risk_probability = sanitize_prob(confidence * pc_risk + (1.0 - confidence) * prior_risk);
 
     // 2. Compute lift factors for each feature variable
     let mut risk_factors = Vec::new();
@@ -130,27 +162,28 @@ pub fn analyze(
     for (var, val, labels, name) in &feature_vars {
         let l = query::lift(circuit, &evidence, *var, *val, 4, 4); // target: outcome=very_risky (bin 4)
         if l > 0.01 && l.is_finite() {
+            let label = labels.get(*val).copied().unwrap_or("unknown");
             let contribution = if l > 1.5 {
                 format!(
                     "{} = {} increases risk by {:.0}%",
                     name,
-                    labels[*val],
+                    label,
                     (l - 1.0) * 100.0
                 )
             } else if l < 0.7 {
                 format!(
                     "{} = {} decreases risk by {:.0}%",
                     name,
-                    labels[*val],
+                    label,
                     (1.0 - l) * 100.0
                 )
             } else {
-                format!("{} = {} has neutral effect on risk", name, labels[*val])
+                format!("{} = {} has neutral effect on risk", name, label)
             };
 
             risk_factors.push(RiskFactor {
                 variable: name.to_string(),
-                current_value: labels[*val].to_string(),
+                current_value: label.to_string(),
                 lift: l,
                 contribution,
             });
@@ -158,12 +191,7 @@ pub fn analyze(
     }
 
     // Sort by lift magnitude (most influential first)
-    risk_factors.sort_by(|a, b| {
-        (b.lift - 1.0)
-            .abs()
-            .partial_cmp(&(a.lift - 1.0).abs())
-            .unwrap()
-    });
+    risk_factors.sort_by(|a, b| (b.lift - 1.0).abs().total_cmp(&(a.lift - 1.0).abs()));
 
     // 3. Counterfactual scenarios
     let mut counterfactuals = Vec::new();
@@ -177,6 +205,7 @@ pub fn analyze(
             .get(&4)
             .map(|p| p.get(3).unwrap_or(&0.0) + p.get(4).unwrap_or(&0.0))
             .unwrap_or(risk_probability);
+        let cf_risk = sanitize_prob(cf_risk);
         let reduction = if risk_probability > 0.0 {
             (risk_probability - cf_risk) / risk_probability * 100.0
         } else {
@@ -198,6 +227,7 @@ pub fn analyze(
             .get(&4)
             .map(|p| p.get(3).unwrap_or(&0.0) + p.get(4).unwrap_or(&0.0))
             .unwrap_or(risk_probability);
+        let cf_risk = sanitize_prob(cf_risk);
         let reduction = if risk_probability > 0.0 {
             (risk_probability - cf_risk) / risk_probability * 100.0
         } else {
@@ -219,6 +249,7 @@ pub fn analyze(
             .get(&4)
             .map(|p| p.get(3).unwrap_or(&0.0) + p.get(4).unwrap_or(&0.0))
             .unwrap_or(risk_probability);
+        let cf_risk = sanitize_prob(cf_risk);
         let reduction = if risk_probability > 0.0 {
             (risk_probability - cf_risk) / risk_probability * 100.0
         } else {
@@ -240,6 +271,7 @@ pub fn analyze(
             .get(&4)
             .map(|p| p.get(3).unwrap_or(&0.0) + p.get(4).unwrap_or(&0.0))
             .unwrap_or(risk_probability);
+        let cf_risk = sanitize_prob(cf_risk);
         let reduction = if risk_probability > 0.0 {
             (risk_probability - cf_risk) / risk_probability * 100.0
         } else {

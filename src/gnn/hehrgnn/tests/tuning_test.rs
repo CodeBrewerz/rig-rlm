@@ -10,7 +10,7 @@
 use burn::backend::NdArray;
 use burn::prelude::*;
 
-use hehrgnn::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
+use hehrgnn::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
 use hehrgnn::data::hetero_graph::EdgeType;
 use hehrgnn::model::graphsage::GraphSageModelConfig;
 use hehrgnn::model::trainer::*;
@@ -22,39 +22,159 @@ fn build_tuning_graph() -> hehrgnn::data::hetero_graph::HeteroGraph<B> {
     let device = <B as Backend>::Device::default();
     let facts = vec![
         // Users own accounts
-        GraphFact { src: ("user".into(), "alice".into()), relation: "owns".into(), dst: ("account".into(), "checking1".into()) },
-        GraphFact { src: ("user".into(), "alice".into()), relation: "owns".into(), dst: ("account".into(), "savings1".into()) },
-        GraphFact { src: ("user".into(), "bob".into()), relation: "owns".into(), dst: ("account".into(), "checking2".into()) },
-        GraphFact { src: ("user".into(), "bob".into()), relation: "owns".into(), dst: ("account".into(), "credit1".into()) },
-        GraphFact { src: ("user".into(), "carol".into()), relation: "owns".into(), dst: ("account".into(), "checking3".into()) },
-        GraphFact { src: ("user".into(), "dave".into()), relation: "owns".into(), dst: ("account".into(), "checking4".into()) },
+        GraphFact {
+            src: ("user".into(), "alice".into()),
+            relation: "owns".into(),
+            dst: ("account".into(), "checking1".into()),
+        },
+        GraphFact {
+            src: ("user".into(), "alice".into()),
+            relation: "owns".into(),
+            dst: ("account".into(), "savings1".into()),
+        },
+        GraphFact {
+            src: ("user".into(), "bob".into()),
+            relation: "owns".into(),
+            dst: ("account".into(), "checking2".into()),
+        },
+        GraphFact {
+            src: ("user".into(), "bob".into()),
+            relation: "owns".into(),
+            dst: ("account".into(), "credit1".into()),
+        },
+        GraphFact {
+            src: ("user".into(), "carol".into()),
+            relation: "owns".into(),
+            dst: ("account".into(), "checking3".into()),
+        },
+        GraphFact {
+            src: ("user".into(), "dave".into()),
+            relation: "owns".into(),
+            dst: ("account".into(), "checking4".into()),
+        },
         // Transactions posted to accounts
-        GraphFact { src: ("tx".into(), "tx1".into()), relation: "posted_to".into(), dst: ("account".into(), "checking1".into()) },
-        GraphFact { src: ("tx".into(), "tx2".into()), relation: "posted_to".into(), dst: ("account".into(), "checking1".into()) },
-        GraphFact { src: ("tx".into(), "tx3".into()), relation: "posted_to".into(), dst: ("account".into(), "savings1".into()) },
-        GraphFact { src: ("tx".into(), "tx4".into()), relation: "posted_to".into(), dst: ("account".into(), "checking2".into()) },
-        GraphFact { src: ("tx".into(), "tx5".into()), relation: "posted_to".into(), dst: ("account".into(), "credit1".into()) },
-        GraphFact { src: ("tx".into(), "tx6".into()), relation: "posted_to".into(), dst: ("account".into(), "checking3".into()) },
-        GraphFact { src: ("tx".into(), "tx7".into()), relation: "posted_to".into(), dst: ("account".into(), "checking4".into()) },
-        GraphFact { src: ("tx".into(), "tx8".into()), relation: "posted_to".into(), dst: ("account".into(), "checking1".into()) },
+        GraphFact {
+            src: ("tx".into(), "tx1".into()),
+            relation: "posted_to".into(),
+            dst: ("account".into(), "checking1".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx2".into()),
+            relation: "posted_to".into(),
+            dst: ("account".into(), "checking1".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx3".into()),
+            relation: "posted_to".into(),
+            dst: ("account".into(), "savings1".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx4".into()),
+            relation: "posted_to".into(),
+            dst: ("account".into(), "checking2".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx5".into()),
+            relation: "posted_to".into(),
+            dst: ("account".into(), "credit1".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx6".into()),
+            relation: "posted_to".into(),
+            dst: ("account".into(), "checking3".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx7".into()),
+            relation: "posted_to".into(),
+            dst: ("account".into(), "checking4".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx8".into()),
+            relation: "posted_to".into(),
+            dst: ("account".into(), "checking1".into()),
+        },
         // Transactions at merchants
-        GraphFact { src: ("tx".into(), "tx1".into()), relation: "at".into(), dst: ("merchant".into(), "walmart".into()) },
-        GraphFact { src: ("tx".into(), "tx2".into()), relation: "at".into(), dst: ("merchant".into(), "amazon".into()) },
-        GraphFact { src: ("tx".into(), "tx3".into()), relation: "at".into(), dst: ("merchant".into(), "walmart".into()) },
-        GraphFact { src: ("tx".into(), "tx4".into()), relation: "at".into(), dst: ("merchant".into(), "target".into()) },
-        GraphFact { src: ("tx".into(), "tx5".into()), relation: "at".into(), dst: ("merchant".into(), "amazon".into()) },
-        GraphFact { src: ("tx".into(), "tx6".into()), relation: "at".into(), dst: ("merchant".into(), "costco".into()) },
-        GraphFact { src: ("tx".into(), "tx7".into()), relation: "at".into(), dst: ("merchant".into(), "walmart".into()) },
-        GraphFact { src: ("tx".into(), "tx8".into()), relation: "at".into(), dst: ("merchant".into(), "starbucks".into()) },
+        GraphFact {
+            src: ("tx".into(), "tx1".into()),
+            relation: "at".into(),
+            dst: ("merchant".into(), "walmart".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx2".into()),
+            relation: "at".into(),
+            dst: ("merchant".into(), "amazon".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx3".into()),
+            relation: "at".into(),
+            dst: ("merchant".into(), "walmart".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx4".into()),
+            relation: "at".into(),
+            dst: ("merchant".into(), "target".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx5".into()),
+            relation: "at".into(),
+            dst: ("merchant".into(), "amazon".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx6".into()),
+            relation: "at".into(),
+            dst: ("merchant".into(), "costco".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx7".into()),
+            relation: "at".into(),
+            dst: ("merchant".into(), "walmart".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx8".into()),
+            relation: "at".into(),
+            dst: ("merchant".into(), "starbucks".into()),
+        },
         // Categories
-        GraphFact { src: ("tx".into(), "tx1".into()), relation: "has_cat".into(), dst: ("category".into(), "groceries".into()) },
-        GraphFact { src: ("tx".into(), "tx2".into()), relation: "has_cat".into(), dst: ("category".into(), "electronics".into()) },
-        GraphFact { src: ("tx".into(), "tx3".into()), relation: "has_cat".into(), dst: ("category".into(), "transfer".into()) },
-        GraphFact { src: ("tx".into(), "tx4".into()), relation: "has_cat".into(), dst: ("category".into(), "dining".into()) },
-        GraphFact { src: ("tx".into(), "tx5".into()), relation: "has_cat".into(), dst: ("category".into(), "electronics".into()) },
-        GraphFact { src: ("tx".into(), "tx6".into()), relation: "has_cat".into(), dst: ("category".into(), "groceries".into()) },
-        GraphFact { src: ("tx".into(), "tx7".into()), relation: "has_cat".into(), dst: ("category".into(), "groceries".into()) },
-        GraphFact { src: ("tx".into(), "tx8".into()), relation: "has_cat".into(), dst: ("category".into(), "dining".into()) },
+        GraphFact {
+            src: ("tx".into(), "tx1".into()),
+            relation: "has_cat".into(),
+            dst: ("category".into(), "groceries".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx2".into()),
+            relation: "has_cat".into(),
+            dst: ("category".into(), "electronics".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx3".into()),
+            relation: "has_cat".into(),
+            dst: ("category".into(), "transfer".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx4".into()),
+            relation: "has_cat".into(),
+            dst: ("category".into(), "dining".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx5".into()),
+            relation: "has_cat".into(),
+            dst: ("category".into(), "electronics".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx6".into()),
+            relation: "has_cat".into(),
+            dst: ("category".into(), "groceries".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx7".into()),
+            relation: "has_cat".into(),
+            dst: ("category".into(), "groceries".into()),
+        },
+        GraphFact {
+            src: ("tx".into(), "tx8".into()),
+            relation: "has_cat".into(),
+            dst: ("category".into(), "dining".into()),
+        },
     ];
 
     build_hetero_graph::<B>(
@@ -62,7 +182,8 @@ fn build_tuning_graph() -> hehrgnn::data::hetero_graph::HeteroGraph<B> {
         &GraphBuildConfig {
             node_feat_dim: 16,
             add_reverse_edges: true,
-            add_self_loops: true, add_positional_encoding: true,
+            add_self_loops: true,
+            add_positional_encoding: true,
         },
         &device,
     )
@@ -87,13 +208,14 @@ fn test_weight_decay_sweep() {
             hidden_dim: 16,
             num_layers: 2,
             dropout: 0.0,
-        }.init::<B>(&node_types, &edge_types, &device);
+        }
+        .init::<B>(&node_types, &edge_types, &device);
 
         let config = TrainConfig {
             epochs: 40,
             lr: 0.01,
             neg_ratio: 3,
-            patience: 20,  // generous patience to see full effect
+            patience: 20, // generous patience to see full effect
             perturb_frac: 0.3,
             mode: TrainMode::Fast,
             weight_decay: wd,
@@ -102,8 +224,13 @@ fn test_weight_decay_sweep() {
         let report = train_graphsage(&mut model, &graph, &config);
         println!(
             "  ║  {:.3} │   {:3}  │ {:.4} │ {:.4} │ {:7.2} │ {:.4}   │ {:5}║",
-            wd, report.epochs_trained, report.final_auc, report.final_loss,
-            report.weight_norm_sq, report.mean_emb_norm, report.early_stopped
+            wd,
+            report.epochs_trained,
+            report.final_auc,
+            report.final_loss,
+            report.weight_norm_sq,
+            report.mean_emb_norm,
+            report.early_stopped
         );
     }
 
@@ -129,7 +256,8 @@ fn test_patience_sweep() {
             hidden_dim: 16,
             num_layers: 2,
             dropout: 0.0,
-        }.init::<B>(&node_types, &edge_types, &device);
+        }
+        .init::<B>(&node_types, &edge_types, &device);
 
         let config = TrainConfig {
             epochs: 80,
@@ -144,8 +272,13 @@ fn test_patience_sweep() {
         let report = train_graphsage(&mut model, &graph, &config);
         println!(
             "  ║  {:3} │   {:3}  │ {:.4} │ {:.4} │ {:7.2} │ {:.4}   │ {:5}  ║",
-            patience, report.epochs_trained, report.final_auc, report.final_loss,
-            report.weight_norm_sq, report.mean_emb_norm, report.early_stopped
+            patience,
+            report.epochs_trained,
+            report.final_auc,
+            report.final_loss,
+            report.weight_norm_sq,
+            report.mean_emb_norm,
+            report.early_stopped
         );
     }
 
@@ -172,28 +305,37 @@ fn test_epoch_scaling() {
             hidden_dim: 16,
             num_layers: 2,
             dropout: 0.0,
-        }.init::<B>(&node_types, &edge_types, &device);
+        }
+        .init::<B>(&node_types, &edge_types, &device);
 
         let config = TrainConfig {
             epochs: max_epochs,
             lr: 0.01,
             neg_ratio: 3,
-            patience: 999,  // no early stopping
+            patience: 999, // no early stopping
             perturb_frac: 0.3,
             mode: TrainMode::Fast,
             weight_decay: 0.01,
         };
 
         let report = train_graphsage(&mut model, &graph, &config);
-        if max_epochs == 20 { baseline_loss = report.final_loss; }
+        if max_epochs == 20 {
+            baseline_loss = report.final_loss;
+        }
         let delta = if baseline_loss > 0.0 {
             ((report.final_loss - baseline_loss) / baseline_loss * 100.0)
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         println!(
             "  ║    {:3}  │ {:.4} │ {:.4} │ {:7.2} │ {:.4}   │ {:+6.1}%         ║",
-            max_epochs, report.final_auc, report.final_loss,
-            report.weight_norm_sq, report.mean_emb_norm, delta
+            max_epochs,
+            report.final_auc,
+            report.final_loss,
+            report.weight_norm_sq,
+            report.mean_emb_norm,
+            delta
         );
     }
 
@@ -221,7 +363,8 @@ fn test_lr_vs_weight_decay() {
                 hidden_dim: 16,
                 num_layers: 2,
                 dropout: 0.0,
-            }.init::<B>(&node_types, &edge_types, &device);
+            }
+            .init::<B>(&node_types, &edge_types, &device);
 
             let config = TrainConfig {
                 epochs: 40,
@@ -236,8 +379,12 @@ fn test_lr_vs_weight_decay() {
             let report = train_graphsage(&mut model, &graph, &config);
             println!(
                 "  ║  {:.3} │ {:.2}  │ {:.4} │ {:.4} │ {:7.2} │ {:.4}             ║",
-                lr, wd, report.final_auc, report.final_loss,
-                report.weight_norm_sq, report.mean_emb_norm
+                lr,
+                wd,
+                report.final_auc,
+                report.final_loss,
+                report.weight_norm_sq,
+                report.mean_emb_norm
             );
         }
     }

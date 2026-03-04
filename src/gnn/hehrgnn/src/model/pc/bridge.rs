@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use super::circuit::CompiledCircuit;
-use super::em::{train_em, EmConfig, EmReport};
+use super::em::{EmConfig, EmReport, train_em};
 use super::structure;
 
 /// PC variable schema: maps variable indices to interpretable names.
@@ -130,15 +130,32 @@ pub fn build_fiduciary_pc(
     observations: &[Vec<usize>],
     em_epochs: usize,
 ) -> (CompiledCircuit, EmReport) {
+    let mut clean_observations: Vec<Vec<usize>> = observations
+        .iter()
+        .map(|obs| {
+            let mut v = vec![0usize; NUM_PC_VARS];
+            for (i, dst) in v.iter_mut().enumerate() {
+                *dst = obs.get(i).copied().unwrap_or(0).min(NUM_CATEGORIES - 1);
+            }
+            v
+        })
+        .collect();
+    if clean_observations.is_empty() {
+        // Bootstrap fallback so the circuit always covers all fiduciary variables.
+        clean_observations.push(vec![0, 2, 2, 1, 0]);
+        clean_observations.push(vec![2, 2, 2, 2, 2]);
+        clean_observations.push(vec![4, 1, 0, 4, 4]);
+    }
+
     // Build HCLT structure from data
     let num_latents = 8; // 8 mixture components per tree node for richer circuit
-    let builder = structure::hclt(observations, NUM_CATEGORIES, num_latents);
+    let builder = structure::hclt(&clean_observations, NUM_CATEGORIES, num_latents);
 
     // Compile
     let mut circuit = CompiledCircuit::compile(&builder);
 
     // Convert to evidence format
-    let data: Vec<PcObservation> = observations
+    let data: Vec<PcObservation> = clean_observations
         .iter()
         .map(|obs| obs.iter().map(|&v| Some(v)).collect())
         .collect();
@@ -170,15 +187,8 @@ pub fn generate_training_data(
     for (node_type, count) in node_counts {
         for node_id in 0..*count {
             // Get anomaly score
-            let anomaly = anomaly_scores
-                .values()
-                .filter_map(|model_scores| {
-                    model_scores
-                        .get(node_type)
-                        .and_then(|scores| scores.get(node_id).copied())
-                })
-                .next()
-                .unwrap_or(0.0);
+            let anomaly =
+                aggregate_anomaly_score(anomaly_scores, node_type, node_id).unwrap_or(0.0);
 
             // Get embedding affinity with user
             let affinity = embeddings
@@ -186,6 +196,11 @@ pub fn generate_training_data(
                 .and_then(|embs| embs.get(node_id))
                 .map(|emb| cosine_sim_f32(user_emb, emb))
                 .unwrap_or(0.0);
+            let affinity = if affinity.is_finite() {
+                affinity.clamp(-1.0, 1.0)
+            } else {
+                0.0
+            };
 
             // Count degree
             let degree = count_node_edges(edges, node_type, node_id);
@@ -253,6 +268,30 @@ fn cosine_sim_f32(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
+fn aggregate_anomaly_score(
+    anomaly_scores: &HashMap<String, HashMap<String, Vec<f32>>>,
+    node_type: &str,
+    node_id: usize,
+) -> Option<f32> {
+    let mut vals: Vec<f32> = anomaly_scores
+        .values()
+        .filter_map(|m| m.get(node_type))
+        .filter_map(|scores| scores.get(node_id).copied())
+        .filter(|v| v.is_finite())
+        .collect();
+    if vals.is_empty() {
+        return None;
+    }
+    vals.sort_by(|a, b| a.total_cmp(b));
+    let mid = vals.len() / 2;
+    let median = if vals.len() % 2 == 0 {
+        (vals[mid - 1] + vals[mid]) * 0.5
+    } else {
+        vals[mid]
+    };
+    Some(median.clamp(0.0, 1.0))
+}
+
 pub fn count_node_edges(
     edges: &HashMap<(String, String, String), Vec<(usize, usize)>>,
     node_type: &str,
@@ -303,6 +342,50 @@ mod tests {
             "PC: {} nodes, final LL = {:.4}",
             circuit.num_nodes(),
             report.final_ll
+        );
+    }
+
+    #[test]
+    fn test_build_pc_handles_empty_observations() {
+        let (circuit, report) = build_fiduciary_pc(&[], 5);
+        assert!(
+            circuit.num_vars >= NUM_PC_VARS,
+            "fallback circuit must include fiduciary variables"
+        );
+        assert!(report.final_ll.is_finite());
+    }
+
+    #[test]
+    fn test_generate_training_data_uses_deterministic_model_aggregation() {
+        let mut anomaly_a: HashMap<String, HashMap<String, Vec<f32>>> = HashMap::new();
+        let mut anomaly_b: HashMap<String, HashMap<String, Vec<f32>>> = HashMap::new();
+
+        let mut m1 = HashMap::new();
+        m1.insert("account".to_string(), vec![0.9]);
+        let mut m2 = HashMap::new();
+        m2.insert("account".to_string(), vec![0.1]);
+
+        // Insert in opposite orders
+        anomaly_a.insert("SAGE".to_string(), m1.clone());
+        anomaly_a.insert("GAT".to_string(), m2.clone());
+        anomaly_b.insert("GAT".to_string(), m2);
+        anomaly_b.insert("SAGE".to_string(), m1);
+
+        let mut embeddings: HashMap<String, Vec<Vec<f32>>> = HashMap::new();
+        embeddings.insert("account".to_string(), vec![vec![1.0, 0.0]]);
+        let edges: HashMap<(String, String, String), Vec<(usize, usize)>> = HashMap::new();
+        let mut node_counts = HashMap::new();
+        node_counts.insert("account".to_string(), 1usize);
+        let user_emb = vec![1.0, 0.0];
+
+        let obs_a =
+            generate_training_data(&anomaly_a, &embeddings, &edges, &node_counts, &user_emb);
+        let obs_b =
+            generate_training_data(&anomaly_b, &embeddings, &edges, &node_counts, &user_emb);
+
+        assert_eq!(
+            obs_a, obs_b,
+            "training data should not depend on HashMap insertion order"
         );
     }
 }

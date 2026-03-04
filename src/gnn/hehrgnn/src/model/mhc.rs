@@ -19,6 +19,21 @@ use crate::data::hetero_graph::{EdgeType, HeteroGraph};
 use crate::model::backbone::NodeEmbeddings;
 use crate::model::graphsage::{GraphSageConfig, GraphSageLayer};
 
+fn align_feature_dim<B: Backend>(features: Tensor<B, 2>, expected_dim: usize) -> Tensor<B, 2> {
+    let [num_nodes, in_dim] = features.dims();
+    if in_dim == expected_dim {
+        return features;
+    }
+
+    if in_dim > expected_dim {
+        features.slice([0..num_nodes, 0..expected_dim])
+    } else {
+        let device = features.device();
+        let pad = Tensor::<B, 2>::zeros([num_nodes, expected_dim - in_dim], &device);
+        Tensor::cat(vec![features, pad], 1)
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Sinkhorn-Knopp Normalization
 // ═══════════════════════════════════════════════════════════════
@@ -228,7 +243,9 @@ impl<B: Backend> MhcGraphSageModel<B> {
         let mut base_embeddings = NodeEmbeddings::new();
         for (node_type, features) in &graph.node_features {
             if let Some(idx) = self.node_type_keys.iter().position(|k| k == node_type) {
-                let mut projected = self.input_linears[idx].forward(features.clone());
+                let expected_in = self.input_linears[idx].weight.val().dims()[0];
+                let aligned_features = align_feature_dim(features.clone(), expected_in);
+                let mut projected = self.input_linears[idx].forward(aligned_features);
                 // Add learnable node-type embedding (KumoRFM §2.3)
                 if idx < self.type_embeddings.len() {
                     projected = projected + self.type_embeddings[idx].val();
@@ -480,6 +497,24 @@ impl<B: Backend> MhcRgcnModel<B> {
     }
 }
 
+impl<B: Backend> crate::model::trainer::JepaTrainable<B> for MhcRgcnModel<B> {
+    fn forward_embeddings(&self, graph: &HeteroGraph<B>) -> NodeEmbeddings<B> {
+        self.forward(graph)
+    }
+
+    fn num_input_weights(&self) -> usize {
+        self.input_linears.len()
+    }
+
+    fn get_input_weight(&self, idx: usize) -> Tensor<B, 2> {
+        self.input_linears[idx].weight.val()
+    }
+
+    fn set_input_weight(&mut self, idx: usize, weight: Tensor<B, 2>) {
+        self.input_linears[idx].weight = self.input_linears[idx].weight.clone().map(|_| weight);
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════
 // mHC GAT Model
 // ═══════════════════════════════════════════════════════════════
@@ -712,7 +747,9 @@ where
     let mut base_embeddings = NodeEmbeddings::new();
     for (node_type, features) in &graph.node_features {
         if let Some(idx) = node_type_keys.iter().position(|k| k == node_type) {
-            let mut projected = input_linears[idx].forward(features.clone());
+            let expected_in = input_linears[idx].weight.val().dims()[0];
+            let aligned_features = align_feature_dim(features.clone(), expected_in);
+            let mut projected = input_linears[idx].forward(aligned_features);
             // Add learnable node-type embedding (KumoRFM §2.3)
             if let Some(te) = type_embeddings {
                 if idx < te.len() {
@@ -816,7 +853,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
+    use crate::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
     use burn::backend::NdArray;
 
     type B = NdArray;

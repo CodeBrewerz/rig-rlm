@@ -11,7 +11,7 @@
 use burn::backend::NdArray;
 use std::collections::HashMap;
 
-use hehrgnn::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
+use hehrgnn::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
 use hehrgnn::data::hetero_graph::EdgeType;
 use hehrgnn::model::graphsage::GraphSageModelConfig;
 use hehrgnn::model::trainer::*;
@@ -54,11 +54,29 @@ fn build_training_graph() -> (Vec<GraphFact>, GraphBuildConfig) {
         gf("transaction", "t7", "at_merchant", "merchant", "brokerage"),
         gf("transaction", "t8", "at_merchant", "merchant", "brokerage"),
         // Categories
-        gf("merchant", "grocery", "in_category", "category", "essentials"),
+        gf(
+            "merchant",
+            "grocery",
+            "in_category",
+            "category",
+            "essentials",
+        ),
         gf("merchant", "gas", "in_category", "category", "essentials"),
-        gf("merchant", "restaurant", "in_category", "category", "dining"),
+        gf(
+            "merchant",
+            "restaurant",
+            "in_category",
+            "category",
+            "dining",
+        ),
         gf("merchant", "online", "in_category", "category", "shopping"),
-        gf("merchant", "brokerage", "in_category", "category", "investing"),
+        gf(
+            "merchant",
+            "brokerage",
+            "in_category",
+            "category",
+            "investing",
+        ),
         // Obligations
         gf("user", "alice", "has_obligation", "obligation", "mortgage"),
         gf("user", "alice", "has_obligation", "obligation", "car_loan"),
@@ -74,7 +92,8 @@ fn build_training_graph() -> (Vec<GraphFact>, GraphBuildConfig) {
     let config = GraphBuildConfig {
         node_feat_dim: 16,
         add_reverse_edges: true,
-        add_self_loops: true, add_positional_encoding: true,
+        add_self_loops: true,
+        add_positional_encoding: true,
     };
     (facts, config)
 }
@@ -99,7 +118,10 @@ struct TrainHyperEvaluator {
 impl TrainHyperEvaluator {
     fn new() -> Self {
         let (facts, build_config) = build_training_graph();
-        Self { facts, build_config }
+        Self {
+            facts,
+            build_config,
+        }
     }
 }
 
@@ -149,11 +171,20 @@ impl Evaluator for TrainHyperEvaluator {
         side_info.score("weight_norm_sq", report.weight_norm_sq as f64);
         side_info.log(format!(
             "lr={:.4}, wd={:.4}, neg={}, pf={:.2} → AUC={:.4}, loss={:.4}→{:.4}, epochs={}",
-            lr, weight_decay, neg_ratio, perturb_frac,
-            report.final_auc, report.initial_loss, report.final_loss, report.epochs_trained
+            lr,
+            weight_decay,
+            neg_ratio,
+            perturb_frac,
+            report.final_auc,
+            report.initial_loss,
+            report.final_loss,
+            report.epochs_trained
         ));
 
-        EvalResult { score: combined, side_info }
+        EvalResult {
+            score: combined,
+            side_info,
+        }
     }
 }
 
@@ -163,9 +194,15 @@ impl Evaluator for TrainHyperEvaluator {
 
 #[test]
 fn test_gepa_optimize_training_hyperparams() {
-    println!("\n  ╔══════════════════════════════════════════════════════════════════════════════════════╗");
-    println!("  ║  GEPA — GNN Training Hyperparameter Optimization                                 ║");
-    println!("  ╠══════════════════════════════════════════════════════════════════════════════════════╣");
+    println!(
+        "\n  ╔══════════════════════════════════════════════════════════════════════════════════════╗"
+    );
+    println!(
+        "  ║  GEPA — GNN Training Hyperparameter Optimization                                 ║"
+    );
+    println!(
+        "  ╠══════════════════════════════════════════════════════════════════════════════════════╣"
+    );
 
     let evaluator = TrainHyperEvaluator::new();
 
@@ -178,10 +215,14 @@ fn test_gepa_optimize_training_hyperparams() {
 
     let seed_eval = evaluator.evaluate(&seed);
     println!("  ║  Seed: lr=0.05, wd=0.01, neg=3, pf=0.3");
-    println!("  ║  Seed score: {:.6} (AUC={:.4})",
+    println!(
+        "  ║  Seed score: {:.6} (AUC={:.4})",
         seed_eval.score,
-        seed_eval.side_info.scores.get("final_auc").unwrap_or(&0.0));
-    println!("  ╠══════════════════════════════════════════════════════════════════════════════════════╣");
+        seed_eval.side_info.scores.get("final_auc").unwrap_or(&0.0)
+    );
+    println!(
+        "  ╠══════════════════════════════════════════════════════════════════════════════════════╣"
+    );
 
     let mutator = NumericMutator::new(0.3, 42);
     let config = OptimizeConfig {
@@ -193,8 +234,13 @@ fn test_gepa_optimize_training_hyperparams() {
 
     let result = optimize(seed, &evaluator, &mutator, config);
 
-    println!("  ╠══════════════════════════════════════════════════════════════════════════════════════╣");
-    println!("  ║  Best score: {:.6}  ({} evals, frontier={})", result.best_score, result.total_evals, result.frontier_size);
+    println!(
+        "  ╠══════════════════════════════════════════════════════════════════════════════════════╣"
+    );
+    println!(
+        "  ║  Best score: {:.6}  ({} evals, frontier={})",
+        result.best_score, result.total_evals, result.frontier_size
+    );
     println!("  ║  Best hyperparams:");
     let mut params: Vec<_> = result.best_candidate.params.iter().collect();
     params.sort_by_key(|(k, _)| k.clone());
@@ -204,11 +250,17 @@ fn test_gepa_optimize_training_hyperparams() {
 
     let improvement = result.best_score - seed_eval.score;
     if improvement > 0.0 {
-        println!("  ║  ✅ Improved by {:.6} ({:.1}%)", improvement, improvement / seed_eval.score.abs().max(0.001) * 100.0);
+        println!(
+            "  ║  ✅ Improved by {:.6} ({:.1}%)",
+            improvement,
+            improvement / seed_eval.score.abs().max(0.001) * 100.0
+        );
     } else {
         println!("  ║  ℹ️  No improvement (defaults were near-optimal)");
     }
-    println!("  ╚══════════════════════════════════════════════════════════════════════════════════════╝");
+    println!(
+        "  ╚══════════════════════════════════════════════════════════════════════════════════════╝"
+    );
 
     assert!(result.total_evals >= 15);
     assert!(result.best_score.is_finite());
@@ -226,9 +278,15 @@ fn test_gepa_optimize_training_hyperparams() {
 async fn test_gepa_llm_training_hyperparams_with_trinity() {
     let weights_path = "/tmp/gepa_train_config.json";
 
-    println!("\n  ╔══════════════════════════════════════════════════════════════════════════════════════╗");
-    println!("  ║  GEPA + TRINITY — GNN Training Hyperparameter Optimization (feedback loop)        ║");
-    println!("  ╠══════════════════════════════════════════════════════════════════════════════════════╣");
+    println!(
+        "\n  ╔══════════════════════════════════════════════════════════════════════════════════════╗"
+    );
+    println!(
+        "  ║  GEPA + TRINITY — GNN Training Hyperparameter Optimization (feedback loop)        ║"
+    );
+    println!(
+        "  ╠══════════════════════════════════════════════════════════════════════════════════════╣"
+    );
 
     let objective = "Optimize GNN training hyperparameters for a financial heterogeneous graph. \
         Parameters: lr (learning rate, 0.001-0.3), weight_decay (regularization, 0.001-0.1), \
@@ -243,7 +301,9 @@ async fn test_gepa_llm_training_hyperparams_with_trinity() {
         Ok(m) => m,
         Err(e) => {
             println!("  ║  ⚠️  Skipping: {}", e);
-            println!("  ╚══════════════════════════════════════════════════════════════════════════════════════╝");
+            println!(
+                "  ╚══════════════════════════════════════════════════════════════════════════════════════╝"
+            );
             return;
         }
     };
@@ -251,8 +311,10 @@ async fn test_gepa_llm_training_hyperparams_with_trinity() {
     // Feedback loop: load previous best or defaults
     let prev_weights = OptimizedWeights::load_or_default(weights_path);
     let seed = if prev_weights.total_evals > 0 {
-        println!("  ║  📂 Loaded previous best from {} (score={:.6}, evals={})",
-            weights_path, prev_weights.score, prev_weights.total_evals);
+        println!(
+            "  ║  📂 Loaded previous best from {} (score={:.6}, evals={})",
+            weights_path, prev_weights.score, prev_weights.total_evals
+        );
         prev_weights.to_candidate()
     } else {
         println!("  ║  🆕 Starting from default hyperparameters");
@@ -266,12 +328,17 @@ async fn test_gepa_llm_training_hyperparams_with_trinity() {
 
     let evaluator = TrainHyperEvaluator::new();
     let seed_eval = evaluator.evaluate(&seed);
-    println!("  ║  Seed score: {:.6} (AUC={:.4})",
-        seed_eval.score, seed_eval.side_info.scores.get("final_auc").unwrap_or(&0.0));
-    println!("  ╠══════════════════════════════════════════════════════════════════════════════════════╣");
+    println!(
+        "  ║  Seed score: {:.6} (AUC={:.4})",
+        seed_eval.score,
+        seed_eval.side_info.scores.get("final_auc").unwrap_or(&0.0)
+    );
+    println!(
+        "  ╠══════════════════════════════════════════════════════════════════════════════════════╣"
+    );
 
     let config = OptimizeConfig {
-        max_evals: 10,  // Each eval trains a model (~1s), so 10 evals × ~4s per Trinity call ≈ 40s
+        max_evals: 10, // Each eval trains a model (~1s), so 10 evals × ~4s per Trinity call ≈ 40s
         max_frontier_size: 5,
         log_every: 1,
         objective: objective.into(),
@@ -280,16 +347,24 @@ async fn test_gepa_llm_training_hyperparams_with_trinity() {
     let result = optimize_async(seed, &evaluator, &llm_mutator, config).await;
 
     // Save best hyperparams
-    let mut best_weights = OptimizedWeights::from_candidate(&result.best_candidate, result.best_score);
+    let mut best_weights =
+        OptimizedWeights::from_candidate(&result.best_candidate, result.best_score);
     best_weights.total_evals = prev_weights.total_evals + result.total_evals;
     match best_weights.save(weights_path) {
-        Ok(()) => println!("  ║  💾 Saved to {} (cumulative evals={})", weights_path, best_weights.total_evals),
+        Ok(()) => println!(
+            "  ║  💾 Saved to {} (cumulative evals={})",
+            weights_path, best_weights.total_evals
+        ),
         Err(e) => println!("  ║  ⚠️  Save failed: {}", e),
     }
 
-    println!("  ╠══════════════════════════════════════════════════════════════════════════════════════╣");
-    println!("  ║  Best score: {:.6}  ({} evals, {} cumulative)",
-        result.best_score, result.total_evals, best_weights.total_evals);
+    println!(
+        "  ╠══════════════════════════════════════════════════════════════════════════════════════╣"
+    );
+    println!(
+        "  ║  Best score: {:.6}  ({} evals, {} cumulative)",
+        result.best_score, result.total_evals, best_weights.total_evals
+    );
     println!("  ║  Best hyperparams (discovered by Trinity):");
     let mut params: Vec<_> = result.best_candidate.params.iter().collect();
     params.sort_by_key(|(k, _)| k.clone());
@@ -299,12 +374,18 @@ async fn test_gepa_llm_training_hyperparams_with_trinity() {
 
     let improvement = result.best_score - seed_eval.score;
     if improvement > 0.0 {
-        println!("  ║  ✅ Trinity improved by {:.6} ({:.1}%)", improvement, improvement / seed_eval.score.abs().max(0.001) * 100.0);
+        println!(
+            "  ║  ✅ Trinity improved by {:.6} ({:.1}%)",
+            improvement,
+            improvement / seed_eval.score.abs().max(0.001) * 100.0
+        );
     } else {
         println!("  ║  ℹ️  No improvement this run");
     }
     println!("  ║  🔄 Run again to continue optimizing from checkpoint!");
-    println!("  ╚══════════════════════════════════════════════════════════════════════════════════════╝");
+    println!(
+        "  ╚══════════════════════════════════════════════════════════════════════════════════════╝"
+    );
 
     assert!(result.total_evals >= 5);
     assert!(result.best_score.is_finite());

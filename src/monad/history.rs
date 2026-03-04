@@ -114,11 +114,9 @@ impl ConversationHistory {
                     latest_user_prompt = msg.content.to_string();
 
                     // Build content parts: text + any image attachments
-                    let mut parts: Vec<UserContent> = vec![
-                        UserContent::Text(Text {
-                            text: msg.content.to_string(),
-                        }),
-                    ];
+                    let mut parts: Vec<UserContent> = vec![UserContent::Text(Text {
+                        text: msg.content.to_string(),
+                    })];
                     for att in &msg.attachments {
                         if att.is_image() {
                             parts.push(UserContent::image_base64(
@@ -127,10 +125,7 @@ impl ConversationHistory {
                                 None,
                             ));
                         } else if att.is_audio() {
-                            parts.push(UserContent::audio(
-                                &att.data,
-                                att.audio_media_type(),
-                            ));
+                            parts.push(UserContent::audio(&att.data, att.audio_media_type()));
                         }
                         // PDFs and text docs are handled as LoadContext
                         // (text extraction), not as direct content here.
@@ -233,7 +228,10 @@ impl ConversationHistory {
         for msg in self.messages[..cutoff].iter_mut() {
             if msg.content.len() > max_length {
                 let preview = &msg.content[..max_length];
-                msg.content = Cow::Owned(format!("{preview}\n...[truncated, was {} chars]", msg.content.len()));
+                msg.content = Cow::Owned(format!(
+                    "{preview}\n...[truncated, was {} chars]",
+                    msg.content.len()
+                ));
             }
         }
     }
@@ -296,7 +294,8 @@ impl TokenBudget {
 
     /// Estimated remaining tokens in the context window.
     pub fn remaining(&self) -> usize {
-        self.context_window.saturating_sub(self.last_usage.total_tokens)
+        self.context_window
+            .saturating_sub(self.last_usage.total_tokens)
     }
 
     /// Fraction of the context window used (0.0 – 1.0).

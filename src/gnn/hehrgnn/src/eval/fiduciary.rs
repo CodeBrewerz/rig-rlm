@@ -126,29 +126,39 @@ impl FiduciaryActionType {
         }
     }
 
+    /// Parse action type from string.
+    ///
+    /// Accepts:
+    /// - canonical snake_case (`should_investigate`)
+    /// - kebab/camel/Pascal variants (`should-investigate`, `ShouldInvestigate`)
+    pub fn try_from_name(s: &str) -> Option<Self> {
+        let normalized = normalize_action_name(s);
+        match normalized.as_str() {
+            "should_pay" => Some(Self::ShouldPay),
+            "should_cancel" => Some(Self::ShouldCancel),
+            "should_transfer" => Some(Self::ShouldTransfer),
+            "should_avoid" => Some(Self::ShouldAvoid),
+            "should_investigate" => Some(Self::ShouldInvestigate),
+            "should_consolidate" => Some(Self::ShouldConsolidate),
+            "should_refinance" => Some(Self::ShouldRefinance),
+            "should_pay_down_lien" => Some(Self::ShouldPayDownLien),
+            "should_dispute" => Some(Self::ShouldDispute),
+            "should_fund_goal" => Some(Self::ShouldFundGoal),
+            "should_adjust_budget" => Some(Self::ShouldAdjustBudget),
+            "should_prepare_tax" => Some(Self::ShouldPrepareTax),
+            "should_fund_tax_sinking" => Some(Self::ShouldFundTaxSinking),
+            "should_claim_exemption" => Some(Self::ShouldClaimExemption),
+            "should_run_tax_scenario" => Some(Self::ShouldRunTaxScenario),
+            "should_reconcile" => Some(Self::ShouldReconcile),
+            "should_review_recurring" => Some(Self::ShouldReviewRecurring),
+            "should_revalue_asset" => Some(Self::ShouldRevalueAsset),
+            _ => None,
+        }
+    }
+
     /// Parse action type from its string name.
     pub fn from_name(s: &str) -> Self {
-        match s {
-            "should_pay" => Self::ShouldPay,
-            "should_cancel" => Self::ShouldCancel,
-            "should_transfer" => Self::ShouldTransfer,
-            "should_avoid" => Self::ShouldAvoid,
-            "should_investigate" => Self::ShouldInvestigate,
-            "should_consolidate" => Self::ShouldConsolidate,
-            "should_refinance" => Self::ShouldRefinance,
-            "should_pay_down_lien" => Self::ShouldPayDownLien,
-            "should_dispute" => Self::ShouldDispute,
-            "should_fund_goal" => Self::ShouldFundGoal,
-            "should_adjust_budget" => Self::ShouldAdjustBudget,
-            "should_prepare_tax" => Self::ShouldPrepareTax,
-            "should_fund_tax_sinking" => Self::ShouldFundTaxSinking,
-            "should_claim_exemption" => Self::ShouldClaimExemption,
-            "should_run_tax_scenario" => Self::ShouldRunTaxScenario,
-            "should_reconcile" => Self::ShouldReconcile,
-            "should_review_recurring" => Self::ShouldReviewRecurring,
-            "should_revalue_asset" => Self::ShouldRevalueAsset,
-            _ => Self::ShouldInvestigate, // safe default
-        }
+        Self::try_from_name(s).unwrap_or(Self::ShouldInvestigate)
     }
 
     pub fn verb(&self) -> &'static str {
@@ -199,42 +209,50 @@ impl FiduciaryActionType {
 
     pub fn reasoning_suffix(&self) -> &'static str {
         match self {
-            Self::ShouldInvestigate =>
-                "This entity shows anomalous patterns — manual review recommended.",
-            Self::ShouldAvoid =>
-                "Reducing interaction with this entity reduces financial risk.",
-            Self::ShouldPay =>
-                "Timely payment avoids penalties and builds financial health.",
-            Self::ShouldCancel =>
-                "Low engagement signal suggests potential cost savings.",
-            Self::ShouldTransfer =>
-                "Rebalancing funds could optimize returns.",
-            Self::ShouldConsolidate =>
-                "Fewer accounts reduce fee duplication and complexity.",
-            Self::ShouldRefinance =>
-                "Refinancing at a lower rate reduces total interest paid over the loan term.",
-            Self::ShouldPayDownLien =>
-                "Paying down liens increases your equity position and may reduce insurance costs.",
-            Self::ShouldDispute =>
-                "Anomalous obligation amounts should be disputed promptly to limit liability.",
-            Self::ShouldFundGoal =>
-                "Goal is underfunded — regular contributions keep you on track.",
-            Self::ShouldAdjustBudget =>
-                "Actual spending diverges from budget estimate — adjustment improves forecast accuracy.",
-            Self::ShouldPrepareTax =>
-                "Tax due event approaching — early preparation avoids penalties and interest.",
-            Self::ShouldFundTaxSinking =>
-                "Tax sinking fund is below target — funding now prevents cash flow surprises.",
-            Self::ShouldClaimExemption =>
-                "Eligible exemption certificate not yet applied — claiming it reduces tax liability.",
-            Self::ShouldRunTaxScenario =>
-                "Running a what-if tax scenario could reveal savings opportunities before period closes.",
-            Self::ShouldReconcile =>
-                "Unmatched items detected — reconciliation ensures ledger accuracy.",
-            Self::ShouldReviewRecurring =>
-                "Recurring pattern triggered an alert — review to confirm it's still valid.",
-            Self::ShouldRevalueAsset =>
-                "Asset valuation may be stale — updating ensures accurate net worth reporting.",
+            Self::ShouldInvestigate => {
+                "This entity shows anomalous patterns — manual review recommended."
+            }
+            Self::ShouldAvoid => "Reducing interaction with this entity reduces financial risk.",
+            Self::ShouldPay => "Timely payment avoids penalties and builds financial health.",
+            Self::ShouldCancel => "Low engagement signal suggests potential cost savings.",
+            Self::ShouldTransfer => "Rebalancing funds could optimize returns.",
+            Self::ShouldConsolidate => "Fewer accounts reduce fee duplication and complexity.",
+            Self::ShouldRefinance => {
+                "Refinancing at a lower rate reduces total interest paid over the loan term."
+            }
+            Self::ShouldPayDownLien => {
+                "Paying down liens increases your equity position and may reduce insurance costs."
+            }
+            Self::ShouldDispute => {
+                "Anomalous obligation amounts should be disputed promptly to limit liability."
+            }
+            Self::ShouldFundGoal => {
+                "Goal is underfunded — regular contributions keep you on track."
+            }
+            Self::ShouldAdjustBudget => {
+                "Actual spending diverges from budget estimate — adjustment improves forecast accuracy."
+            }
+            Self::ShouldPrepareTax => {
+                "Tax due event approaching — early preparation avoids penalties and interest."
+            }
+            Self::ShouldFundTaxSinking => {
+                "Tax sinking fund is below target — funding now prevents cash flow surprises."
+            }
+            Self::ShouldClaimExemption => {
+                "Eligible exemption certificate not yet applied — claiming it reduces tax liability."
+            }
+            Self::ShouldRunTaxScenario => {
+                "Running a what-if tax scenario could reveal savings opportunities before period closes."
+            }
+            Self::ShouldReconcile => {
+                "Unmatched items detected — reconciliation ensures ledger accuracy."
+            }
+            Self::ShouldReviewRecurring => {
+                "Recurring pattern triggered an alert — review to confirm it's still valid."
+            }
+            Self::ShouldRevalueAsset => {
+                "Asset valuation may be stale — updating ensures accurate net worth reporting."
+            }
         }
     }
 
@@ -486,20 +504,24 @@ pub fn generate_candidates(ctx: &FiduciaryContext) -> Vec<(FiduciaryActionType, 
             if src_type == &cur_type {
                 for &(src_id, dst_id) in edge_list {
                     if src_id == cur_id {
-                        let neighbor_key = (dst_type.clone(), dst_id);
-                        if visited.contains(&neighbor_key) {
-                            continue;
+                        if dst_type == &ctx.user_type && dst_id == ctx.user_id {
+                            continue; // Never recommend an action whose target is the same user node.
                         }
+                        let neighbor_key = (dst_type.clone(), dst_id);
                         if is_dead_node(ctx, dst_type, dst_id) {
                             continue;
                         }
-                        visited.insert(neighbor_key);
-                        frontier.push_back((dst_type.clone(), dst_id, depth + 1));
 
-                        // Infer actions on the discovered entity
+                        // Infer actions for this relation even if the node was seen via
+                        // another path; relation semantics can unlock different actions.
                         let actions = infer_actions(relation, dst_type, ctx, dst_id);
                         for action in actions {
                             candidates.push((action, dst_type.clone(), dst_id));
+                        }
+
+                        if !visited.contains(&neighbor_key) {
+                            visited.insert(neighbor_key);
+                            frontier.push_back((dst_type.clone(), dst_id, depth + 1));
                         }
                     }
                 }
@@ -508,20 +530,24 @@ pub fn generate_candidates(ctx: &FiduciaryContext) -> Vec<(FiduciaryActionType, 
             if dst_type == &cur_type {
                 for &(src_id, dst_id) in edge_list {
                     if dst_id == cur_id {
-                        let neighbor_key = (src_type.clone(), src_id);
-                        if visited.contains(&neighbor_key) {
-                            continue;
+                        if src_type == &ctx.user_type && src_id == ctx.user_id {
+                            continue; // Never recommend an action whose target is the same user node.
                         }
+                        let neighbor_key = (src_type.clone(), src_id);
                         if is_dead_node(ctx, src_type, src_id) {
                             continue;
                         }
-                        visited.insert(neighbor_key);
-                        frontier.push_back((src_type.clone(), src_id, depth + 1));
 
-                        // Infer actions on the discovered entity
+                        // Same rationale as above: relation-specific inference should run
+                        // even for already visited nodes.
                         let actions = infer_actions(relation, src_type, ctx, src_id);
                         for action in actions {
                             candidates.push((action, src_type.clone(), src_id));
+                        }
+
+                        if !visited.contains(&neighbor_key) {
+                            visited.insert(neighbor_key);
+                            frontier.push_back((src_type.clone(), src_id, depth + 1));
                         }
                     }
                 }
@@ -940,6 +966,7 @@ pub fn score_action(
 /// Pass `None` for one-shot mode (fresh circuit each time).
 pub fn recommend(ctx: &FiduciaryContext, mut pc_state: Option<&mut PcState>) -> FiduciaryResponse {
     let candidates = generate_candidates(ctx);
+    let axes_weights = load_axes_weights();
 
     let user_name = ctx
         .node_names
@@ -952,7 +979,9 @@ pub fn recommend(ctx: &FiduciaryContext, mut pc_state: Option<&mut PcState>) -> 
         .iter()
         .map(|(action, target_type, target_id)| {
             let axes = score_action(*action, target_type, *target_id, ctx);
-            let fiduciary_score = axes.score() * action.priority_weight();
+            // Use GEPA-optimized fiduciary axis weights when available.
+            let fiduciary_score =
+                sanitize_score(axes.score_with_weights(&axes_weights) * action.priority_weight());
 
             let target_name = ctx
                 .node_names
@@ -1001,12 +1030,12 @@ pub fn recommend(ctx: &FiduciaryContext, mut pc_state: Option<&mut PcState>) -> 
         .collect();
 
     // Sort by fiduciary score (highest first)
-    recommendations.sort_by(|a, b| b.fiduciary_score.partial_cmp(&a.fiduciary_score).unwrap());
+    recommendations.sort_by(|a, b| b.fiduciary_score.total_cmp(&a.fiduciary_score));
 
     // ── PC Circuit: train/resume from graph features and enrich recommendations ──
     use crate::model::pc::{
         bridge,
-        em::{train_em, EmConfig},
+        em::{EmConfig, train_em},
         fiduciary_pc,
     };
     let training_data = bridge::generate_training_data(
@@ -1072,20 +1101,20 @@ pub fn recommend(ctx: &FiduciaryContext, mut pc_state: Option<&mut PcState>) -> 
     // pc_risk is P(risky) ∈ [0,1]; we scale it to match GNN score range.
     // Higher PC risk → higher final score (action is more urgent).
     if pc_trained {
-        let (alpha, beta) = load_blend_weights();
+        let (alpha, beta) = normalized_blend(load_blend_weights());
         for rec in &mut recommendations {
             if let Some(ref analysis) = rec.pc_analysis {
-                let pc_risk = analysis.risk_probability as f32;
+                let pc_risk = sanitize_score(analysis.risk_probability as f32);
                 // Scale PC risk to GNN score range: pc_risk ∈ [0,1], gnn ∈ [0,~1]
                 // Blend: keep GNN base but boost/penalize based on PC calibrated risk
-                let gnn_score = rec.fiduciary_score;
-                let blended = alpha * gnn_score + beta * pc_risk;
-                rec.fiduciary_score = blended;
-                rec.is_recommended = blended >= 0.3;
+                let gnn_score = sanitize_score(rec.fiduciary_score);
+                let blended = sanitize_score(alpha * gnn_score + beta * pc_risk);
+                rec.fiduciary_score = blended.clamp(0.0, 1.0);
+                rec.is_recommended = rec.fiduciary_score >= 0.3;
             }
         }
         // Re-sort after blending (PC risk may change relative order)
-        recommendations.sort_by(|a, b| b.fiduciary_score.partial_cmp(&a.fiduciary_score).unwrap());
+        recommendations.sort_by(|a, b| b.fiduciary_score.total_cmp(&a.fiduciary_score));
     }
 
     // ── Fiduciary conflict suppression ──
@@ -1188,13 +1217,7 @@ pub fn recommend(ctx: &FiduciaryContext, mut pc_state: Option<&mut PcState>) -> 
 // ═══════════════════════════════════════════════════════════════
 
 pub fn get_anomaly_score(ctx: &FiduciaryContext, target_type: &str, target_id: usize) -> f32 {
-    ctx.anomaly_scores
-        .values()
-        .next()
-        .and_then(|m| m.get(target_type))
-        .and_then(|scores| scores.get(target_id))
-        .copied()
-        .unwrap_or(0.0)
+    aggregate_anomaly_score(ctx.anomaly_scores, target_type, target_id).unwrap_or(0.0)
 }
 
 pub fn get_embedding_affinity(ctx: &FiduciaryContext, target_type: &str, target_id: usize) -> f32 {
@@ -1236,4 +1259,144 @@ fn count_edges(
         }
     }
     count
+}
+
+fn sanitize_score(v: f32) -> f32 {
+    if v.is_finite() { v } else { 0.0 }
+}
+
+fn normalize_action_name(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    let mut prev_is_sep = true;
+    for ch in s.chars() {
+        if ch == '-' || ch == ' ' {
+            if !prev_is_sep {
+                out.push('_');
+            }
+            prev_is_sep = true;
+            continue;
+        }
+
+        if ch.is_ascii_uppercase() {
+            if !prev_is_sep {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+            prev_is_sep = false;
+        } else {
+            out.push(ch.to_ascii_lowercase());
+            prev_is_sep = ch == '_';
+        }
+    }
+
+    // Collapse duplicate underscores.
+    let mut compact = String::with_capacity(out.len());
+    let mut prev_us = false;
+    for ch in out.chars() {
+        if ch == '_' {
+            if !prev_us {
+                compact.push(ch);
+            }
+            prev_us = true;
+        } else {
+            compact.push(ch);
+            prev_us = false;
+        }
+    }
+    compact.trim_matches('_').to_string()
+}
+
+fn aggregate_anomaly_score(
+    anomaly_scores: &HashMap<String, HashMap<String, Vec<f32>>>,
+    target_type: &str,
+    target_id: usize,
+) -> Option<f32> {
+    let mut vals: Vec<f32> = anomaly_scores
+        .values()
+        .filter_map(|m| m.get(target_type))
+        .filter_map(|scores| scores.get(target_id).copied())
+        .filter(|v| v.is_finite())
+        .collect();
+
+    if vals.is_empty() {
+        return None;
+    }
+    vals.sort_by(|a, b| a.total_cmp(b));
+    let mid = vals.len() / 2;
+    let median = if vals.len() % 2 == 0 {
+        (vals[mid - 1] + vals[mid]) * 0.5
+    } else {
+        vals[mid]
+    };
+    Some(median.clamp(0.0, 1.0))
+}
+
+fn normalized_blend((gnn, pc): (f32, f32)) -> (f32, f32) {
+    let g = if gnn.is_finite() {
+        gnn.max(0.0)
+    } else {
+        DEFAULT_GNN_WEIGHT
+    };
+    let p = if pc.is_finite() {
+        pc.max(0.0)
+    } else {
+        DEFAULT_PC_WEIGHT
+    };
+    let sum = g + p;
+    if sum <= 1e-8 {
+        (DEFAULT_GNN_WEIGHT, DEFAULT_PC_WEIGHT)
+    } else {
+        (g / sum, p / sum)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_action_name_parsing_variants() {
+        assert_eq!(
+            FiduciaryActionType::try_from_name("should_investigate"),
+            Some(FiduciaryActionType::ShouldInvestigate)
+        );
+        assert_eq!(
+            FiduciaryActionType::try_from_name("ShouldInvestigate"),
+            Some(FiduciaryActionType::ShouldInvestigate)
+        );
+        assert_eq!(
+            FiduciaryActionType::try_from_name("should-investigate"),
+            Some(FiduciaryActionType::ShouldInvestigate)
+        );
+        assert!(FiduciaryActionType::try_from_name("unknown_action").is_none());
+    }
+
+    #[test]
+    fn test_anomaly_aggregation_is_order_independent() {
+        let mut by_model_a: HashMap<String, HashMap<String, Vec<f32>>> = HashMap::new();
+        let mut by_model_b: HashMap<String, HashMap<String, Vec<f32>>> = HashMap::new();
+
+        let mut m1 = HashMap::new();
+        m1.insert("account".to_string(), vec![0.9]);
+        let mut m2 = HashMap::new();
+        m2.insert("account".to_string(), vec![0.1]);
+        let mut m3 = HashMap::new();
+        m3.insert("account".to_string(), vec![0.7]);
+
+        by_model_a.insert("SAGE".to_string(), m1.clone());
+        by_model_a.insert("RGCN".to_string(), m2.clone());
+        by_model_a.insert("GAT".to_string(), m3.clone());
+
+        by_model_b.insert("GAT".to_string(), m3);
+        by_model_b.insert("RGCN".to_string(), m2);
+        by_model_b.insert("SAGE".to_string(), m1);
+
+        let a = aggregate_anomaly_score(&by_model_a, "account", 0).unwrap();
+        let b = aggregate_anomaly_score(&by_model_b, "account", 0).unwrap();
+        assert!(
+            (a - b).abs() < 1e-12,
+            "aggregation should not depend on map insertion order"
+        );
+        assert!((a - 0.7).abs() < 1e-6, "median(0.1,0.7,0.9) should be 0.7");
+    }
 }

@@ -1,8 +1,8 @@
 //! E2E tests for Sparse Autoencoder interpretability with realistic
 //! financial scenarios — verifies SAE discovers meaningful concepts.
 
-use std::collections::HashMap;
 use hehrgnn::eval::sae::*;
+use std::collections::HashMap;
 
 // ═══════════════════════════════════════════════════════════════
 // Helper: build financial graph with embeddings + concepts
@@ -50,10 +50,16 @@ impl FinancialGraph {
                     emb[2] += 1.0;
                     node_names.push(format!("debt_user_{}", i));
                     // Connect to obligations
-                    edges.entry(("user".into(), "obligation-has-interest-term".into(), "obligation".into()))
+                    edges
+                        .entry((
+                            "user".into(),
+                            "obligation-has-interest-term".into(),
+                            "obligation".into(),
+                        ))
                         .or_default()
                         .push((i, i % 5));
-                    edges.entry(("user".into(), "lien-on-asset".into(), "asset".into()))
+                    edges
+                        .entry(("user".into(), "lien-on-asset".into(), "asset".into()))
                         .or_default()
                         .push((i, i % 3));
                     anomaly_vals[i] = 0.3 + (i as f32 * 0.02);
@@ -64,10 +70,20 @@ impl FinancialGraph {
                     emb[5] += 1.5;
                     emb[6] += 1.0;
                     node_names.push(format!("saver_user_{}", i));
-                    edges.entry(("user".into(), "subledger-holds-goal-funds".into(), "goal".into()))
+                    edges
+                        .entry((
+                            "user".into(),
+                            "subledger-holds-goal-funds".into(),
+                            "goal".into(),
+                        ))
                         .or_default()
                         .push((i, i % 5));
-                    edges.entry(("user".into(), "records-budget-estimation".into(), "budget-estimation".into()))
+                    edges
+                        .entry((
+                            "user".into(),
+                            "records-budget-estimation".into(),
+                            "budget-estimation".into(),
+                        ))
                         .or_default()
                         .push((i, i % 3));
                 }
@@ -77,10 +93,20 @@ impl FinancialGraph {
                     emb[9] += 1.5;
                     emb[10] += 1.0;
                     node_names.push(format!("tax_user_{}", i));
-                    edges.entry(("user".into(), "tax-liability-has-due-event".into(), "tax-due-event".into()))
+                    edges
+                        .entry((
+                            "user".into(),
+                            "tax-liability-has-due-event".into(),
+                            "tax-due-event".into(),
+                        ))
                         .or_default()
                         .push((i, i % 5));
-                    edges.entry(("user".into(), "tax-sinking-fund-backed-by-account".into(), "tax-sinking-fund".into()))
+                    edges
+                        .entry((
+                            "user".into(),
+                            "tax-sinking-fund-backed-by-account".into(),
+                            "tax-sinking-fund".into(),
+                        ))
                         .or_default()
                         .push((i, i % 3));
                 }
@@ -89,10 +115,16 @@ impl FinancialGraph {
                     emb[12] += 2.0;
                     emb[13] += 1.5;
                     node_names.push(format!("spender_user_{}", i));
-                    edges.entry(("user".into(), "pattern-owned-by".into(), "recurring-pattern".into()))
+                    edges
+                        .entry((
+                            "user".into(),
+                            "pattern-owned-by".into(),
+                            "recurring-pattern".into(),
+                        ))
                         .or_default()
                         .push((i, i % 5));
-                    edges.entry(("user".into(), "transacts-at".into(), "merchant".into()))
+                    edges
+                        .entry(("user".into(), "transacts-at".into(), "merchant".into()))
                         .or_default()
                         .push((i, i % 10));
                     // Some are anomalous (fraud merchants)
@@ -105,10 +137,20 @@ impl FinancialGraph {
                     emb[15] += 2.0;
                     emb[14] += 1.0;
                     node_names.push(format!("asset_user_{}", i));
-                    edges.entry(("user".into(), "asset-has-valuation".into(), "asset-valuation".into()))
+                    edges
+                        .entry((
+                            "user".into(),
+                            "asset-has-valuation".into(),
+                            "asset-valuation".into(),
+                        ))
                         .or_default()
                         .push((i, i % 5));
-                    edges.entry(("user".into(), "user-has-instrument".into(), "instrument".into()))
+                    edges
+                        .entry((
+                            "user".into(),
+                            "user-has-instrument".into(),
+                            "instrument".into(),
+                        ))
                         .or_default()
                         .push((i, i % 8));
                 }
@@ -164,7 +206,11 @@ fn test_sae_training_and_sparsity() {
     }
     let mean_sparsity = total_sparsity / graph.embeddings.len() as f32;
     println!("  Mean sparsity:  {:.1}%", mean_sparsity * 100.0);
-    assert!(mean_sparsity > 0.3, "SAE should learn sparse features (>30%), got {:.1}%", mean_sparsity * 100.0);
+    assert!(
+        mean_sparsity > 0.3,
+        "SAE should learn sparse features (>30%), got {:.1}%",
+        mean_sparsity * 100.0
+    );
 
     // Reconstruction: should approximate original
     let mut total_recon = 0.0;
@@ -182,11 +228,13 @@ fn test_sae_training_and_sparsity() {
         let profile_sparsity: f32 = graph.embeddings[start..end]
             .iter()
             .map(|e| sae.sparsity(e))
-            .sum::<f32>() / 20.0;
+            .sum::<f32>()
+            / 20.0;
         let profile_active: f32 = graph.embeddings[start..end]
             .iter()
             .map(|e| sae.active_features(e).len() as f32)
-            .sum::<f32>() / 20.0;
+            .sum::<f32>()
+            / 20.0;
         let label = match profile {
             0 => "Debt holders",
             1 => "Goal savers",
@@ -194,7 +242,12 @@ fn test_sae_training_and_sparsity() {
             3 => "Spenders",
             _ => "Asset holders",
         };
-        println!("    {:<15} sparsity={:.0}%, active={:.1} features", label, profile_sparsity * 100.0, profile_active);
+        println!(
+            "    {:<15} sparsity={:.0}%, active={:.1} features",
+            label,
+            profile_sparsity * 100.0,
+            profile_active
+        );
     }
 }
 
@@ -246,10 +299,8 @@ fn test_sae_feature_labeling() {
     );
 
     // Collect unique domains discovered
-    let discovered_domains: std::collections::HashSet<&str> = feature_labels
-        .iter()
-        .map(|l| l.domain.as_str())
-        .collect();
+    let discovered_domains: std::collections::HashSet<&str> =
+        feature_labels.iter().map(|l| l.domain.as_str()).collect();
 
     println!("\n  Domains discovered: {:?}", discovered_domains);
     assert!(
@@ -298,7 +349,10 @@ fn test_sae_explanations_per_profile() {
 
         println!("  {} ({}):", label, graph.node_names[*node_id]);
         println!("    Sparsity:      {:.0}%", expl.sparsity * 100.0);
-        println!("    Reconstruction: {:.0}%", expl.reconstruction_quality * 100.0);
+        println!(
+            "    Reconstruction: {:.0}%",
+            expl.reconstruction_quality * 100.0
+        );
         println!("    Active features: {}", expl.active_features.len());
         for feat in expl.active_features.iter().take(5) {
             println!(
@@ -431,9 +485,21 @@ fn test_e2e_sae_with_fiduciary_financial_health() {
     // Pick representative users from each profile
     let scenarios = [
         (0, "Debt-heavy user", "should get debt-related SAE features"),
-        (20, "Goal-oriented saver", "should get goal-related SAE features"),
-        (40, "Tax-aware planner", "should get tax-related SAE features"),
-        (75, "Anomalous spender", "should get risk-related SAE features"),
+        (
+            20,
+            "Goal-oriented saver",
+            "should get goal-related SAE features",
+        ),
+        (
+            40,
+            "Tax-aware planner",
+            "should get tax-related SAE features",
+        ),
+        (
+            75,
+            "Anomalous spender",
+            "should get risk-related SAE features",
+        ),
         (80, "Asset holder", "should get asset-related SAE features"),
     ];
 
@@ -441,11 +507,17 @@ fn test_e2e_sae_with_fiduciary_financial_health() {
         let expl = explain(&sae, &graph.embeddings[*node_id], &feature_labels);
 
         println!("  {} (node {}): {}", label, node_id, expectation);
-        println!("    {} active features, sparsity {:.0}%",
-            expl.active_features.len(), expl.sparsity * 100.0);
+        println!(
+            "    {} active features, sparsity {:.0}%",
+            expl.active_features.len(),
+            expl.sparsity * 100.0
+        );
 
         for feat in expl.active_features.iter().take(3) {
-            println!("      └─ {} [{}] activation={:.3}", feat.label, feat.domain, feat.activation);
+            println!(
+                "      └─ {} [{}] activation={:.3}",
+                feat.label, feat.domain, feat.activation
+            );
         }
 
         // Verify reconstruction quality
@@ -468,24 +540,32 @@ fn test_e2e_sae_with_fiduciary_financial_health() {
 
     // Verify anomalous user (node 75, spender with anomaly=0.7) has risk-related features
     let anomalous_expl = explain(&sae, &graph.embeddings[75], &feature_labels);
-    println!("  Anomalous user (75) domains: {:?}",
-        anomalous_expl.active_features.iter()
+    println!(
+        "  Anomalous user (75) domains: {:?}",
+        anomalous_expl
+            .active_features
+            .iter()
             .filter(|f| !f.label.starts_with("unlabeled"))
             .map(|f| f.domain.as_str())
             .collect::<Vec<_>>()
     );
 
     // Overall: verify SAE provides useful decomposition
-    let total_labeled: usize = scenarios.iter()
+    let total_labeled: usize = scenarios
+        .iter()
         .map(|(id, _, _)| {
             let expl = explain(&sae, &graph.embeddings[*id], &feature_labels);
-            expl.active_features.iter()
+            expl.active_features
+                .iter()
                 .filter(|f| !f.label.starts_with("unlabeled"))
                 .count()
         })
         .sum();
 
-    println!("\n  Total labeled features across all scenarios: {}", total_labeled);
+    println!(
+        "\n  Total labeled features across all scenarios: {}",
+        total_labeled
+    );
     assert!(
         total_labeled >= 3,
         "Across all scenarios, SAE should find at least 3 labeled features, got {}",

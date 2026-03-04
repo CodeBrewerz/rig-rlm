@@ -8,9 +8,9 @@
 //!   agentgateway -f agentgateway-a2a.yaml
 
 use clap::Parser;
-use tracing_subscriber::{EnvFilter, fmt::Layer, layer::SubscriberExt, util::SubscriberInitExt};
-use tracing::level_filters::LevelFilter;
 use std::fs::OpenOptions;
+use tracing::level_filters::LevelFilter;
+use tracing_subscriber::{EnvFilter, fmt::Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 use rig_rlm::a2a_server;
 use rig_rlm::monad::AgentConfig;

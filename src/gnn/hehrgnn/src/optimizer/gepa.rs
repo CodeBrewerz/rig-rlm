@@ -45,7 +45,10 @@ impl Candidate {
     /// Create a new seed candidate from key-value pairs.
     pub fn seed(params: Vec<(&str, &str)>) -> Self {
         Self {
-            params: params.into_iter().map(|(k, v)| (k.into(), v.into())).collect(),
+            params: params
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect(),
             generation: 0,
             parent: None,
         }
@@ -167,7 +170,8 @@ impl NumericMutator {
     }
 
     fn pseudo_random(&self, i: usize) -> f32 {
-        let x = self.seed
+        let x = self
+            .seed
             .wrapping_mul(6364136223846793005u64)
             .wrapping_add(i as u64)
             .wrapping_mul(1442695040888963407u64);
@@ -177,7 +181,13 @@ impl NumericMutator {
 }
 
 impl Mutator for NumericMutator {
-    fn mutate(&self, parent: &Candidate, _eval_result: &EvalResult, generation: usize, parent_idx: usize) -> Candidate {
+    fn mutate(
+        &self,
+        parent: &Candidate,
+        _eval_result: &EvalResult,
+        generation: usize,
+        parent_idx: usize,
+    ) -> Candidate {
         let mut child = parent.clone();
         child.generation = generation;
         child.parent = Some(parent_idx);
@@ -246,7 +256,10 @@ impl LlmMutator {
         p.push_str("## Current Parameter Values\n```\n");
         p.push_str(&parent.to_text());
         p.push_str("\n```\n\n");
-        p.push_str(&format!("## Evaluation Score: {:.6} (higher is better)\n\n", eval_result.score));
+        p.push_str(&format!(
+            "## Evaluation Score: {:.6} (higher is better)\n\n",
+            eval_result.score
+        ));
 
         if !eval_result.side_info.scores.is_empty() {
             p.push_str("## Individual Metrics\n");
@@ -265,11 +278,15 @@ impl LlmMutator {
         }
 
         p.push_str("## Your Task\n\n");
-        p.push_str("Analyze the evaluation results. Based on the metrics and diagnostic feedback:\n");
+        p.push_str(
+            "Analyze the evaluation results. Based on the metrics and diagnostic feedback:\n",
+        );
         p.push_str("1. Identify which parameters should increase or decrease\n");
         p.push_str("2. Consider how the parameters interact with each other\n");
         p.push_str("3. Propose improved values that maximize the combined score\n\n");
-        p.push_str("Respond with ONLY the improved parameter values, one per line, in the exact format:\n");
+        p.push_str(
+            "Respond with ONLY the improved parameter values, one per line, in the exact format:\n",
+        );
         p.push_str("```\nparameter_name: value\n```\n\n");
         p.push_str("Each value must be a decimal number between 0.01 and 1.00.\n");
         p.push_str("Include ALL parameters, even unchanged ones.\n");
@@ -308,7 +325,8 @@ impl LlmMutator {
             "max_tokens": 512
         });
 
-        let resp = self.client
+        let resp = self
+            .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
@@ -318,14 +336,21 @@ impl LlmMutator {
             .map_err(|e| format!("HTTP error: {}", e))?;
 
         let status = resp.status();
-        let text = resp.text().await.map_err(|e| format!("Read error: {}", e))?;
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| format!("Read error: {}", e))?;
 
         if !status.is_success() {
-            return Err(format!("API error {}: {}", status, &text[..200.min(text.len())]));
+            return Err(format!(
+                "API error {}: {}",
+                status,
+                &text[..200.min(text.len())]
+            ));
         }
 
-        let json: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|e| format!("JSON parse error: {}", e))?;
+        let json: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
 
         json["choices"][0]["message"]["content"]
             .as_str()
@@ -353,7 +378,8 @@ impl LlmMutator {
             }
             Err(e) => {
                 println!("  GEPA ⚠  │ LLM failed: {} — using numeric fallback", e);
-                self.fallback.mutate(parent, eval_result, generation, parent_idx)
+                self.fallback
+                    .mutate(parent, eval_result, generation, parent_idx)
             }
         }
     }
@@ -375,18 +401,34 @@ pub struct ParetoFrontier {
     max_size: usize,
 }
 
+fn rank_score(score: f64) -> f64 {
+    if score.is_finite() {
+        score
+    } else {
+        f64::NEG_INFINITY
+    }
+}
+
 impl ParetoFrontier {
     pub fn new(max_size: usize) -> Self {
-        Self { entries: Vec::new(), max_size }
+        Self {
+            entries: Vec::new(),
+            max_size,
+        }
     }
 
     pub fn try_add(&mut self, candidate: Candidate, eval: EvalResult, index: usize) -> bool {
-        let new_entry = FrontierEntry { candidate, eval, index };
+        let new_entry = FrontierEntry {
+            candidate,
+            eval,
+            index,
+        };
         let scores: Vec<(&String, &f64)> = new_entry.eval.side_info.scores.iter().collect();
 
         if scores.len() <= 1 {
             self.entries.push(new_entry);
-            self.entries.sort_by(|a, b| b.eval.score.partial_cmp(&a.eval.score).unwrap());
+            self.entries
+                .sort_by(|a, b| rank_score(b.eval.score).total_cmp(&rank_score(a.eval.score)));
             if self.entries.len() > self.max_size {
                 self.entries.truncate(self.max_size);
             }
@@ -394,16 +436,23 @@ impl ParetoFrontier {
         }
 
         self.entries.retain(|existing| {
-            !Self::dominates(&new_entry.eval.side_info.scores, &existing.eval.side_info.scores)
+            !Self::dominates(
+                &new_entry.eval.side_info.scores,
+                &existing.eval.side_info.scores,
+            )
         });
         let is_dominated = self.entries.iter().any(|existing| {
-            Self::dominates(&existing.eval.side_info.scores, &new_entry.eval.side_info.scores)
+            Self::dominates(
+                &existing.eval.side_info.scores,
+                &new_entry.eval.side_info.scores,
+            )
         });
 
         if !is_dominated {
             self.entries.push(new_entry);
             if self.entries.len() > self.max_size {
-                self.entries.sort_by(|a, b| b.eval.score.partial_cmp(&a.eval.score).unwrap());
+                self.entries
+                    .sort_by(|a, b| rank_score(b.eval.score).total_cmp(&rank_score(a.eval.score)));
                 self.entries.truncate(self.max_size);
             }
             true
@@ -413,29 +462,48 @@ impl ParetoFrontier {
     }
 
     fn dominates(a: &HashMap<String, f64>, b: &HashMap<String, f64>) -> bool {
-        if a.is_empty() || b.is_empty() { return false; }
+        if a.is_empty() || b.is_empty() {
+            return false;
+        }
         let mut all_geq = true;
         let mut any_gt = false;
         for (key, a_val) in a {
-            let b_val = b.get(key).unwrap_or(&0.0);
-            if a_val < b_val { all_geq = false; break; }
-            if a_val > b_val { any_gt = true; }
+            let a_val = rank_score(*a_val);
+            let b_val = b.get(key).copied().unwrap_or(0.0);
+            let b_val = rank_score(b_val);
+            if a_val < b_val {
+                all_geq = false;
+                break;
+            }
+            if a_val > b_val {
+                any_gt = true;
+            }
         }
         all_geq && any_gt
     }
 
     pub fn select_parent(&self, iteration: usize) -> Option<&FrontierEntry> {
-        if self.entries.is_empty() { return None; }
+        if self.entries.is_empty() {
+            return None;
+        }
         Some(&self.entries[iteration % self.entries.len()])
     }
 
     pub fn best(&self) -> Option<&FrontierEntry> {
-        self.entries.iter().max_by(|a, b| a.eval.score.partial_cmp(&b.eval.score).unwrap())
+        self.entries
+            .iter()
+            .max_by(|a, b| rank_score(a.eval.score).total_cmp(&rank_score(b.eval.score)))
     }
 
-    pub fn len(&self) -> usize { self.entries.len() }
-    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
-    pub fn entries(&self) -> &[FrontierEntry] { &self.entries }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+    pub fn entries(&self) -> &[FrontierEntry] {
+        &self.entries
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -451,7 +519,12 @@ pub struct OptimizeConfig {
 
 impl Default for OptimizeConfig {
     fn default() -> Self {
-        Self { max_evals: 200, max_frontier_size: 20, log_every: 10, objective: String::new() }
+        Self {
+            max_evals: 200,
+            max_frontier_size: 20,
+            log_every: 10,
+            objective: String::new(),
+        }
     }
 }
 
@@ -523,23 +596,96 @@ impl Default for OptimizedWeights {
 }
 
 impl OptimizedWeights {
+    fn sanitized(mut self) -> Self {
+        // Blend weights must be finite, non-negative, and sum to 1.
+        self.gnn_weight = if self.gnn_weight.is_finite() {
+            self.gnn_weight.max(0.0)
+        } else {
+            0.7
+        };
+        self.pc_weight = if self.pc_weight.is_finite() {
+            self.pc_weight.max(0.0)
+        } else {
+            0.3
+        };
+        let blend_sum = self.gnn_weight + self.pc_weight;
+        if blend_sum <= 1e-8 {
+            self.gnn_weight = 0.7;
+            self.pc_weight = 0.3;
+        } else {
+            self.gnn_weight /= blend_sum;
+            self.pc_weight /= blend_sum;
+        }
+
+        // Axes weights must be finite, positive, and normalized.
+        let mut axes = [
+            if self.cost_weight.is_finite() {
+                self.cost_weight
+            } else {
+                0.25
+            },
+            if self.risk_weight.is_finite() {
+                self.risk_weight
+            } else {
+                0.25
+            },
+            if self.goal_weight.is_finite() {
+                self.goal_weight
+            } else {
+                0.15
+            },
+            if self.urgency_weight.is_finite() {
+                self.urgency_weight
+            } else {
+                0.15
+            },
+            if self.conflict_weight.is_finite() {
+                self.conflict_weight
+            } else {
+                0.10
+            },
+            if self.reversibility_weight.is_finite() {
+                self.reversibility_weight
+            } else {
+                0.10
+            },
+        ];
+        for w in &mut axes {
+            *w = (*w).max(0.01);
+        }
+        let axis_sum: f32 = axes.iter().sum();
+        if axis_sum <= 1e-8 {
+            axes = [0.25, 0.25, 0.15, 0.15, 0.10, 0.10];
+        } else {
+            for w in &mut axes {
+                *w /= axis_sum;
+            }
+        }
+        self.cost_weight = axes[0];
+        self.risk_weight = axes[1];
+        self.goal_weight = axes[2];
+        self.urgency_weight = axes[3];
+        self.conflict_weight = axes[4];
+        self.reversibility_weight = axes[5];
+        self
+    }
+
     /// Save to JSON file.
     pub fn save(&self, path: &str) -> Result<(), String> {
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| format!("Serialize error: {}", e))?;
+        let json =
+            serde_json::to_string_pretty(self).map_err(|e| format!("Serialize error: {}", e))?;
         std::fs::write(path, json).map_err(|e| format!("Write error: {}", e))
     }
 
     /// Load from JSON file.
     pub fn load(path: &str) -> Result<Self, String> {
-        let json = std::fs::read_to_string(path)
-            .map_err(|e| format!("Read error: {}", e))?;
+        let json = std::fs::read_to_string(path).map_err(|e| format!("Read error: {}", e))?;
         serde_json::from_str(&json).map_err(|e| format!("Parse error: {}", e))
     }
 
     /// Load from file, falling back to defaults if file doesn't exist.
     pub fn load_or_default(path: &str) -> Self {
-        Self::load(path).unwrap_or_default()
+        Self::load(path).unwrap_or_default().sanitized()
     }
 
     /// Convert to a GEPA Candidate for optimization.
@@ -569,6 +715,7 @@ impl OptimizedWeights {
             optimized_at: chrono::Utc::now().to_rfc3339(),
             total_evals: 0,
         }
+        .sanitized()
     }
 
     /// The 6-element weight array for `FiduciaryAxes::score_with_weights()`.
@@ -588,7 +735,6 @@ impl OptimizedWeights {
         (self.gnn_weight, self.pc_weight)
     }
 }
-
 
 // ═══════════════════════════════════════════════════════════════
 // Auto-Tune: production-ready self-improvement on each pipeline run
@@ -629,7 +775,7 @@ pub fn auto_tune_weights(
     let prev_weights = OptimizedWeights::load_or_default(weights_path);
     let seed = prev_weights.to_candidate();
     let seed_eval = evaluator.evaluate(&seed);
-    let score_before = seed_eval.score;
+    let score_before = rank_score(seed_eval.score);
 
     let mutator = NumericMutator::new(0.10, prev_weights.total_evals as u64 + 7);
     let config = OptimizeConfig {
@@ -652,7 +798,8 @@ pub fn auto_tune_weights(
         } else {
             eprintln!(
                 "  [gepa] auto-tune: improved {:.6} → {:.6} (+{:.4}%), saved to {}",
-                score_before, result.best_score,
+                score_before,
+                result.best_score,
                 (result.best_score - score_before) / score_before.abs().max(0.001) * 100.0,
                 weights_path
             );
@@ -682,40 +829,91 @@ pub fn auto_tune_weights(
 // Sync Optimization Loop (NumericMutator)
 // ═══════════════════════════════════════════════════════════════
 
-pub fn optimize(seed: Candidate, evaluator: &dyn Evaluator, mutator: &dyn Mutator, config: OptimizeConfig) -> OptimizeResult {
+pub fn optimize(
+    seed: Candidate,
+    evaluator: &dyn Evaluator,
+    mutator: &dyn Mutator,
+    config: OptimizeConfig,
+) -> OptimizeResult {
     let mut frontier = ParetoFrontier::new(config.max_frontier_size);
     let mut eval_count = 0;
     let mut score_history = Vec::new();
     let mut best_score = f64::NEG_INFINITY;
     let mut best_candidate = seed.clone();
 
-    let seed_eval = evaluator.evaluate(&seed);
-    if seed_eval.score > best_score { best_score = seed_eval.score; best_candidate = seed.clone(); }
+    let mut seed_eval = evaluator.evaluate(&seed);
+    if !seed_eval.score.is_finite() {
+        seed_eval
+            .side_info
+            .log("Seed evaluation produced non-finite score; sanitized to -inf");
+        seed_eval.score = f64::NEG_INFINITY;
+    }
+    if seed_eval.score > best_score {
+        best_score = seed_eval.score;
+        best_candidate = seed.clone();
+    }
     score_history.push((eval_count, seed_eval.score));
     frontier.try_add(seed, seed_eval, eval_count);
     eval_count += 1;
 
     if config.log_every > 0 {
-        println!("  GEPA  │ eval {:3} │ score {:.6} │ frontier {:2} │ SEED", eval_count, best_score, frontier.len());
+        println!(
+            "  GEPA  │ eval {:3} │ score {:.6} │ frontier {:2} │ SEED",
+            eval_count,
+            best_score,
+            frontier.len()
+        );
     }
 
     while eval_count < config.max_evals {
-        let parent_entry = match frontier.select_parent(eval_count) { Some(e) => e.clone(), None => break };
-        let child = mutator.mutate(&parent_entry.candidate, &parent_entry.eval, eval_count, parent_entry.index);
-        let child_eval = evaluator.evaluate(&child);
+        let parent_entry = match frontier.select_parent(eval_count) {
+            Some(e) => e.clone(),
+            None => break,
+        };
+        let child = mutator.mutate(
+            &parent_entry.candidate,
+            &parent_entry.eval,
+            eval_count,
+            parent_entry.index,
+        );
+        let mut child_eval = evaluator.evaluate(&child);
+        if !child_eval.score.is_finite() {
+            child_eval
+                .side_info
+                .log("Child evaluation produced non-finite score; sanitized to -inf");
+            child_eval.score = f64::NEG_INFINITY;
+        }
         let child_score = child_eval.score;
         score_history.push((eval_count, child_score));
-        if child_score > best_score { best_score = child_score; best_candidate = child.clone(); }
+        if child_score > best_score {
+            best_score = child_score;
+            best_candidate = child.clone();
+        }
         let accepted = frontier.try_add(child, child_eval, eval_count);
         eval_count += 1;
         if config.log_every > 0 && eval_count % config.log_every == 0 {
-            println!("  GEPA  │ eval {:3} │ score {:.6} │ best {:.6} │ frontier {:2} │ {}",
-                eval_count, child_score, best_score, frontier.len(),
-                if accepted { "✅ accepted" } else { "  rejected" });
+            println!(
+                "  GEPA  │ eval {:3} │ score {:.6} │ best {:.6} │ frontier {:2} │ {}",
+                eval_count,
+                child_score,
+                best_score,
+                frontier.len(),
+                if accepted {
+                    "✅ accepted"
+                } else {
+                    "  rejected"
+                }
+            );
         }
     }
 
-    OptimizeResult { best_candidate, best_score, total_evals: eval_count, score_history, frontier_size: frontier.len() }
+    OptimizeResult {
+        best_candidate,
+        best_score,
+        total_evals: eval_count,
+        score_history,
+        frontier_size: frontier.len(),
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -724,40 +922,93 @@ pub fn optimize(seed: Candidate, evaluator: &dyn Evaluator, mutator: &dyn Mutato
 
 /// Run the GEPA optimization loop with LLM-guided mutations (async).
 /// Uses Trinity model via OpenRouter for reflection-based mutation.
-pub async fn optimize_async(seed: Candidate, evaluator: &dyn Evaluator, llm_mutator: &LlmMutator, config: OptimizeConfig) -> OptimizeResult {
+pub async fn optimize_async(
+    seed: Candidate,
+    evaluator: &dyn Evaluator,
+    llm_mutator: &LlmMutator,
+    config: OptimizeConfig,
+) -> OptimizeResult {
     let mut frontier = ParetoFrontier::new(config.max_frontier_size);
     let mut eval_count = 0;
     let mut score_history = Vec::new();
     let mut best_score = f64::NEG_INFINITY;
     let mut best_candidate = seed.clone();
 
-    let seed_eval = evaluator.evaluate(&seed);
-    if seed_eval.score > best_score { best_score = seed_eval.score; best_candidate = seed.clone(); }
+    let mut seed_eval = evaluator.evaluate(&seed);
+    if !seed_eval.score.is_finite() {
+        seed_eval
+            .side_info
+            .log("Seed evaluation produced non-finite score; sanitized to -inf");
+        seed_eval.score = f64::NEG_INFINITY;
+    }
+    if seed_eval.score > best_score {
+        best_score = seed_eval.score;
+        best_candidate = seed.clone();
+    }
     score_history.push((eval_count, seed_eval.score));
     frontier.try_add(seed, seed_eval, eval_count);
     eval_count += 1;
 
     if config.log_every > 0 {
-        println!("  GEPA 🧠│ eval {:3} │ score {:.6} │ frontier {:2} │ SEED", eval_count, best_score, frontier.len());
+        println!(
+            "  GEPA 🧠│ eval {:3} │ score {:.6} │ frontier {:2} │ SEED",
+            eval_count,
+            best_score,
+            frontier.len()
+        );
     }
 
     while eval_count < config.max_evals {
-        let parent_entry = match frontier.select_parent(eval_count) { Some(e) => e.clone(), None => break };
-        let child = llm_mutator.mutate_async(&parent_entry.candidate, &parent_entry.eval, eval_count, parent_entry.index).await;
-        let child_eval = evaluator.evaluate(&child);
+        let parent_entry = match frontier.select_parent(eval_count) {
+            Some(e) => e.clone(),
+            None => break,
+        };
+        let child = llm_mutator
+            .mutate_async(
+                &parent_entry.candidate,
+                &parent_entry.eval,
+                eval_count,
+                parent_entry.index,
+            )
+            .await;
+        let mut child_eval = evaluator.evaluate(&child);
+        if !child_eval.score.is_finite() {
+            child_eval
+                .side_info
+                .log("Child evaluation produced non-finite score; sanitized to -inf");
+            child_eval.score = f64::NEG_INFINITY;
+        }
         let child_score = child_eval.score;
         score_history.push((eval_count, child_score));
-        if child_score > best_score { best_score = child_score; best_candidate = child.clone(); }
+        if child_score > best_score {
+            best_score = child_score;
+            best_candidate = child.clone();
+        }
         let accepted = frontier.try_add(child, child_eval, eval_count);
         eval_count += 1;
         if config.log_every > 0 && eval_count % config.log_every == 0 {
-            println!("  GEPA 🧠│ eval {:3} │ score {:.6} │ best {:.6} │ frontier {:2} │ {}",
-                eval_count, child_score, best_score, frontier.len(),
-                if accepted { "✅ accepted" } else { "  rejected" });
+            println!(
+                "  GEPA 🧠│ eval {:3} │ score {:.6} │ best {:.6} │ frontier {:2} │ {}",
+                eval_count,
+                child_score,
+                best_score,
+                frontier.len(),
+                if accepted {
+                    "✅ accepted"
+                } else {
+                    "  rejected"
+                }
+            );
         }
     }
 
-    OptimizeResult { best_candidate, best_score, total_evals: eval_count, score_history, frontier_size: frontier.len() }
+    OptimizeResult {
+        best_candidate,
+        best_score,
+        total_evals: eval_count,
+        score_history,
+        frontier_size: frontier.len(),
+    }
 }
 
 #[cfg(test)]
@@ -767,11 +1018,18 @@ mod tests {
     struct SumEvaluator;
     impl Evaluator for SumEvaluator {
         fn evaluate(&self, candidate: &Candidate) -> EvalResult {
-            let sum: f64 = candidate.params.values().filter_map(|v| v.parse::<f64>().ok()).sum();
+            let sum: f64 = candidate
+                .params
+                .values()
+                .filter_map(|v| v.parse::<f64>().ok())
+                .sum();
             let mut si = SideInfo::new();
             si.score("sum", sum);
             si.log(format!("Sum of params: {:.4}", sum));
-            EvalResult { score: sum, side_info: si }
+            EvalResult {
+                score: sum,
+                side_info: si,
+            }
         }
     }
 
@@ -779,12 +1037,18 @@ mod tests {
     fn test_pareto_frontier() {
         let mut frontier = ParetoFrontier::new(5);
         let c1 = Candidate::seed(vec![("a", "0.5")]);
-        let e1 = EvalResult { score: 0.5, side_info: SideInfo::new() };
+        let e1 = EvalResult {
+            score: 0.5,
+            side_info: SideInfo::new(),
+        };
         assert!(frontier.try_add(c1, e1, 0));
         assert_eq!(frontier.len(), 1);
 
         let c2 = Candidate::seed(vec![("a", "0.8")]);
-        let e2 = EvalResult { score: 0.8, side_info: SideInfo::new() };
+        let e2 = EvalResult {
+            score: 0.8,
+            side_info: SideInfo::new(),
+        };
         assert!(frontier.try_add(c2, e2, 1));
         assert!(frontier.best().unwrap().eval.score >= 0.8);
     }
@@ -792,10 +1056,43 @@ mod tests {
     #[test]
     fn test_optimize_simple() {
         let seed = Candidate::seed(vec![("a", "0.3"), ("b", "0.4")]);
-        let config = OptimizeConfig { max_evals: 50, max_frontier_size: 10, log_every: 0, objective: "Max sum".into() };
+        let config = OptimizeConfig {
+            max_evals: 50,
+            max_frontier_size: 10,
+            log_every: 0,
+            objective: "Max sum".into(),
+        };
         let result = optimize(seed, &SumEvaluator, &NumericMutator::new(0.2, 42), config);
-        println!("  best_score={:.4}, evals={}, frontier={}", result.best_score, result.total_evals, result.frontier_size);
+        println!(
+            "  best_score={:.4}, evals={}, frontier={}",
+            result.best_score, result.total_evals, result.frontier_size
+        );
         assert!(result.best_score >= 0.7, "Should at least match seed score");
+    }
+
+    #[test]
+    fn test_optimized_weights_are_sanitized() {
+        let candidate = Candidate::seed(vec![
+            ("gnn_weight", "3.0"),
+            ("pc_weight", "1.0"),
+            ("cost_weight", "10.0"),
+            ("risk_weight", "0.0"),
+            ("goal_weight", "-5.0"),
+            ("urgency_weight", "2.0"),
+        ]);
+
+        let w = OptimizedWeights::from_candidate(&candidate, 0.5);
+        let (g, p) = w.blend_weights();
+        assert!((g + p - 1.0).abs() < 1e-6, "blend must sum to 1");
+        assert!(g >= 0.0 && p >= 0.0, "blend weights must be non-negative");
+
+        let axes = w.axes_weights();
+        let sum: f32 = axes.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-6, "axes must sum to 1");
+        assert!(
+            axes.iter().all(|v| *v > 0.0),
+            "axes weights must stay positive"
+        );
     }
 
     #[test]
@@ -820,9 +1117,18 @@ mod tests {
             },
         };
         let prompt = mutator.build_reflection_prompt(&candidate, &eval);
-        assert!(prompt.contains("Objective"), "Prompt should include objective");
-        assert!(prompt.contains("gnn_weight: 0.7000"), "Prompt should include params");
-        assert!(prompt.contains("kendall_tau"), "Prompt should include metrics");
+        assert!(
+            prompt.contains("Objective"),
+            "Prompt should include objective"
+        );
+        assert!(
+            prompt.contains("gnn_weight: 0.7000"),
+            "Prompt should include params"
+        );
+        assert!(
+            prompt.contains("kendall_tau"),
+            "Prompt should include metrics"
+        );
         println!("  ✅ Reflection prompt ({} chars)", prompt.len());
     }
 
@@ -830,11 +1136,17 @@ mod tests {
     fn test_llm_mutator_response_parsing() {
         let mutator = LlmMutator {
             client: reqwest::Client::new(),
-            base_url: "test".into(), api_key: "test".into(),
-            model: "test".into(), objective: "test".into(),
+            base_url: "test".into(),
+            api_key: "test".into(),
+            model: "test".into(),
+            objective: "test".into(),
             fallback: NumericMutator::new(0.15, 42),
         };
-        let parent = Candidate::seed(vec![("gnn_weight", "0.7000"), ("pc_weight", "0.3000"), ("cost_weight", "0.2500")]);
+        let parent = Candidate::seed(vec![
+            ("gnn_weight", "0.7000"),
+            ("pc_weight", "0.3000"),
+            ("cost_weight", "0.2500"),
+        ]);
         let response = "```\ngnn_weight: 0.85\npc_weight: 0.45\ncost_weight: 0.30\n```";
         let child = mutator.parse_response(response, &parent);
         assert_eq!(child.get_f32("gnn_weight", 0.0), 0.85);

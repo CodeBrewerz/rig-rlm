@@ -9,9 +9,9 @@ use std::fs;
 use burn::backend::{Autodiff, NdArray};
 use burn::prelude::*;
 
-use hehrgnn::data::synthetic::{generate_synthetic_dataset, SyntheticDataConfig};
+use hehrgnn::data::synthetic::{SyntheticDataConfig, generate_synthetic_dataset};
 use hehrgnn::training::scoring::{DistMultScorer, Scorer, TransEScorer};
-use hehrgnn::training::train::{train, TrainConfig};
+use hehrgnn::training::train::{TrainConfig, train};
 
 type TrainBackend = Autodiff<NdArray>;
 type InferBackend = NdArray;

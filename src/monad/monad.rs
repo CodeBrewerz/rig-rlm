@@ -259,8 +259,7 @@ impl AgentMonad {
     pub fn orchestrate_agents(specs: Vec<super::generation::AgentSpec>) -> Self {
         use super::orchestrator::{Orchestrator, OrchestratorStrategy, SubAgentSpec};
 
-        let mut orch = Orchestrator::new()
-            .with_strategy(OrchestratorStrategy::Parallel);
+        let mut orch = Orchestrator::new().with_strategy(OrchestratorStrategy::Parallel);
         for spec in specs {
             orch = orch.add_agent(SubAgentSpec::new(spec.name, spec.task));
         }

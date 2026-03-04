@@ -15,12 +15,12 @@ mod tests {
     type TrainB = Autodiff<NdArray>;
     type InferB = NdArray;
 
-    use hehrgnn::data::batcher::{HehrBatcher, HehrFactItem, HehrBatch};
-    use hehrgnn::data::fact::{RawFact, HehrFact};
-    use hehrgnn::data::vocab::KgVocabulary;
-    use hehrgnn::training::train::{train, TrainConfig};
-    use hehrgnn::training::scoring::DistMultScorer;
     use burn::data::dataloader::batcher::Batcher;
+    use hehrgnn::data::batcher::{HehrBatch, HehrBatcher, HehrFactItem};
+    use hehrgnn::data::fact::{HehrFact, RawFact};
+    use hehrgnn::data::vocab::KgVocabulary;
+    use hehrgnn::training::scoring::DistMultScorer;
+    use hehrgnn::training::train::{TrainConfig, train};
 
     /// Build realistic financial facts.
     ///
@@ -145,16 +145,16 @@ mod tests {
 
         // ── Transaction → Amount range ──
         let tx_amounts = vec![
-            ("tx_a1", "amount_range", "small"),     // $12 at McD
-            ("tx_a2", "amount_range", "small"),     // $6 at Starbucks
-            ("tx_a3", "amount_range", "medium"),    // $85 at Walmart
-            ("tx_b1", "amount_range", "medium"),    // $45 at Shell
-            ("tx_b2", "amount_range", "medium"),    // $89 at Amazon
-            ("tx_c1", "amount_range", "small"),     // $6 at Starbucks
-            ("tx_c2", "amount_range", "medium"),    // $45 at Amazon
-            ("tx_d1", "amount_range", "medium"),    // $95 at Walmart
-            ("tx_e1", "amount_range", "small"),     // $10 at McD
-            ("tx_e2", "amount_range", "medium"),    // $42 at Shell
+            ("tx_a1", "amount_range", "small"),  // $12 at McD
+            ("tx_a2", "amount_range", "small"),  // $6 at Starbucks
+            ("tx_a3", "amount_range", "medium"), // $85 at Walmart
+            ("tx_b1", "amount_range", "medium"), // $45 at Shell
+            ("tx_b2", "amount_range", "medium"), // $89 at Amazon
+            ("tx_c1", "amount_range", "small"),  // $6 at Starbucks
+            ("tx_c2", "amount_range", "medium"), // $45 at Amazon
+            ("tx_d1", "amount_range", "medium"), // $95 at Walmart
+            ("tx_e1", "amount_range", "small"),  // $10 at McD
+            ("tx_e2", "amount_range", "medium"), // $42 at Shell
         ];
         for (h, r, t) in &tx_amounts {
             normal_facts.push(RawFact {
@@ -172,8 +172,8 @@ mod tests {
             ("walmart", "in_category", "groceries"),
             ("shell_gas", "in_category", "fuel"),
             ("amazon", "in_category", "online_shopping"),
-            ("crypto_exchange", "in_category", "crypto"),     // unusual
-            ("dark_web_store", "in_category", "illegal"),     // very unusual
+            ("crypto_exchange", "in_category", "crypto"), // unusual
+            ("dark_web_store", "in_category", "illegal"), // very unusual
         ];
         for (h, r, t) in &categories {
             normal_facts.push(RawFact {
@@ -190,36 +190,48 @@ mod tests {
 
         // 🚨 Alice at CryptoExchange — she's never done crypto
         anomaly_facts.push(RawFact {
-            head: "alice".into(), relation: "transacts_at".into(),
-            tail: "crypto_exchange".into(), qualifiers: vec![],
+            head: "alice".into(),
+            relation: "transacts_at".into(),
+            tail: "crypto_exchange".into(),
+            qualifiers: vec![],
         });
 
         // 🚨 Eve at Amazon — she ONLY uses McD + Shell Gas
         anomaly_facts.push(RawFact {
-            head: "eve".into(), relation: "transacts_at".into(),
-            tail: "amazon".into(), qualifiers: vec![],
+            head: "eve".into(),
+            relation: "transacts_at".into(),
+            tail: "amazon".into(),
+            qualifiers: vec![],
         });
 
         // 🚨 tx_ANOM1 with "huge" amount at McDonalds
         anomaly_facts.push(RawFact {
-            head: "tx_ANOM1".into(), relation: "at_merchant".into(),
-            tail: "mcdonalds".into(), qualifiers: vec![],
+            head: "tx_ANOM1".into(),
+            relation: "at_merchant".into(),
+            tail: "mcdonalds".into(),
+            qualifiers: vec![],
         });
         anomaly_facts.push(RawFact {
-            head: "tx_ANOM1".into(), relation: "amount_range".into(),
-            tail: "huge".into(), qualifiers: vec![],
+            head: "tx_ANOM1".into(),
+            relation: "amount_range".into(),
+            tail: "huge".into(),
+            qualifiers: vec![],
         });
 
         // 🚨 Bob at dark_web_store — nobody shops there
         anomaly_facts.push(RawFact {
-            head: "bob".into(), relation: "transacts_at".into(),
-            tail: "dark_web_store".into(), qualifiers: vec![],
+            head: "bob".into(),
+            relation: "transacts_at".into(),
+            tail: "dark_web_store".into(),
+            qualifiers: vec![],
         });
 
         // 🚨 Unknown user at normal merchant
         anomaly_facts.push(RawFact {
-            head: "unknown_user".into(), relation: "transacts_at".into(),
-            tail: "walmart".into(), qualifiers: vec![],
+            head: "unknown_user".into(),
+            relation: "transacts_at".into(),
+            tail: "walmart".into(),
+            qualifiers: vec![],
         });
 
         (normal_facts, anomaly_facts)
@@ -236,22 +248,34 @@ mod tests {
         println!("  ═══════════════════════════════════════════════════════════════\n");
 
         // Build vocabulary from ALL facts (normal + anomaly entities must be in vocab)
-        let all_raw: Vec<RawFact> = normal_facts.iter().chain(anomaly_facts.iter()).cloned().collect();
+        let all_raw: Vec<RawFact> = normal_facts
+            .iter()
+            .chain(anomaly_facts.iter())
+            .cloned()
+            .collect();
         let vocab = KgVocabulary::from_facts(&all_raw);
 
-        println!("  Vocabulary: {} entities, {} relations\n", 
-            vocab.num_entities(), vocab.num_relations());
+        println!(
+            "  Vocabulary: {} entities, {} relations\n",
+            vocab.num_entities(),
+            vocab.num_relations()
+        );
 
         // Convert to indexed facts
-        let normal_indexed: Vec<HehrFact> = normal_facts.iter()
+        let normal_indexed: Vec<HehrFact> = normal_facts
+            .iter()
             .filter_map(|f| HehrFact::from_raw(f, &vocab))
             .collect();
-        let anomaly_indexed: Vec<HehrFact> = anomaly_facts.iter()
+        let anomaly_indexed: Vec<HehrFact> = anomaly_facts
+            .iter()
             .filter_map(|f| HehrFact::from_raw(f, &vocab))
             .collect();
 
         println!("  Normal facts:  {} (train set)", normal_indexed.len());
-        println!("  Anomaly facts: {} (to be scored)\n", anomaly_indexed.len());
+        println!(
+            "  Anomaly facts: {} (to be scored)\n",
+            anomaly_indexed.len()
+        );
 
         // Train HEHRGNN on normal facts only
         let train_config = TrainConfig {
@@ -292,7 +316,10 @@ mod tests {
 
         let mut normal_scores: Vec<f32> = Vec::new();
         for fact in &normal_indexed {
-            let item = HehrFactItem { fact: fact.clone(), label: 1.0 };
+            let item = HehrFactItem {
+                fact: fact.clone(),
+                label: 1.0,
+            };
             let batch: HehrBatch<InferB> = batcher.batch(vec![item], &infer_device);
             let score = model.score_batch(&batch, &scorer);
             let val: f32 = score.into_data().as_slice::<f32>().expect("score")[0];
@@ -300,22 +327,34 @@ mod tests {
         }
 
         let avg_normal = normal_scores.iter().sum::<f32>() / normal_scores.len() as f32;
-        let std_normal = (normal_scores.iter()
-            .map(|s| (s - avg_normal).powi(2)).sum::<f32>()
-            / normal_scores.len() as f32).sqrt();
+        let std_normal = (normal_scores
+            .iter()
+            .map(|s| (s - avg_normal).powi(2))
+            .sum::<f32>()
+            / normal_scores.len() as f32)
+            .sqrt();
 
-        println!("  Normal facts: avg score = {:.4}, std = {:.4}", avg_normal, std_normal);
+        println!(
+            "  Normal facts: avg score = {:.4}, std = {:.4}",
+            avg_normal, std_normal
+        );
 
         // ── Score anomalous facts ──
         println!();
-        println!("  {:>30} │ {:>8} │ {:>10} │ {}", "Anomalous Fact", "Score", "Z from μ", "Verdict");
+        println!(
+            "  {:>30} │ {:>8} │ {:>10} │ {}",
+            "Anomalous Fact", "Score", "Z from μ", "Verdict"
+        );
         println!("  ──────────────────────────────┼──────────┼────────────┼─────────");
 
         let threshold = avg_normal - 1.5 * std_normal; // anomalies score BELOW normal
 
         let mut anomaly_scores = Vec::new();
         for (i, fact) in anomaly_indexed.iter().enumerate() {
-            let item = HehrFactItem { fact: fact.clone(), label: 1.0 };
+            let item = HehrFactItem {
+                fact: fact.clone(),
+                label: 1.0,
+            };
             let batch: HehrBatch<InferB> = batcher.batch(vec![item], &infer_device);
             let score = model.score_batch(&batch, &scorer);
             let val: f32 = score.into_data().as_slice::<f32>().expect("score")[0];
@@ -332,7 +371,10 @@ mod tests {
                 "   normal"
             };
 
-            println!("  {:>30} │ {:>8.4} │ {:>+9.2}σ │ {}", fact_str, val, z_score, verdict);
+            println!(
+                "  {:>30} │ {:>8.4} │ {:>+9.2}σ │ {}",
+                fact_str, val, z_score, verdict
+            );
         }
 
         let avg_anomaly = anomaly_scores.iter().sum::<f32>() / anomaly_scores.len().max(1) as f32;
@@ -342,23 +384,49 @@ mod tests {
         println!("    Normal facts avg score:  {:.4}", avg_normal);
         println!("    Anomaly facts avg score: {:.4}", avg_anomaly);
         println!("    Threshold (μ-1.5σ):      {:.4}", threshold);
-        println!("    Normal > Anomaly:        {} (gap: {:.4})", avg_normal > avg_anomaly, avg_normal - avg_anomaly);
+        println!(
+            "    Normal > Anomaly:        {} (gap: {:.4})",
+            avg_normal > avg_anomaly,
+            avg_normal - avg_anomaly
+        );
 
         let detected = anomaly_scores.iter().filter(|&&s| s < threshold).count();
-        println!("    Anomalies flagged:       {}/{}", detected, anomaly_scores.len());
+        println!(
+            "    Anomalies flagged:       {}/{}",
+            detected,
+            anomaly_scores.len()
+        );
 
         // ── Compare individual normal vs anomaly scores ──
         println!("\n  ── SCORE DISTRIBUTION ──\n");
-        
+
         let mut sorted_normal = normal_scores.clone();
         sorted_normal.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-        
-        println!("    Normal facts - top 5 scores:    {:?}", 
-            sorted_normal.iter().take(5).map(|s| format!("{:.3}", s)).collect::<Vec<_>>());
-        println!("    Normal facts - bottom 5 scores: {:?}", 
-            sorted_normal.iter().rev().take(5).map(|s| format!("{:.3}", s)).collect::<Vec<_>>());
-        println!("    Anomaly facts - all scores:     {:?}", 
-            anomaly_scores.iter().map(|s| format!("{:.3}", s)).collect::<Vec<_>>());
+
+        println!(
+            "    Normal facts - top 5 scores:    {:?}",
+            sorted_normal
+                .iter()
+                .take(5)
+                .map(|s| format!("{:.3}", s))
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "    Normal facts - bottom 5 scores: {:?}",
+            sorted_normal
+                .iter()
+                .rev()
+                .take(5)
+                .map(|s| format!("{:.3}", s))
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "    Anomaly facts - all scores:     {:?}",
+            anomaly_scores
+                .iter()
+                .map(|s| format!("{:.3}", s))
+                .collect::<Vec<_>>()
+        );
 
         println!("\n  ═══════════════════════════════════════════════════════════════\n");
 

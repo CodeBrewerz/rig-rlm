@@ -51,8 +51,7 @@ mod tests {
 
     #[tokio::test]
     async fn insert_adds_to_history() {
-        let m = AgentMonad::insert(Role::User, "test message")
-            .then(AgentMonad::pure("done"));
+        let m = AgentMonad::insert(Role::User, "test message").then(AgentMonad::pure("done"));
         let mut ctx = test_context();
         let result = ctx.run(m).await.unwrap();
 
@@ -78,8 +77,7 @@ mod tests {
 
     #[tokio::test]
     async fn capture_and_retrieve_roundtrip() {
-        let m = AgentMonad::capture("key", "value123")
-            .then(AgentMonad::retrieve("key"));
+        let m = AgentMonad::capture("key", "value123").then(AgentMonad::retrieve("key"));
         let mut ctx = test_context();
         let result = ctx.run(m).await.unwrap();
         assert_eq!(result, "value123");
@@ -107,8 +105,7 @@ mod tests {
 
     #[tokio::test]
     async fn log_action_succeeds() {
-        let m = AgentMonad::log(LogLevel::Info, "test log message")
-            .then(AgentMonad::pure("ok"));
+        let m = AgentMonad::log(LogLevel::Info, "test log message").then(AgentMonad::pure("ok"));
         let mut ctx = test_context();
         let result = ctx.run(m).await.unwrap();
         assert_eq!(result, "ok");

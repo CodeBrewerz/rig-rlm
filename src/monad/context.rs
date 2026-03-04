@@ -309,10 +309,7 @@ impl AgentContext {
     /// Called at session end. Uses a quick LLM call to identify preferences,
     /// decisions, facts, and learnings worth remembering. Each extracted memory
     /// is embedded and stored in the `memories` table for future recall.
-    pub async fn extract_and_store_memories(
-        &self,
-        session_id: &str,
-    ) -> anyhow::Result<usize> {
+    pub async fn extract_and_store_memories(&self, session_id: &str) -> anyhow::Result<usize> {
         use crate::persistence::{AgentStore, Memory};
 
         // Build a summary of the conversation for extraction
@@ -373,10 +370,7 @@ impl AgentContext {
                 Some(c) if !c.is_empty() => c,
                 _ => continue,
             };
-            let category = mem_val["category"]
-                .as_str()
-                .unwrap_or("fact")
-                .to_string();
+            let category = mem_val["category"].as_str().unwrap_or("fact").to_string();
 
             // Embed the memory content
             let embedding = match self.provider.embed(content).await {
@@ -413,11 +407,7 @@ impl AgentContext {
     ///
     /// Embeds the task description, queries the vector index for top-K matches,
     /// and returns a formatted string suitable for injection into the system prompt.
-    pub async fn recall_relevant_memories(
-        &self,
-        task: &str,
-        top_k: usize,
-    ) -> Option<String> {
+    pub async fn recall_relevant_memories(&self, task: &str, top_k: usize) -> Option<String> {
         use crate::persistence::AgentStore;
 
         // Embed the task
@@ -450,12 +440,13 @@ impl AgentContext {
             return None;
         }
 
-        eprintln!(
-            "\n• Recalled {} memories for task",
-            memories.len()
-        );
+        eprintln!("\n• Recalled {} memories for task", memories.len());
         for m in &memories {
-            eprintln!("  └ [{}] {}", m.category, &m.content[..m.content.len().min(80)]);
+            eprintln!(
+                "  └ [{}] {}",
+                m.category,
+                &m.content[..m.content.len().min(80)]
+            );
         }
 
         Some(AgentStore::format_memories_for_prompt(&memories))
@@ -567,9 +558,17 @@ impl AgentContext {
                 .map_err(|reason| AgentError::PermissionDenied(reason))?;
 
             match action {
-                Action::Insert { role, content, attachments } => {
+                Action::Insert {
+                    role,
+                    content,
+                    attachments,
+                } => {
                     debug!(role = %role, len = content.len(), attachments = attachments.len(), "inserting message");
-                    self.history.push(HistoryMessage { role, content: std::borrow::Cow::Owned(content), attachments });
+                    self.history.push(HistoryMessage {
+                        role,
+                        content: std::borrow::Cow::Owned(content),
+                        attachments,
+                    });
                     Ok(ActionOutput::Unit)
                 }
 
@@ -935,8 +934,7 @@ impl AgentContext {
 
                     // ── Codex-style: Agent spawned traces ──
                     for spec in orchestrator.specs() {
-                        let prompt_preview: String =
-                            spec.task.chars().take(120).collect();
+                        let prompt_preview: String = spec.task.chars().take(120).collect();
                         eprintln!(
                             "\n• Agent spawned\n  └ name: \"{}\"\n    status: pending init\n    prompt: {prompt_preview}...",
                             spec.name
@@ -992,8 +990,7 @@ impl AgentContext {
                                 match sub_result {
                                     Ok(answer) => {
                                         // ── Codex-style: Agent complete with snapshot ──
-                                        let snapshot: String =
-                                            answer.chars().take(150).collect();
+                                        let snapshot: String = answer.chars().take(150).collect();
                                         eprintln!(
                                             "\n• Agent complete\n  └ name: \"{}\"\n    status: success\n    duration: {:.1}s, {} turns\n    snapshot: {snapshot}...",
                                             spec.name,
@@ -1107,7 +1104,8 @@ impl AgentContext {
                                 match handle.await {
                                     Ok(result) => {
                                         completed += 1;
-                                        let status = if result.success { "success" } else { "error" };
+                                        let status =
+                                            if result.success { "success" } else { "error" };
                                         let snapshot: String = if result.success {
                                             result.answer.chars().take(150).collect()
                                         } else {
@@ -1441,11 +1439,9 @@ impl AgentContext {
         // Record cost (Tier 1.2)
         let input_tokens = usage.input_tokens.unwrap_or(0) as u64;
         let output_tokens = usage.output_tokens.unwrap_or(0) as u64;
-        let call_cost = self.cost_tracker.record(
-            &self.config.provider.model,
-            input_tokens,
-            output_tokens,
-        );
+        let call_cost =
+            self.cost_tracker
+                .record(&self.config.provider.model, input_tokens, output_tokens);
         if call_cost > 0.0 {
             eprintln!(
                 "💰 [cost] ${:.6} this call, ${:.6} cumulative",

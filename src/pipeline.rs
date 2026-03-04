@@ -8,12 +8,12 @@
 //! - `DelegateToSubAgents`: Fan-out to multiple sub-agents with code chunks
 //! - `SubAgentConfig`: Configuration for sub-agent spawning
 
-use dspy_rs::*;
-use crate::monad::{AgentConfig, AgentContext};
+use crate::chunking::ast::CodeChunk;
 use crate::monad::interaction::agent_task;
 use crate::monad::provider::ProviderConfig;
-use crate::chunking::ast::CodeChunk;
+use crate::monad::{AgentConfig, AgentContext};
 use crate::sandbox::ExecutorKind;
+use dspy_rs::*;
 
 // ─── Sub-Agent Spawning ──────────────────────────────────────
 
@@ -136,7 +136,8 @@ pub fn aggregate_results(results: &[SubAgentResult]) -> String {
     let successful = results.iter().filter(|r| r.success).count();
     summary.push_str(&format!(
         "Sub-agent analysis complete: {}/{} chunks analyzed successfully.\n\n",
-        successful, results.len()
+        successful,
+        results.len()
     ));
 
     for (i, result) in results.iter().enumerate() {
@@ -144,12 +145,16 @@ pub fn aggregate_results(results: &[SubAgentResult]) -> String {
         if result.success {
             summary.push_str(&format!(
                 "--- Chunk {} ({}) ---\n{}\n\n",
-                i + 1, label, result.output
+                i + 1,
+                label,
+                result.output
             ));
         } else {
             summary.push_str(&format!(
                 "--- Chunk {} ({}) --- FAILED\n{}\n\n",
-                i + 1, label, result.output
+                i + 1,
+                label,
+                result.output
             ));
         }
     }
@@ -202,7 +207,6 @@ where
         self.stage_b.forward(b_input).await
     }
 }
-
 
 // ─── Helper trait extension for CodeChunk ────────────────────
 

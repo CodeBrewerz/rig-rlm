@@ -26,13 +26,13 @@ mod tests {
 
     type B = NdArray;
 
-    use hehrgnn::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
+    use hehrgnn::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
     use hehrgnn::data::hetero_graph::EdgeType;
+    use hehrgnn::feedback::collector::{FeedbackEntry, FeedbackStore, PredictionRecord, Verdict};
+    use hehrgnn::feedback::retrainer::{RetrainConfig, feedback_to_signals, should_retrain};
+    use hehrgnn::ingest::feature_engineer::{FeatureConfig, engineer_features, feature_stats};
+    use hehrgnn::ingest::json_loader::{build_graph_from_export, load_from_json, summarize};
     use hehrgnn::model::graphsage::GraphSageModelConfig;
-    use hehrgnn::ingest::json_loader::{load_from_json, build_graph_from_export, summarize};
-    use hehrgnn::ingest::feature_engineer::{engineer_features, feature_stats, FeatureConfig};
-    use hehrgnn::feedback::collector::{FeedbackStore, FeedbackEntry, PredictionRecord, Verdict};
-    use hehrgnn::feedback::retrainer::{feedback_to_signals, should_retrain, RetrainConfig};
     use hehrgnn::server::state::PlainEmbeddings;
 
     /// Build a ground-truth finance graph with known structure.
@@ -89,7 +89,8 @@ mod tests {
         let config = GraphBuildConfig {
             node_feat_dim: 16,
             add_reverse_edges: true,
-            add_self_loops: true, add_positional_encoding: true,
+            add_self_loops: true,
+            add_positional_encoding: true,
         };
         let graph = build_hetero_graph::<B>(&facts, &config, &device);
 
@@ -108,9 +109,15 @@ mod tests {
 
         // Verify we got embeddings for all types
         assert!(emb_initial.get("user").is_some(), "Missing user embeddings");
-        assert!(emb_initial.get("account").is_some(), "Missing account embeddings");
+        assert!(
+            emb_initial.get("account").is_some(),
+            "Missing account embeddings"
+        );
         assert!(emb_initial.get("tx").is_some(), "Missing tx embeddings");
-        assert!(emb_initial.get("merchant").is_some(), "Missing merchant embeddings");
+        assert!(
+            emb_initial.get("merchant").is_some(),
+            "Missing merchant embeddings"
+        );
 
         // Verify correct shapes
         let user_emb = emb_initial.get("user").unwrap();
@@ -128,7 +135,11 @@ mod tests {
         assert_eq!(graph.node_counts["merchant"], 5);
         assert_eq!(graph.total_nodes(), 25);
 
-        println!("✅ GNN produces correct shapes: {} nodes, {} edges", graph.total_nodes(), graph.total_edges());
+        println!(
+            "✅ GNN produces correct shapes: {} nodes, {} edges",
+            graph.total_nodes(),
+            graph.total_edges()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -142,7 +153,8 @@ mod tests {
         let config = GraphBuildConfig {
             node_feat_dim: 16,
             add_reverse_edges: true,
-            add_self_loops: true, add_positional_encoding: true,
+            add_self_loops: true,
+            add_positional_encoding: true,
         };
         let graph = build_hetero_graph::<B>(&facts, &config, &device);
 
@@ -179,21 +191,38 @@ mod tests {
 
             let rank = scores.iter().position(|(id, _)| *id == gt_acct_id).unwrap() + 1;
 
-            if rank == 1 { correct_top1 += 1; }
-            if rank <= 3 { correct_top3 += 1; }
+            if rank == 1 {
+                correct_top1 += 1;
+            }
+            if rank <= 3 {
+                correct_top3 += 1;
+            }
         }
 
         let total = ground_truth.len();
         let hit_at_3_rate = correct_top3 as f64 / total as f64;
 
         println!("  Match Ranking Results:");
-        println!("    Hit@1: {}/{} ({:.0}%)", correct_top1, total, correct_top1 as f64 / total as f64 * 100.0);
-        println!("    Hit@3: {}/{} ({:.0}%)", correct_top3, total, hit_at_3_rate * 100.0);
+        println!(
+            "    Hit@1: {}/{} ({:.0}%)",
+            correct_top1,
+            total,
+            correct_top1 as f64 / total as f64 * 100.0
+        );
+        println!(
+            "    Hit@3: {}/{} ({:.0}%)",
+            correct_top3,
+            total,
+            hit_at_3_rate * 100.0
+        );
 
         // With GNN message passing, connected tx-account pairs should score
         // higher than random. We need at least some correct matches.
         // Even random would give 1/5 = 20% Hit@1, so any hit is good.
-        assert!(correct_top3 > 0, "GNN should rank at least some ground-truth matches in top 3");
+        assert!(
+            correct_top3 > 0,
+            "GNN should rank at least some ground-truth matches in top 3"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -207,7 +236,8 @@ mod tests {
         let config = GraphBuildConfig {
             node_feat_dim: 16,
             add_reverse_edges: true,
-            add_self_loops: true, add_positional_encoding: true,
+            add_self_loops: true,
+            add_positional_encoding: true,
         };
         let graph = build_hetero_graph::<B>(&facts, &config, &device);
 
@@ -265,7 +295,8 @@ mod tests {
         let config = GraphBuildConfig {
             node_feat_dim: 16,
             add_reverse_edges: true,
-            add_self_loops: true, add_positional_encoding: true,
+            add_self_loops: true,
+            add_positional_encoding: true,
         };
         let graph = build_hetero_graph::<B>(&facts, &config, &device);
 
@@ -310,11 +341,17 @@ mod tests {
         println!("  Anomaly Detection Results:");
         println!("    Normal tx avg L2: {:.4}", avg_normal_score);
         println!("    Outlier tx L2:    {:.4}", outlier_score);
-        println!("    Outlier / Normal: {:.2}x", outlier_score / avg_normal_score.max(1e-8));
+        println!(
+            "    Outlier / Normal: {:.2}x",
+            outlier_score / avg_normal_score.max(1e-8)
+        );
 
         // The outlier should exist and have a computable score
         assert!(outlier_score.is_finite(), "Outlier score should be finite");
-        assert!(avg_normal_score.is_finite(), "Normal scores should be finite");
+        assert!(
+            avg_normal_score.is_finite(),
+            "Normal scores should be finite"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -358,7 +395,8 @@ mod tests {
         let graph_config = GraphBuildConfig {
             node_feat_dim: 16,
             add_reverse_edges: true,
-            add_self_loops: true, add_positional_encoding: true,
+            add_self_loops: true,
+            add_positional_encoding: true,
         };
         let mut graph = build_graph_from_export::<B>(&export, &graph_config, &device);
 
@@ -371,9 +409,15 @@ mod tests {
         let stats = feature_stats(&graph);
 
         println!("  JSON Ingest Pipeline:");
-        println!("    Entities: {}, Relations: {}", summary.num_entities, summary.num_relations);
+        println!(
+            "    Entities: {}, Relations: {}",
+            summary.num_entities, summary.num_relations
+        );
         for s in &stats {
-            println!("    {}: {} nodes, dim={}, mean_mag={:.4}", s.node_type, s.num_nodes, s.feature_dim, s.mean_magnitude);
+            println!(
+                "    {}: {} nodes, dim={}, mean_mag={:.4}",
+                s.node_type, s.num_nodes, s.feature_dim, s.mean_magnitude
+            );
         }
 
         // Step 4: Run GNN
@@ -393,7 +437,8 @@ mod tests {
         for nt in &node_types {
             assert!(
                 embeddings.data.contains_key(nt),
-                "Missing embeddings for type '{}'", nt
+                "Missing embeddings for type '{}'",
+                nt
             );
         }
 
@@ -423,9 +468,12 @@ mod tests {
             timestamp: "2026-01-01T00:00:00Z".into(),
             prediction_type: "match".into(),
             prediction: PredictionRecord {
-                src_type: "tx".into(), src_id: 0,
-                dst_type: Some("account".into()), dst_id: Some(0),
-                predicted_class: None, predicted_score: Some(0.95),
+                src_type: "tx".into(),
+                src_id: 0,
+                dst_type: Some("account".into()),
+                dst_id: Some(0),
+                predicted_class: None,
+                predicted_score: Some(0.95),
             },
             verdict: Verdict::Accepted,
             correction: None,
@@ -437,9 +485,12 @@ mod tests {
             timestamp: "2026-01-01T00:01:00Z".into(),
             prediction_type: "match".into(),
             prediction: PredictionRecord {
-                src_type: "tx".into(), src_id: 2,
-                dst_type: Some("account".into()), dst_id: Some(0),
-                predicted_class: None, predicted_score: Some(0.6),
+                src_type: "tx".into(),
+                src_id: 2,
+                dst_type: Some("account".into()),
+                dst_id: Some(0),
+                predicted_class: None,
+                predicted_score: Some(0.6),
             },
             verdict: Verdict::Corrected,
             correction: Some(hehrgnn::feedback::collector::CorrectionRecord {
@@ -455,9 +506,12 @@ mod tests {
             timestamp: "2026-01-01T00:02:00Z".into(),
             prediction_type: "classify".into(),
             prediction: PredictionRecord {
-                src_type: "tx".into(), src_id: 5,
-                dst_type: None, dst_id: None,
-                predicted_class: Some(2), predicted_score: Some(0.4),
+                src_type: "tx".into(),
+                src_id: 5,
+                dst_type: None,
+                dst_id: None,
+                predicted_class: Some(2),
+                predicted_score: Some(0.4),
             },
             verdict: Verdict::Rejected,
             correction: None,
@@ -483,15 +537,22 @@ mod tests {
         println!("    Entries: {}", stats.total_entries);
         println!("    Signals: {}", signals.len());
         for s in &signals {
-            println!("      {:?} src={}:{} dst={:?}:{:?} label={} weight={}",
-                s.signal_type, s.src_type, s.src_id,
-                s.dst_type, s.dst_id, s.label, s.weight);
+            println!(
+                "      {:?} src={}:{} dst={:?}:{:?} label={} weight={}",
+                s.signal_type, s.src_type, s.src_id, s.dst_type, s.dst_id, s.label, s.weight
+            );
         }
 
         // Check retrain decision
         let decision = should_retrain(&store, &retrain_config);
-        assert!(decision.should_retrain, "Should trigger retrain with 3 entries (min=2)");
-        println!("    Retrain: {} ({})", decision.should_retrain, decision.reason);
+        assert!(
+            decision.should_retrain,
+            "Should trigger retrain with 3 entries (min=2)"
+        );
+        println!(
+            "    Retrain: {} ({})",
+            decision.should_retrain, decision.reason
+        );
 
         // Verify signals:
         // - Match accepted: 1 positive pair (weight 0.5)
@@ -514,7 +575,8 @@ mod tests {
         let config = GraphBuildConfig {
             node_feat_dim: 16,
             add_reverse_edges: true,
-            add_self_loops: true, add_positional_encoding: true,
+            add_self_loops: true,
+            add_positional_encoding: true,
         };
         let graph = build_hetero_graph::<B>(&facts, &config, &device);
 
@@ -523,14 +585,21 @@ mod tests {
 
         // GraphSAGE
         let sage_config = GraphSageModelConfig {
-            in_dim: 16, hidden_dim: 32, num_layers: 2, dropout: 0.0,
+            in_dim: 16,
+            hidden_dim: 32,
+            num_layers: 2,
+            dropout: 0.0,
         };
         let sage_model = sage_config.init::<B>(&node_types, &edge_types, &device);
         let sage_emb = PlainEmbeddings::from_burn(&sage_model.forward(&graph));
 
         // RGCN
         let rgcn_config = RgcnConfig {
-            in_dim: 16, hidden_dim: 32, num_layers: 2, num_bases: 0, dropout: 0.0,
+            in_dim: 16,
+            hidden_dim: 32,
+            num_layers: 2,
+            num_bases: 0,
+            dropout: 0.0,
         };
         let rgcn_model = rgcn_config.init_model::<B>(&node_types, &edge_types, &device);
         let rgcn_emb = PlainEmbeddings::from_burn(&rgcn_model.forward(&graph));
@@ -539,8 +608,12 @@ mod tests {
         for nt in &node_types {
             let sage_nodes = &sage_emb.data[nt];
             let rgcn_nodes = &rgcn_emb.data[nt];
-            assert_eq!(sage_nodes.len(), rgcn_nodes.len(),
-                "Both models should produce same node counts for {}", nt);
+            assert_eq!(
+                sage_nodes.len(),
+                rgcn_nodes.len(),
+                "Both models should produce same node counts for {}",
+                nt
+            );
 
             // Check embeddings are different (different models = different weights)
             if !sage_nodes.is_empty() {

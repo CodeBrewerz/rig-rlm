@@ -280,13 +280,14 @@ fn extract_thinking_text(raw: &str) -> String {
 
     // Find the earliest structured block marker
     let markers = [
-        "```repl", "```python", "```diff", "```patch", "```orchestrate",
-        "```\n",  // generic code block
+        "```repl",
+        "```python",
+        "```diff",
+        "```patch",
+        "```orchestrate",
+        "```\n", // generic code block
     ];
-    let earliest = markers
-        .iter()
-        .filter_map(|m| trimmed.find(m))
-        .min();
+    let earliest = markers.iter().filter_map(|m| trimmed.find(m)).min();
 
     let text = match earliest {
         Some(pos) if pos > 0 => &trimmed[..pos],
