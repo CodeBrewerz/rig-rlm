@@ -94,8 +94,8 @@ pub async fn get_embedding(
     State(state): State<Arc<AppState>>,
     Json(req): Json<EmbeddingRequest>,
 ) -> Result<Json<EmbeddingResponse>, (StatusCode, String)> {
-    let nodes = state
-        .embeddings
+    let emb_guard = state.embeddings.read().unwrap();
+    let nodes = emb_guard
         .data
         .get(&req.node_type)
         .ok_or((StatusCode::NOT_FOUND, format!("Node type '{}' not found", req.node_type)))?;
@@ -185,14 +185,13 @@ pub async fn rank_matches(
     State(state): State<Arc<AppState>>,
     Json(req): Json<MatchRankRequest>,
 ) -> Result<Json<MatchRankResponse>, (StatusCode, String)> {
-    let src_nodes = state
-        .embeddings
+    let emb_guard = state.embeddings.read().unwrap();
+    let src_nodes = emb_guard
         .data
         .get(&req.src_type)
         .ok_or((StatusCode::NOT_FOUND, format!("Source type '{}' not found", req.src_type)))?;
 
-    let dst_nodes = state
-        .embeddings
+    let dst_nodes = emb_guard
         .data
         .get(&req.dst_type)
         .ok_or((StatusCode::NOT_FOUND, format!("Dest type '{}' not found", req.dst_type)))?;
@@ -339,8 +338,8 @@ pub async fn classify_nodes(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ClassifyRequest>,
 ) -> Result<Json<ClassifyResponse>, (StatusCode, String)> {
-    let nodes = state
-        .embeddings
+    let emb_guard = state.embeddings.read().unwrap();
+    let nodes = emb_guard
         .data
         .get(&req.node_type)
         .ok_or((StatusCode::NOT_FOUND, format!("Node type '{}' not found", req.node_type)))?;
@@ -472,8 +471,8 @@ pub async fn categorize_transaction(
     use crate::tasks::link_predictor::{LinkPredictorConfig, LinkPredictor};
 
     // Validate transaction node
-    let txn_emb = state
-        .embeddings
+    let emb_guard = state.embeddings.read().unwrap();
+    let txn_emb = emb_guard
         .data
         .get(&req.node_type)
         .and_then(|vecs| vecs.get(req.node_id))
@@ -485,8 +484,7 @@ pub async fn categorize_transaction(
         })?;
 
     // Get all category embeddings
-    let cat_embs: Vec<(String, usize, String, Vec<f32>)> = state
-        .embeddings
+    let cat_embs: Vec<(String, usize, String, Vec<f32>)> = state.embeddings.read().unwrap()
         .data
         .get(&req.category_type)
         .map(|vecs| {
@@ -522,7 +520,7 @@ pub async fn categorize_transaction(
 
     let predictor = LinkPredictor::new(config);
 
-    let result = predictor.predict(
+    let mut result = predictor.predict(
         txn_emb,
         &cat_embs,
         historical.as_ref().map(|(h, _)| h.as_slice()),
@@ -530,6 +528,44 @@ pub async fn categorize_transaction(
         &req.node_type,
         req.node_id,
     );
+
+    // ── Ensemble scoring: average dot-product across all 5 models ──
+    // Each model provides its own embedding perspective; averaging improves robustness.
+    {
+        let all_models = state.model_embeddings.read().unwrap();
+        let num_models = all_models.len().max(1) as f32;
+
+        for pred in &mut result.predictions {
+            let mut ensemble_score = 0.0f32;
+            let mut models_scored = 0;
+
+            for (_model_name, model_emb) in all_models.iter() {
+                let src = model_emb.data.get(&req.node_type)
+                    .and_then(|vecs| vecs.get(req.node_id));
+                let tgt = model_emb.data.get(&pred.target_type)
+                    .and_then(|vecs| vecs.get(pred.target_id));
+
+                if let (Some(s), Some(t)) = (src, tgt) {
+                    // Dot-product score
+                    let dot: f32 = s.iter().zip(t.iter()).map(|(a, b)| a * b).sum();
+                    ensemble_score += dot;
+                    models_scored += 1;
+                }
+            }
+
+            if models_scored > 0 {
+                pred.score = ensemble_score / models_scored as f32;
+            }
+        }
+
+        // Re-sort by ensemble score (descending)
+        result.predictions.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        // Re-assign ranks
+        for (i, pred) in result.predictions.iter_mut().enumerate() {
+            pred.rank = i + 1;
+            pred.source = "gnn_ensemble_5model".to_string();
+        }
+    }
 
     Ok(Json(result))
 }
@@ -599,7 +635,8 @@ fn build_historical_context(
     }
 
     // Step 4: Build historical embeddings with their category IDs
-    let txn_embs = state.embeddings.data.get(txn_type)?;
+    let emb_guard = state.embeddings.read().unwrap();
+    let txn_embs = emb_guard.data.get(txn_type)?;
     let historical_embs: Vec<(Vec<f32>, usize)> = txn_to_cat
         .iter()
         .filter_map(|(&txn, &cat)| {
@@ -859,8 +896,7 @@ pub async fn score_anomalies(
     Json(req): Json<AnomalyRequest>,
 ) -> Result<Json<AnomalyResponse>, (StatusCode, String)> {
     // Verify node type exists
-    state
-        .embeddings
+    state.embeddings.read().unwrap()
         .data
         .get(&req.node_type)
         .ok_or((StatusCode::NOT_FOUND, format!("Node type '{}' not found", req.node_type)))?;
@@ -1048,7 +1084,8 @@ pub async fn score_anomalies(
         // ── Feature 2: Feature Attribution ──
         // Use primary model (SAGE) for dimension analysis
         let feature_attr = if let Some(sage_scores) = state.precomputed.get("SAGE", &req.node_type) {
-            let node_emb = state.embeddings.data.get(&req.node_type)
+            let emb_guard = state.embeddings.read().unwrap();
+            let node_emb = emb_guard.data.get(&req.node_type)
                 .and_then(|v| v.get(node_id))
                 .map(|e| e.as_slice())
                 .unwrap_or(&[]);
@@ -1214,7 +1251,8 @@ pub async fn score_anomalies(
         };
 
         // ── Feature 7: Similar Known Cases (k-NN) ──
-        let similar_cases = if let Some(sage_vecs) = state.embeddings.data.get(&req.node_type) {
+        let emb_guard = state.embeddings.read().unwrap();
+        let similar_cases = if let Some(sage_vecs) = emb_guard.data.get(&req.node_type) {
             if let Some(query_emb) = sage_vecs.get(node_id) {
                 // Compute cosine sim to all same-type nodes, split by anomalous/normal
                 let mut all_sims: Vec<(usize, f32, f32, bool)> = sage_vecs.iter().enumerate()
@@ -1511,8 +1549,8 @@ pub async fn similarity_search(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SimilarityRequest>,
 ) -> Result<Json<SimilarityResponse>, (StatusCode, String)> {
-    let nodes = state
-        .embeddings
+    let emb_guard = state.embeddings.read().unwrap();
+    let nodes = emb_guard
         .data
         .get(&req.node_type)
         .ok_or((StatusCode::NOT_FOUND, format!("Node type '{}' not found", req.node_type)))?;
@@ -1725,8 +1763,8 @@ pub async fn fiduciary_next_actions(
     }
 
     // Get user embedding
-    let user_emb = state
-        .embeddings
+    let emb_guard = state.embeddings.read().unwrap();
+    let user_emb = emb_guard
         .data
         .get(&req.node_type)
         .and_then(|vecs| vecs.get(req.node_id))
@@ -1759,9 +1797,10 @@ pub async fn fiduciary_next_actions(
         .map(|(k, &v)| (k.clone(), v))
         .collect();
 
+    let emb_guard = state.embeddings.read().unwrap();
     let ctx = crate::eval::fiduciary::FiduciaryContext {
         user_emb,
-        embeddings: &state.embeddings.data,
+        embeddings: &emb_guard.data,
         anomaly_scores: &anomaly_scores,
         edges: &state.graph_edges.edges,
         node_names: &state.node_names,
@@ -1778,8 +1817,7 @@ pub async fn fiduciary_next_actions(
         use crate::eval::learnable_scorer::ScorerExample;
         for rec in &mut response.recommendations {
             let action_type = crate::eval::fiduciary::FiduciaryActionType::from_name(&rec.action_type);
-            let target_emb = state
-                .embeddings
+            let target_emb = state.embeddings.read().unwrap()
                 .data
                 .get(&rec.target_node_type)
                 .and_then(|vecs| vecs.get(rec.target_node_id))
@@ -1977,8 +2015,7 @@ pub async fn fiduciary_reward(
     let action_type = crate::eval::fiduciary::FiduciaryActionType::from_name(&req.action_type);
 
     // Get embeddings for user and target
-    let user_emb = state
-        .embeddings
+    let user_emb = state.embeddings.read().unwrap()
         .data
         .get(&req.node_type)
         .and_then(|vecs| vecs.get(req.node_id))
@@ -1990,8 +2027,7 @@ pub async fn fiduciary_reward(
         })?
         .clone();
 
-    let target_emb = state
-        .embeddings
+    let target_emb = state.embeddings.read().unwrap()
         .data
         .get(&req.target_node_type)
         .and_then(|vecs| vecs.get(req.target_node_id))
@@ -2184,7 +2220,7 @@ pub async fn retrain(
             in_dim: actual_feat_dim, hidden_dim, num_layers: 2, dropout: 0.0,
         }.init::<B>(&node_types, &edge_types, &device);
         sage.attach_adapter(init_hetero_basis_adapter(
-            hidden_dim, hidden_dim, &LoraConfig::default(), node_types.clone(), &device,
+            actual_feat_dim, hidden_dim, &LoraConfig::default(), node_types.clone(), &device,
         ));
         let fwd = |g: &crate::data::hetero_graph::HeteroGraph<B>| sage.forward(g);
         let report = train_jepa(&mut graph, &fwd, &train_config, 0.1, 0.5, false);
@@ -2347,8 +2383,8 @@ pub async fn predict_pql(
     };
 
     // Get source embedding
-    let src_emb = state
-        .embeddings
+    let emb_guard = state.embeddings.read().unwrap();
+    let src_emb = emb_guard
         .data
         .get(&task.source_type)
         .and_then(|vecs| vecs.get(req.source_node_id))
@@ -2360,8 +2396,7 @@ pub async fn predict_pql(
         })?;
 
     // Get all target embeddings
-    let tgt_embs: Vec<(String, usize, String, Vec<f32>)> = state
-        .embeddings
+    let tgt_embs: Vec<(String, usize, String, Vec<f32>)> = emb_guard
         .data
         .get(&task.target_type)
         .map(|vecs| {
@@ -2443,8 +2478,8 @@ pub async fn explain_link(
 ) -> Result<Json<ExplainResponse>, (StatusCode, String)> {
     use crate::tasks::link_predictor::explain_prediction;
 
-    let src_emb = state
-        .embeddings
+    let emb_guard = state.embeddings.read().unwrap();
+    let src_emb = emb_guard
         .data
         .get(&req.source_type)
         .and_then(|vecs| vecs.get(req.source_id))
@@ -2455,8 +2490,7 @@ pub async fn explain_link(
             )
         })?;
 
-    let tgt_emb = state
-        .embeddings
+    let tgt_emb = emb_guard
         .data
         .get(&req.target_type)
         .and_then(|vecs| vecs.get(req.target_id))
@@ -2521,5 +2555,147 @@ pub async fn explain_link(
         base_score,
         feature_importances: importances,
         explanation,
+    }))
+}
+
+// ===========================================================================
+// Graph Mutation — InstantGNN incremental updates (KDD 2022)
+// ===========================================================================
+
+#[derive(Deserialize)]
+pub struct GraphMutateRequest {
+    pub events: Vec<crate::data::graph_mutation::GraphEvent>,
+}
+
+#[derive(Serialize)]
+pub struct GraphMutateResponse {
+    pub events_processed: usize,
+    pub nodes_updated: usize,
+    pub cumulative_drift: f64,
+    pub drift_delta: f64,
+    pub retrain_recommended: bool,
+    pub retrain_status: crate::tasks::adaptive_retrain::RetrainStatus,
+    pub affected_types: Vec<String>,
+    pub total_mutations: usize,
+    /// True if this mutation triggered an automatic background retrain (drift > θ).
+    pub auto_retrain_triggered: bool,
+}
+
+pub async fn graph_mutate(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<GraphMutateRequest>,
+) -> Result<Json<GraphMutateResponse>, (StatusCode, String)> {
+    if req.events.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "No events provided".into()));
+    }
+
+    // Apply mutations via InstantGNN propagation
+    let mutation_result = {
+        let mut prop = state.propagation.lock().map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {}", e))
+        })?;
+        let result = prop.apply_mutations(&req.events);
+
+        // Push updated embeddings into the live RwLock so predictions use them
+        let updated = prop.extract_embeddings();
+        {
+            // Update SAGE embeddings (primary prediction source)
+            let mut emb = state.embeddings.write().map_err(|e| {
+                (StatusCode::INTERNAL_SERVER_ERROR, format!("RwLock error: {}", e))
+            })?;
+            let hidden_dim = emb.hidden_dim;
+            for (node_type, vecs) in &updated {
+                emb.data.insert(node_type.clone(), vecs.clone());
+            }
+            emb.hidden_dim = hidden_dim;
+        }
+        {
+            // Update ALL 5 models (SAGE, RGCN, GAT, GT, HEHRGNN)
+            let mut all_models = state.model_embeddings.write().map_err(|e| {
+                (StatusCode::INTERNAL_SERVER_ERROR, format!("RwLock error: {}", e))
+            })?;
+            for (_model_name, model_emb) in all_models.iter_mut() {
+                let hidden_dim = model_emb.hidden_dim;
+                for (node_type, vecs) in &updated {
+                    model_emb.data.insert(node_type.clone(), vecs.clone());
+                }
+                model_emb.hidden_dim = hidden_dim;
+            }
+        }
+
+        result
+    };
+
+    // Update retrain monitor with drift
+    let retrain_status = {
+        let mut monitor = state.retrain_monitor.lock().map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {}", e))
+        })?;
+        monitor.record_drift(mutation_result.drift_delta);
+        monitor.status()
+    };
+
+    // Log mutations
+    {
+        let mut log = state.mutation_log.lock().map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {}", e))
+        })?;
+        log.extend(req.events.clone());
+    }
+
+    let total_mutations = state
+        .mutation_log
+        .lock()
+        .map(|l| l.len())
+        .unwrap_or(0);
+
+    // Auto-retrain: when drift exceeds θ, spawn background retrain (all 5 models + GEPA)
+    let auto_retrain_triggered = if retrain_status.retrain_recommended {
+        println!("  🔄 Auto-retrain triggered! Drift {:.4} > θ {:.4}. Spawning background retrain...",
+            retrain_status.cumulative_drift, retrain_status.threshold);
+
+        // Reset drift monitor so we don't re-trigger
+        {
+            let mut monitor = state.retrain_monitor.lock().unwrap();
+            monitor.record_retrain(&super::state::chrono_now());
+        }
+
+        // Reset propagation drift
+        {
+            let mut prop = state.propagation.lock().unwrap();
+            prop.reset_drift();
+        }
+
+        // Spawn background retrain task
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            println!("  🔄 [background] Starting full retrain (all 5 models + GEPA)...");
+            let req = RetrainRequest {
+                epochs: 15,
+                lr: 0.01,
+            };
+            let result = retrain(
+                axum::extract::State(state_clone),
+                axum::Json(req),
+            ).await;
+            println!("  🔄 [background] Retrain complete: {} models retrained",
+                result.0.models_retrained.len());
+        });
+
+        true
+    } else {
+        false
+    };
+
+    Ok(Json(GraphMutateResponse {
+        events_processed: mutation_result.events_processed,
+        nodes_updated: mutation_result.nodes_updated,
+        cumulative_drift: mutation_result.cumulative_drift,
+        drift_delta: mutation_result.drift_delta,
+        retrain_recommended: retrain_status.retrain_recommended,
+        retrain_status,
+        affected_types: mutation_result.affected_types,
+        total_mutations,
+        auto_retrain_triggered,
     }))
 }

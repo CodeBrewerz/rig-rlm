@@ -89,6 +89,7 @@ async fn main() {
         .route("/retrain", post(handlers::retrain))
         .route("/predict/pql", post(handlers::predict_pql))
         .route("/explain", post(handlers::explain_link))
+        .route("/graph/mutate", post(handlers::graph_mutate))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
@@ -111,6 +112,7 @@ async fn main() {
     println!("    POST /retrain             — retrain all models + save checkpoints");
     println!("    POST /predict/pql         — PQL predictive query (PREDICT ... FOR ... VIA ...)");
     println!("    POST /explain             — feature importance explainability");
+    println!("    POST /graph/mutate        — incremental graph update (InstantGNN)");
     println!();
 
     let listener = tokio::net::TcpListener::bind(&bind)

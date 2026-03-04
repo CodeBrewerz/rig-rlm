@@ -5,7 +5,7 @@
 //! This makes the state `Send + Sync` as required by axum.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Returns current UTC timestamp as ISO 8601 string (no chrono dep).
 pub fn chrono_now() -> String {
@@ -143,10 +143,11 @@ pub struct GraphMeta {
 /// Shared application state — all plain data, `Send + Sync` safe.
 pub struct AppState {
     /// Per-model pre-computed GNN embeddings: "SAGE" → PlainEmbeddings, "RGCN" → …
-    pub model_embeddings: HashMap<String, PlainEmbeddings>,
+    /// Wrapped in RwLock for live InstantGNN updates to all models.
+    pub model_embeddings: RwLock<HashMap<String, PlainEmbeddings>>,
 
-    /// Default embeddings (SAGE) for backwards compatibility.
-    pub embeddings: PlainEmbeddings,
+    /// Default embeddings (SAGE) — wrapped in RwLock for live InstantGNN updates.
+    pub embeddings: RwLock<PlainEmbeddings>,
 
     /// **Precomputed** per-model anomaly scores and normalization parameters.
     /// Computed once at startup over ALL nodes — makes API scoring O(1) per node
@@ -191,6 +192,15 @@ pub struct AppState {
     /// Learnable scorer for fiduciary recommendations (thread-safe for reward feedback).
     /// Uses asymmetric RL rewards: miss_penalty_multiplier=3.0 (paper 2402.18246).
     pub scorer: Arc<Mutex<crate::eval::learnable_scorer::LearnableScorer>>,
+
+    /// InstantGNN: PPR-based propagation state for incremental updates (KDD 2022).
+    pub propagation: Arc<Mutex<crate::tasks::instant_propagation::PropagationState>>,
+
+    /// Adaptive retrain monitor: tracks ‖ΔZ‖ drift, recommends retrain when > θ.
+    pub retrain_monitor: Arc<Mutex<crate::tasks::adaptive_retrain::RetrainMonitor>>,
+
+    /// Mutation event log for audit trail.
+    pub mutation_log: Arc<Mutex<Vec<crate::data::graph_mutation::GraphEvent>>>,
 }
 
 /// Pre-trained SAE + feature labels for interpretability.
@@ -626,6 +636,7 @@ impl AppState {
             graph.node_types().len().hash(&mut h);
             graph.edge_types().len().hash(&mut h);
             config.hidden_dim.hash(&mut h);
+            actual_feat_dim.hash(&mut h); // Include PE-aware feat dim to invalidate old checkpoints
             h.finish()
         };
         println!("  Graph hash for checkpointing: {:#018x}", graph_hash);
@@ -655,7 +666,7 @@ impl AppState {
         } else {
             // Attach DoRA adapter & train
             sage_model.attach_adapter(init_hetero_basis_adapter(
-                config.hidden_dim,
+                actual_feat_dim,
                 config.hidden_dim,
                 &LoraConfig::default(),
                 node_types.clone(),
@@ -1104,9 +1115,29 @@ impl AppState {
             Arc::new(Mutex::new(scorer))
         };
 
+        // ── Initialize InstantGNN propagation for incremental updates ──
+        let propagation_state = {
+            use crate::tasks::instant_propagation::PropagationState;
+            let mut edge_map: HashMap<(String, String, String), Vec<(usize, usize)>> =
+                HashMap::new();
+            for ((src_t, rel, dst_t), pairs) in &graph_edges_data.edges {
+                edge_map.insert((src_t.clone(), rel.clone(), dst_t.clone()), pairs.clone());
+            }
+            let prop = PropagationState::init_from_embeddings(
+                &sage_emb.data,
+                &edge_map,
+                config.hidden_dim,
+            );
+            println!(
+                "  ✅ InstantGNN propagation state initialized ({} node types)",
+                sage_emb.data.len()
+            );
+            Arc::new(Mutex::new(prop))
+        };
+
         Arc::new(Self {
-            embeddings: sage_emb,
-            model_embeddings,
+            embeddings: RwLock::new(sage_emb),
+            model_embeddings: RwLock::new(model_embeddings),
             precomputed,
             graph_meta,
             node_names,
@@ -1121,6 +1152,15 @@ impl AppState {
             layer_activations: all_layer_activations,
             sae_state,
             scorer,
+
+            propagation: propagation_state,
+
+            retrain_monitor: {
+                use crate::tasks::adaptive_retrain::RetrainMonitor;
+                Arc::new(Mutex::new(RetrainMonitor::new(5.0))) // θ=5.0, will adapt
+            },
+
+            mutation_log: Arc::new(Mutex::new(Vec::new())),
         })
     }
 

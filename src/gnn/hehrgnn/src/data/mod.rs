@@ -1,6 +1,7 @@
 pub mod batcher;
 pub mod fact;
 pub mod graph_builder;
+pub mod graph_mutation;
 pub mod hetero_graph;
 pub mod negative_sampling;
 pub mod neighbor_sampler;
