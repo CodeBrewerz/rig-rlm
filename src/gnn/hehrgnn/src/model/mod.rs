@@ -1,9 +1,12 @@
 pub mod backbone;
+pub mod ema;
 pub mod embedding;
+pub mod energy;
 pub mod ensemble_pipeline;
 pub mod execution_head;
 pub mod gat;
 pub mod gnn_layer;
+pub mod graph_masking;
 pub mod graph_transformer;
 pub mod graphsage;
 pub mod hehrgnn;
@@ -16,4 +19,5 @@ pub mod rgcn;
 pub mod stable_decorrelation;
 pub mod temporal_selector;
 pub mod trainer;
+pub mod vicreg;
 pub mod weights;
