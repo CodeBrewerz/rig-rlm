@@ -280,8 +280,9 @@ steps:
         let result = ctx.run(program).await;
         let answer = match result {
             Ok(a) => {
-                eprintln!("✅ Answer: {a}");
-                a
+                let s = a.into_completed();
+                eprintln!("✅ Answer: {s}");
+                s
             }
             Err(e) => {
                 eprintln!("⚠️ LLM error: {e}");
@@ -360,8 +361,9 @@ steps:
         let result = ctx.run(program).await;
         let answer = match result {
             Ok(a) => {
-                eprintln!("✅ LLM answer: {a}");
-                a
+                let s = a.into_completed();
+                eprintln!("✅ LLM answer: {s}");
+                s
             }
             Err(e) => {
                 eprintln!("⚠️ LLM error: {e}");

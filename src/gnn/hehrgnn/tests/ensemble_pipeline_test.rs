@@ -106,6 +106,7 @@ fn test_ensemble_pipeline_learns_across_runs() {
             perturb_frac: 0.3,
             mode: TrainMode::Fast,
             weight_decay: 0.01,
+            decor_weight: 0.1,
         },
         scorer_config: ScorerConfig::default(),
     };

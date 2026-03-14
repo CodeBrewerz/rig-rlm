@@ -188,6 +188,7 @@ fn test_per_model_alpha_sweep() {
         perturb_frac: 0.3,
         mode: TrainMode::Fast,
         weight_decay: 0.01,
+            decor_weight: 0.1,
     };
 
     let model_names = ["GraphSAGE", "RGCN", "GAT", "GPS"];

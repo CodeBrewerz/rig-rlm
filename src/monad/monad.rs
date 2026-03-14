@@ -275,6 +275,34 @@ impl AgentMonad {
             Self::Pure(output.into_string())
         })
     }
+
+    // ─── HITL: Elicit user input ─────────────────────────────────────
+
+    /// Pause execution and ask the user a question.
+    /// When resumed, returns the user's response text.
+    pub fn elicit_user(question: impl Into<String>) -> Self {
+        Self::perform(
+            Action::ElicitUser {
+                question: question.into(),
+                partial_result: None,
+            },
+            |output| Self::Pure(output.into_string()),
+        )
+    }
+
+    /// Pause execution with a question and partial result.
+    pub fn elicit_user_with_result(
+        question: impl Into<String>,
+        partial_result: impl Into<String>,
+    ) -> Self {
+        Self::perform(
+            Action::ElicitUser {
+                question: question.into(),
+                partial_result: Some(partial_result.into()),
+            },
+            |output| Self::Pure(output.into_string()),
+        )
+    }
 }
 
 // Debug impl that doesn't try to print the continuation closure.

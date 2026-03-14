@@ -203,7 +203,7 @@ impl FiduciaryActionType {
             Self::ShouldTransfer => 0.60,        // Medium: optimization
             Self::ShouldAdjustBudget => 0.55,    // Lower: planning
             Self::ShouldConsolidate => 0.50,     // Lower: convenience
-            Self::ShouldRevalueAsset => 0.45,    // Lowest: informational
+            Self::ShouldRevalueAsset => 0.75, // HNW: survive PC blend (stale values → tax/estate risk)
         }
     }
 
@@ -876,7 +876,7 @@ pub fn score_action(
             cost_reduction: 0.2,
             risk_reduction: 0.3,
             goal_alignment: 0.95, // Primary benefit: goal progress
-            urgency: 0.4 + (1.0 - affinity.abs()) * 0.3, // More urgent if far from goal
+            urgency: 0.5 + affinity.abs() * 0.3, // More urgent if goal is relevant (high affinity)
             conflict_freedom: 0.95,
             reversibility: 0.7, // Can un-allocate
         },
@@ -945,13 +945,41 @@ pub fn score_action(
 
         // ── Asset Management ──
         FiduciaryActionType::ShouldRevalueAsset => FiduciaryAxes {
-            cost_reduction: 0.1,
-            risk_reduction: 0.4,
+            cost_reduction: 0.2,  // Stale valuations misrepresent net worth → tax/estate cost
+            risk_reduction: 0.55, // Undervalued collateral affects loan terms + insurance
             goal_alignment: 0.5,
-            urgency: 0.2 + norm_degree * 0.3, // More connected → more impact
+            urgency: 0.35 + norm_degree * 0.3, // More connected → more impact
             conflict_freedom: 0.95,
             reversibility: 1.0, // Just updating a number
         },
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Recommendation Config (for GEPA weight overrides)
+// ═══════════════════════════════════════════════════════════════
+
+/// Optional weight overrides for GEPA-driven optimization.
+///
+/// When GEPA searches for optimal weights, it injects candidate values
+/// via this struct. Production code loads persisted GEPA weights from
+/// `gepa_weights.json`; tests can override per-action priorities.
+#[derive(Debug, Clone, Default)]
+pub struct RecommendConfig {
+    /// Override fiduciary axes weights \[cost, risk, goal, urgency, conflict, reversibility\].
+    pub axes_weights: Option<[f32; 6]>,
+    /// Override per-action priority weights (action_name → weight).
+    /// Missing entries fall back to `FiduciaryActionType::priority_weight()`.
+    pub priority_overrides: HashMap<String, f32>,
+}
+
+impl RecommendConfig {
+    /// Look up priority weight for an action: override first, then default.
+    pub fn priority_weight(&self, action: FiduciaryActionType) -> f32 {
+        self.priority_overrides
+            .get(action.name())
+            .copied()
+            .unwrap_or_else(|| action.priority_weight())
     }
 }
 
@@ -964,9 +992,23 @@ pub fn score_action(
 /// Pass `Some(&mut pc_state)` for self-learning: the circuit will resume
 /// EM training from its previous state rather than rebuilding from scratch.
 /// Pass `None` for one-shot mode (fresh circuit each time).
-pub fn recommend(ctx: &FiduciaryContext, mut pc_state: Option<&mut PcState>) -> FiduciaryResponse {
+pub fn recommend(ctx: &FiduciaryContext, pc_state: Option<&mut PcState>) -> FiduciaryResponse {
+    recommend_with_config(ctx, pc_state, None)
+}
+
+/// Build the full fiduciary recommendation set with optional GEPA weight overrides.
+///
+/// This is the core implementation. `recommend()` delegates here with `config=None`,
+/// which uses GEPA-persisted or default weights.
+pub fn recommend_with_config(
+    ctx: &FiduciaryContext,
+    mut pc_state: Option<&mut PcState>,
+    config: Option<&RecommendConfig>,
+) -> FiduciaryResponse {
     let candidates = generate_candidates(ctx);
-    let axes_weights = load_axes_weights();
+    let axes_weights = config
+        .and_then(|c| c.axes_weights)
+        .unwrap_or_else(load_axes_weights);
 
     let user_name = ctx
         .node_names
@@ -980,8 +1022,9 @@ pub fn recommend(ctx: &FiduciaryContext, mut pc_state: Option<&mut PcState>) -> 
         .map(|(action, target_type, target_id)| {
             let axes = score_action(*action, target_type, *target_id, ctx);
             // Use GEPA-optimized fiduciary axis weights when available.
-            let fiduciary_score =
-                sanitize_score(axes.score_with_weights(&axes_weights) * action.priority_weight());
+            let prio =
+                config.map_or_else(|| action.priority_weight(), |c| c.priority_weight(*action));
+            let fiduciary_score = sanitize_score(axes.score_with_weights(&axes_weights) * prio);
 
             let target_name = ctx
                 .node_names

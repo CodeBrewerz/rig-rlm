@@ -66,6 +66,10 @@ pub trait CodeExecutor: Send + Sync {
         let submit_code = config.generate_submit_code();
         self.execute(&submit_code).await?;
 
+        // Inject ELICIT() function (HITL pause/resume)
+        let elicit_code = SessionConfig::generate_elicit_code();
+        self.execute(&elicit_code).await?;
+
         if let Some(ref prelude) = config.prelude {
             self.execute(prelude).await?;
         }
@@ -680,6 +684,10 @@ impl CodeExecutor for Pyo3CodeExecutor {
         // 1. Inject SUBMIT function
         let submit_code = config.generate_submit_code();
         self.execute(&submit_code).await?;
+
+        // 1b. Inject ELICIT() function (HITL pause/resume)
+        let elicit_code = SessionConfig::generate_elicit_code();
+        self.execute(&elicit_code).await?;
 
         // 2. Inject prelude
         if let Some(ref prelude) = config.prelude {

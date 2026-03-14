@@ -219,6 +219,7 @@ fn test_weight_decay_sweep() {
             perturb_frac: 0.3,
             mode: TrainMode::Fast,
             weight_decay: wd,
+            decor_weight: 0.1,
         };
 
         let report = train_graphsage(&mut model, &graph, &config);
@@ -267,6 +268,7 @@ fn test_patience_sweep() {
             perturb_frac: 0.3,
             mode: TrainMode::Fast,
             weight_decay: 0.01,
+            decor_weight: 0.1,
         };
 
         let report = train_graphsage(&mut model, &graph, &config);
@@ -316,6 +318,7 @@ fn test_epoch_scaling() {
             perturb_frac: 0.3,
             mode: TrainMode::Fast,
             weight_decay: 0.01,
+            decor_weight: 0.1,
         };
 
         let report = train_graphsage(&mut model, &graph, &config);
@@ -374,6 +377,7 @@ fn test_lr_vs_weight_decay() {
                 perturb_frac: 0.3,
                 mode: TrainMode::Fast,
                 weight_decay: wd,
+            decor_weight: 0.1,
             };
 
             let report = train_graphsage(&mut model, &graph, &config);

@@ -184,6 +184,7 @@ fn test_full_vs_adapter_comparison() {
         perturb_frac: 0.3,
         mode: TrainMode::Fast,
         weight_decay: 0.01,
+            decor_weight: 0.1,
     };
 
     println!("\n  ╔═══════════════════════════════════════════════════════════╗");
@@ -385,6 +386,7 @@ fn test_adapter_persistence() {
         perturb_frac: 0.3,
         mode: TrainMode::Fast,
         weight_decay: 0.01,
+            decor_weight: 0.1,
     };
     let _report = train_adapter(&mut model, &graph, &train_config);
 

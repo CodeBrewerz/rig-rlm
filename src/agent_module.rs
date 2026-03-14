@@ -101,7 +101,7 @@ impl Module for AgentModule {
         // individual evaluations may fail (max turns, execution errors).
         // Return an empty prediction so GEPA scores this as 0 and continues.
         let result = match ctx.run(program).await {
-            Ok(answer) => answer,
+            Ok(run_result) => run_result.into_completed(),
             Err(e) => {
                 tracing::warn!("Agent evaluation failed (will score 0): {e}");
                 let prediction = dspy_rs::prediction! {

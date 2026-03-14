@@ -569,6 +569,10 @@ pub struct OptimizedWeights {
     pub urgency_weight: f32,
     pub conflict_weight: f32,
     pub reversibility_weight: f32,
+    /// Per-action priority weight overrides (action_name → weight).
+    /// Missing entries use `FiduciaryActionType::priority_weight()` defaults.
+    #[serde(default)]
+    pub priority_weights: HashMap<String, f32>,
     /// Score achieved by this configuration.
     pub score: f64,
     /// Timestamp of when these weights were optimized.
@@ -588,6 +592,7 @@ impl Default for OptimizedWeights {
             urgency_weight: 0.15,
             conflict_weight: 0.10,
             reversibility_weight: 0.10,
+            priority_weights: HashMap::new(),
             score: 0.0,
             optimized_at: String::new(),
             total_evals: 0,
@@ -690,18 +695,45 @@ impl OptimizedWeights {
 
     /// Convert to a GEPA Candidate for optimization.
     pub fn to_candidate(&self) -> Candidate {
-        Candidate::seed(vec![
-            ("gnn_weight", &format!("{:.4}", self.gnn_weight)),
-            ("pc_weight", &format!("{:.4}", self.pc_weight)),
-            ("cost_weight", &format!("{:.4}", self.cost_weight)),
-            ("risk_weight", &format!("{:.4}", self.risk_weight)),
-            ("goal_weight", &format!("{:.4}", self.goal_weight)),
-            ("urgency_weight", &format!("{:.4}", self.urgency_weight)),
-        ])
+        use crate::eval::fiduciary::FiduciaryActionType;
+        let mut params: Vec<(&str, String)> = vec![
+            ("gnn_weight", format!("{:.4}", self.gnn_weight)),
+            ("pc_weight", format!("{:.4}", self.pc_weight)),
+            ("cost_weight", format!("{:.4}", self.cost_weight)),
+            ("risk_weight", format!("{:.4}", self.risk_weight)),
+            ("goal_weight", format!("{:.4}", self.goal_weight)),
+            ("urgency_weight", format!("{:.4}", self.urgency_weight)),
+        ];
+        // Add all 18 per-action priority weights
+        for action in FiduciaryActionType::all() {
+            let key = format!("prio_{}", action.name());
+            let val = self
+                .priority_weights
+                .get(action.name())
+                .copied()
+                .unwrap_or_else(|| action.priority_weight());
+            params.push((Box::leak(key.into_boxed_str()), format!("{:.4}", val)));
+        }
+        Candidate::seed(
+            params
+                .iter()
+                .map(|(k, v)| (*k, v.as_str()))
+                .collect(),
+        )
     }
 
     /// Extract from a GEPA Candidate (after optimization).
     pub fn from_candidate(candidate: &Candidate, score: f64) -> Self {
+        use crate::eval::fiduciary::FiduciaryActionType;
+        let mut priority_weights = HashMap::new();
+        for action in FiduciaryActionType::all() {
+            let key = format!("prio_{}", action.name());
+            let val = candidate.get_f32(&key, action.priority_weight());
+            // Only store if different from default to keep JSON clean
+            if (val - action.priority_weight()).abs() > 1e-4 {
+                priority_weights.insert(action.name().to_string(), val);
+            }
+        }
         Self {
             gnn_weight: candidate.get_f32("gnn_weight", 0.7),
             pc_weight: candidate.get_f32("pc_weight", 0.3),
@@ -711,6 +743,7 @@ impl OptimizedWeights {
             urgency_weight: candidate.get_f32("urgency_weight", 0.15),
             conflict_weight: 0.10,
             reversibility_weight: 0.10,
+            priority_weights,
             score,
             optimized_at: chrono::Utc::now().to_rfc3339(),
             total_evals: 0,
@@ -733,6 +766,14 @@ impl OptimizedWeights {
     /// GNN/PC blend pair.
     pub fn blend_weights(&self) -> (f32, f32) {
         (self.gnn_weight, self.pc_weight)
+    }
+
+    /// Build a `RecommendConfig` from these persisted weights.
+    pub fn to_recommend_config(&self) -> crate::eval::fiduciary::RecommendConfig {
+        crate::eval::fiduciary::RecommendConfig {
+            axes_weights: Some(self.axes_weights()),
+            priority_overrides: self.priority_weights.clone(),
+        }
     }
 }
 

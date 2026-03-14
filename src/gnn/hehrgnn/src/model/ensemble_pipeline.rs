@@ -15,17 +15,17 @@ use burn::backend::NdArray;
 use burn::prelude::*;
 use std::collections::HashMap;
 
-use crate::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
+use crate::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
 use crate::data::hetero_graph::EdgeType;
 use crate::eval::learnable_scorer::{LearnableScorer, ScorerConfig};
 use crate::model::backbone::NodeEmbeddings;
 use crate::model::gat::GatConfig;
 use crate::model::graph_transformer::GraphTransformerConfig;
 use crate::model::graphsage::GraphSageModelConfig;
-use crate::model::lora::{LoraConfig, init_hetero_basis_adapter};
+use crate::model::lora::{init_hetero_basis_adapter, LoraConfig};
 use crate::model::mhc::MhcRgcnConfig;
 use crate::model::temporal_selector::{
-    BackboneKind, ObjectiveKind, TemporalPolicyReport, select_temporal_policy,
+    select_temporal_policy, BackboneKind, ObjectiveKind, TemporalPolicyReport,
 };
 use crate::model::trainer::*;
 use crate::model::weights::*;
@@ -54,6 +54,7 @@ impl Default for PipelineConfig {
                 perturb_frac: 0.3,
                 mode: TrainMode::Fast,
                 weight_decay: 0.01,
+                decor_weight: 0.1,
             },
             scorer_config: ScorerConfig::default(),
         }
@@ -619,6 +620,39 @@ pub fn run_pipeline(
         },
     );
     report.models_saved.push("hehrgnn".into());
+
+    // ── 5b. Stable-GNN: Cross-Model Feature Decorrelation ──
+    // Decorrelate embeddings from SAGE, RGCN, GAT, GPS to eliminate
+    // spurious correlations and improve OOD generalization.
+    {
+        use crate::model::stable_decorrelation::{decorrelate_ensemble, StableConfig};
+
+        // Build per-model embedding maps for decorrelation
+        let mut model_emb_maps: HashMap<String, HashMap<String, Vec<Vec<f32>>>> = HashMap::new();
+        for (model_name, plain_emb) in &all_embeddings {
+            if model_name == "hehrgnn" {
+                continue; // Skip HEHRGNN (different entity space)
+            }
+            model_emb_maps.insert(model_name.clone(), plain_emb.data.clone());
+        }
+
+        if model_emb_maps.len() >= 2 {
+            let stable_config = StableConfig {
+                rff_dim: config.hidden_dim * 2,
+                ..StableConfig::default()
+            };
+
+            let decor_result = decorrelate_ensemble(&model_emb_maps, &stable_config);
+
+            eprintln!(
+                "  [pipeline] Stable-GNN decorrelation: {:.6} → {:.6} ({:.1}% reduction, {} models)",
+                decor_result.initial_loss,
+                decor_result.decorrelation_loss,
+                decor_result.improvement_ratio() * 100.0,
+                decor_result.models_decorrelated,
+            );
+        }
+    }
 
     // ── 6. GEPA Auto-Tune: self-improve fiduciary weights on every run ──
     // Uses real SAGE embeddings + anomaly scores from this pipeline run.

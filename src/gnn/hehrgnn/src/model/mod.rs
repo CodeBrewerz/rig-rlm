@@ -12,6 +12,7 @@ pub mod mhc;
 pub mod pc;
 pub mod probe;
 pub mod rgcn;
+pub mod stable_decorrelation;
 pub mod temporal_selector;
 pub mod trainer;
 pub mod weights;

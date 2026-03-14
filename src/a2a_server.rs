@@ -23,6 +23,8 @@ use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
+use crate::monad::context::RunResult;
+use crate::monad::frozen::{FrozenStore, FrozenTask};
 use crate::monad::interaction::agent_task;
 use crate::monad::{AgentConfig, AgentContext};
 
@@ -158,6 +160,8 @@ pub struct A2aTask {
 pub struct A2aServerState {
     pub agent_card: AgentCard,
     pub agent_config: AgentConfig,
+    /// Frozen tasks awaiting user input (HITL).
+    pub frozen: Arc<FrozenStore>,
 }
 
 // ── Default Agent Card ────────────────────────────────────────────
@@ -200,6 +204,7 @@ impl A2aServerState {
                 ],
             },
             agent_config,
+            frozen: Arc::new(FrozenStore::new()),
         }
     }
 }
@@ -235,15 +240,17 @@ async fn handle_a2a_request(
     }
 }
 
-/// Handle `message/send` — synchronous task execution.
+/// Handle `message/send` — synchronous task execution with HITL support.
 async fn handle_message_send(state: Arc<A2aServerState>, req: JsonRpcRequest) -> Response {
+    // Extract id first since from_value will consume params
+    let rpc_id = req.id;
     // Parse params
     let params: MessageSendParams = match serde_json::from_value(req.params) {
         Ok(p) => p,
         Err(e) => {
             let error_resp = JsonRpcResponse {
                 jsonrpc: "2.0".to_string(),
-                id: req.id,
+                id: rpc_id,
                 result: None,
                 error: Some(JsonRpcError {
                     code: -32602,
@@ -260,7 +267,7 @@ async fn handle_message_send(state: Arc<A2aServerState>, req: JsonRpcRequest) ->
     if task_text.is_empty() {
         let error_resp = JsonRpcResponse {
             jsonrpc: "2.0".to_string(),
-            id: req.id,
+            id: rpc_id.clone(),
             result: None,
             error: Some(JsonRpcError {
                 code: -32602,
@@ -271,8 +278,21 @@ async fn handle_message_send(state: Arc<A2aServerState>, req: JsonRpcRequest) ->
         return Json(error_resp).into_response();
     }
 
+    // Check if this is a resume (contextId matches a frozen task)
+    let context_id_from_params = params.metadata.get("contextId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    if let Some(ref ctx_id) = context_id_from_params {
+        if let Some(frozen_task) = state.frozen.thaw(ctx_id) {
+            tracing::info!("[a2a] Resuming frozen task: {ctx_id}");
+            return handle_resume(state, rpc_id, frozen_task, ctx_id.clone(), &task_text).await;
+        }
+    }
+
+    // Fresh task
     let task_id = Uuid::new_v4().to_string();
-    let context_id = Uuid::new_v4().to_string();
+    let context_id = context_id_from_params.unwrap_or_else(|| Uuid::new_v4().to_string());
 
     // Run the agent (on a dedicated OS thread to avoid PyO3 GIL deadlock)
     tracing::info!("[a2a] handle_message_send: dispatching to agent thread...");
@@ -287,8 +307,138 @@ async fn handle_message_send(state: Arc<A2aServerState>, req: JsonRpcRequest) ->
         result.is_ok()
     );
 
-    let task = match result {
-        Ok(answer) => A2aTask {
+    match result {
+        Ok((run_result, ctx)) => {
+            build_task_response(state, rpc_id, task_id, context_id, run_result, ctx, params.message)
+        }
+        Err(e) => {
+            let task = A2aTask {
+                id: task_id,
+                context_id,
+                kind: "task".to_string(),
+                status: TaskStatus {
+                    state: "failed".to_string(),
+                    message: Some(A2aMessage {
+                        role: "agent".to_string(),
+                        parts: vec![A2aPart::Text {
+                            text: format!("Agent error: {e}"),
+                        }],
+                        metadata: None,
+                    }),
+                    timestamp: Some(chrono::Utc::now().to_rfc3339()),
+                },
+                history: vec![params.message],
+                artifacts: vec![],
+            };
+            let resp = JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id: rpc_id,
+                result: Some(serde_json::to_value(&task).unwrap_or_default()),
+                error: None,
+            };
+            Json(resp).into_response()
+        }
+    }
+}
+
+/// Handle resumption of a frozen (suspended) task.
+async fn handle_resume(
+    state: Arc<A2aServerState>,
+    rpc_id: serde_json::Value,
+    frozen: FrozenTask,
+    context_id: String,
+    user_response: &str,
+) -> Response {
+    let task_id = Uuid::new_v4().to_string();
+
+    // Resume on a dedicated thread (same pattern as fresh tasks)
+    let user_text = user_response.to_string();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to build tokio runtime");
+
+        let result = rt.block_on(async move {
+            let mut ctx = frozen.context;
+
+            // Insert user's response and resume the continuation
+            use crate::monad::action::{ActionOutput, Role};
+            use crate::monad::history::HistoryMessage;
+            ctx.history.push(HistoryMessage {
+                role: Role::User,
+                content: std::borrow::Cow::Owned(user_text.clone()),
+                attachments: vec![],
+            });
+
+            // Feed the user's response to the continuation
+            let next_computation = match frozen.continuation {
+                crate::monad::monad::AgentMonad::Perform { next, .. } => {
+                    next(ActionOutput::Value(user_text))
+                }
+                other => other,
+            };
+
+            let run_result = ctx.run(next_computation).await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+            Ok::<_, anyhow::Error>((run_result, ctx))
+        });
+
+        let _ = tx.send(result);
+    });
+
+    let result = rx
+        .await
+        .map_err(|e| anyhow::anyhow!("Resume channel error: {e}"))
+        .and_then(|r| r);
+
+    match result {
+        Ok((run_result, ctx)) => {
+            build_task_response(
+                state,
+                rpc_id,
+                task_id,
+                context_id,
+                run_result,
+                ctx,
+                A2aMessage {
+                    role: "user".to_string(),
+                    parts: vec![A2aPart::Text { text: user_response.to_string() }],
+                    metadata: None,
+                },
+            )
+        }
+        Err(e) => {
+            let resp = JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id: rpc_id,
+                result: None,
+                error: Some(JsonRpcError {
+                    code: -32000,
+                    message: format!("Resume failed: {e}"),
+                    data: None,
+                }),
+            };
+            Json(resp).into_response()
+        }
+    }
+}
+
+/// Build the A2A task response based on RunResult (completed or suspended).
+fn build_task_response(
+    state: Arc<A2aServerState>,
+    rpc_id: serde_json::Value,
+    task_id: String,
+    context_id: String,
+    run_result: RunResult,
+    ctx: AgentContext,
+    original_message: A2aMessage,
+) -> Response {
+    let task = match run_result {
+        RunResult::Completed(answer) => A2aTask {
             id: task_id,
             context_id,
             kind: "task".to_string(),
@@ -301,37 +451,49 @@ async fn handle_message_send(state: Arc<A2aServerState>, req: JsonRpcRequest) ->
                 }),
                 timestamp: Some(chrono::Utc::now().to_rfc3339()),
             },
-            history: vec![params.message],
+            history: vec![original_message],
             artifacts: vec![],
         },
-        Err(e) => A2aTask {
-            id: task_id,
-            context_id,
-            kind: "task".to_string(),
-            status: TaskStatus {
-                state: "failed".to_string(),
-                message: Some(A2aMessage {
-                    role: "agent".to_string(),
-                    parts: vec![A2aPart::Text {
-                        text: format!("Agent error: {e}"),
-                    }],
-                    metadata: None,
-                }),
-                timestamp: Some(chrono::Utc::now().to_rfc3339()),
-            },
-            history: vec![params.message],
-            artifacts: vec![],
-        },
+        RunResult::Suspended { question, partial_result, continuation } => {
+            // Freeze the context for later resumption
+            state.frozen.freeze(&context_id, FrozenTask {
+                context: ctx,
+                continuation,
+                created_at: chrono::Utc::now(),
+            });
+
+            let mut parts = vec![A2aPart::Text { text: question }];
+            if let Some(partial) = partial_result {
+                parts.push(A2aPart::Data {
+                    data: serde_json::json!({ "partialResult": partial }),
+                });
+            }
+
+            A2aTask {
+                id: task_id,
+                context_id,
+                kind: "task".to_string(),
+                status: TaskStatus {
+                    state: "input-required".to_string(),
+                    message: Some(A2aMessage {
+                        role: "agent".to_string(),
+                        parts,
+                        metadata: None,
+                    }),
+                    timestamp: Some(chrono::Utc::now().to_rfc3339()),
+                },
+                history: vec![original_message],
+                artifacts: vec![],
+            }
+        }
     };
 
-    tracing::info!("[a2a] handle_message_send: serializing response...");
     let resp = JsonRpcResponse {
         jsonrpc: "2.0".to_string(),
-        id: req.id,
+        id: rpc_id,
         result: Some(serde_json::to_value(&task).unwrap_or_default()),
         error: None,
     };
-    tracing::info!("[a2a] handle_message_send: returning response.");
     Json(resp).into_response()
 }
 
@@ -398,17 +560,32 @@ async fn handle_message_stream(state: Arc<A2aServerState>, req: JsonRpcRequest) 
     });
 
     let final_event = match result {
-        Ok(answer) => serde_json::json!({
-            "jsonrpc": "2.0", "id": rpc_id,
-            "result": {
-                "id": task_id, "contextId": context_id, "kind": "task",
-                "status": {
-                    "state": "completed",
-                    "message": { "role": "agent", "parts": [{"kind": "text", "text": answer}] },
-                    "timestamp": chrono::Utc::now().to_rfc3339(),
-                }
+        Ok((run_result, _ctx)) => {
+            match run_result {
+                RunResult::Completed(answer) => serde_json::json!({
+                    "jsonrpc": "2.0", "id": rpc_id,
+                    "result": {
+                        "id": task_id, "contextId": context_id, "kind": "task",
+                        "status": {
+                            "state": "completed",
+                            "message": { "role": "agent", "parts": [{"kind": "text", "text": answer}] },
+                            "timestamp": chrono::Utc::now().to_rfc3339(),
+                        }
+                    }
+                }),
+                RunResult::Suspended { question, .. } => serde_json::json!({
+                    "jsonrpc": "2.0", "id": rpc_id,
+                    "result": {
+                        "id": task_id, "contextId": context_id, "kind": "task",
+                        "status": {
+                            "state": "input-required",
+                            "message": { "role": "agent", "parts": [{"kind": "text", "text": question}] },
+                            "timestamp": chrono::Utc::now().to_rfc3339(),
+                        }
+                    }
+                }),
             }
-        }),
+        }
         Err(e) => serde_json::json!({
             "jsonrpc": "2.0", "id": rpc_id,
             "result": {
@@ -460,14 +637,12 @@ fn extract_text_from_message(msg: &A2aMessage) -> String {
 
 /// Run the agent on a task using the monadic architecture.
 ///
-/// The agent's internal future is not `Send` (uses `Pin<Box<dyn Future>>`),
-/// so we run it on a dedicated OS thread with its own tokio runtime.
-/// We use `std::thread::spawn` instead of `tokio::task::spawn_blocking`
-/// to avoid PyO3 GIL deadlocks with tokio's blocking thread pool.
+/// Returns `(RunResult, AgentContext)` so the caller can freeze the context
+/// if the agent suspends for HITL.
 fn run_agent_task(
     config: &AgentConfig,
     task: &str,
-) -> tokio::sync::oneshot::Receiver<anyhow::Result<String>> {
+) -> tokio::sync::oneshot::Receiver<anyhow::Result<(RunResult, AgentContext)>> {
     let config = config.clone();
     let task = task.to_string();
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -493,24 +668,27 @@ fn run_agent_task(
 
             tracing::info!("[a2a] AgentContext created, starting monadic program...");
             let program = agent_task(&task);
-            let result = ctx.run(program).await;
+            let run_result = ctx.run(program).await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
 
             tracing::info!(
-                "[a2a] Monadic program finished (ok={}), shutting down...",
-                result.is_ok()
+                "[a2a] Monadic program finished (suspended={})",
+                run_result.is_suspended()
             );
 
-            if let Err(e) = ctx.shutdown().await {
-                tracing::warn!("[a2a] Failed to shutdown executor: {e}");
+            // Only shutdown if completed (not frozen for HITL)
+            if !run_result.is_suspended() {
+                if let Err(e) = ctx.shutdown().await {
+                    tracing::warn!("[a2a] Failed to shutdown executor: {e}");
+                }
             }
 
-            tracing::info!("[a2a] Shutdown complete.");
-            result.map_err(|e| anyhow::anyhow!("{e}"))
+            tracing::info!("[a2a] Agent thread done.");
+            Ok((run_result, ctx))
         });
 
         tracing::info!(
-            "[a2a] Agent thread done (ok={}), sending result.",
-            result.is_ok()
+            "[a2a] Agent thread sending result."
         );
         let _ = tx.send(result);
     });

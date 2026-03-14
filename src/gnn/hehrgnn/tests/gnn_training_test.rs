@@ -138,6 +138,7 @@ fn test_graphsage_training_improves_auc() {
             perturb_frac: 0.5,
             mode: TrainMode::Fast,
             weight_decay: 0.01,
+            decor_weight: 0.1,
         },
     );
 
@@ -378,6 +379,7 @@ fn test_multi_run_learning_with_checkpoints() {
             perturb_frac: 0.5,
             mode: TrainMode::Fast,
             weight_decay: 0.01,
+            decor_weight: 0.1,
         },
     );
 
@@ -533,6 +535,7 @@ fn test_multi_run_learning_with_checkpoints() {
             perturb_frac: 0.4,
             mode: TrainMode::Fast,
             weight_decay: 0.01,
+            decor_weight: 0.1,
         },
     );
 

@@ -109,6 +109,7 @@ fn train_model_round(
         patience: 50,
         neg_ratio: 2,
         weight_decay: 0.001,
+            decor_weight: 0.1,
         perturb_frac: 1.0,
         mode: TrainMode::Fast,
     };

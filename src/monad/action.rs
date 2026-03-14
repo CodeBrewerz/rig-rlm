@@ -117,6 +117,14 @@ pub enum Action {
     /// The patch string follows standard unified diff format.
     /// Returns a summary of files changed.
     ApplyPatch { patch: String },
+
+    // ─── HITL: Human-in-the-Loop elicitation ─────────────────────
+    /// Pause execution and ask the user a question.
+    /// Returns the user's response text when execution resumes.
+    ElicitUser {
+        question: String,
+        partial_result: Option<String>,
+    },
 }
 
 impl Action {
@@ -141,6 +149,7 @@ impl Action {
             Self::ParallelBatch { .. } => "parallel",
             Self::Orchestrate { .. } => "orchestrate",
             Self::ApplyPatch { .. } => "apply_patch",
+            Self::ElicitUser { .. } => "elicit_user",
         }
     }
 
@@ -156,6 +165,7 @@ impl Action {
                 | Self::ParallelBatch { .. }
                 | Self::Orchestrate { .. }
                 | Self::ApplyPatch { .. }
+                | Self::ElicitUser { .. }
         )
     }
 }
@@ -204,6 +214,12 @@ pub enum ActionOutput {
     /// A structured SUBMIT result (JSON string from SUBMIT() call).
     /// Signals the interaction loop to terminate with this answer.
     Submitted(String),
+    /// Signals the agent loop to suspend and wait for user input.
+    /// The caller must freeze the context and return `input-required`.
+    Suspended {
+        question: String,
+        partial_result: Option<String>,
+    },
 }
 
 impl ActionOutput {
@@ -216,16 +232,25 @@ impl ActionOutput {
             Self::Unit => String::new(),
             Self::Value(s) => s,
             Self::Submitted(s) => format!("[submitted] {s}"),
+            Self::Suspended { question, .. } => format!("[elicit] {question}"),
         }
     }
 
     /// Returns true if this output contains a value.
     pub fn has_value(&self) -> bool {
-        matches!(self, Self::Value(_) | Self::Submitted(_))
+        matches!(
+            self,
+            Self::Value(_) | Self::Submitted(_) | Self::Suspended { .. }
+        )
     }
 
     /// Returns true if this is a SUBMIT result.
     pub fn is_submitted(&self) -> bool {
         matches!(self, Self::Submitted(_))
+    }
+
+    /// Returns true if this signals a suspension for user input.
+    pub fn is_suspended(&self) -> bool {
+        matches!(self, Self::Suspended { .. })
     }
 }

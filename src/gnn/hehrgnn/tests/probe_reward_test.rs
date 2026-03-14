@@ -208,6 +208,7 @@ fn test_bpr_vs_probe_reward() {
         perturb_frac: 0.3,
         mode: TrainMode::Fast,
         weight_decay: 0.01,
+            decor_weight: 0.1,
     };
 
     println!("\n  ╔═══════════════════════════════════════════════════════════════════╗");
@@ -336,6 +337,7 @@ fn test_probe_weight_sweep() {
         perturb_frac: 0.3,
         mode: TrainMode::Fast,
         weight_decay: 0.01,
+            decor_weight: 0.1,
     };
 
     println!("\n  ╔═══════════════════════════════════════════════════════════════════╗");

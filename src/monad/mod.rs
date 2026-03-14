@@ -16,6 +16,7 @@ pub mod diff_tracker;
 pub mod error;
 pub mod evidence;
 pub mod execution;
+pub mod frozen;
 pub mod generation;
 pub mod history;
 pub mod hooks;
@@ -36,6 +37,8 @@ pub mod restate_helpers;
 pub mod truncation;
 
 #[cfg(test)]
+mod hitl_tests;
+#[cfg(test)]
 mod integration_tests;
 #[cfg(test)]
 mod live_llm_tests;
@@ -47,7 +50,7 @@ mod tests_modules;
 // Re-export the primary types for ergonomic imports.
 pub use action::{Action, ActionOutput, LogLevel, Role};
 pub use capabilities::Capabilities;
-pub use context::{AgentConfig, AgentContext};
+pub use context::{AgentConfig, AgentContext, RunResult};
 pub use context_manager::{ContextManager, IsolatedContext};
 pub use error::{AgentError, Result};
 pub use evidence::{Evidence, EvidenceSource};

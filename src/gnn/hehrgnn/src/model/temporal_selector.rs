@@ -7,16 +7,16 @@ use burn::backend::NdArray;
 use burn::prelude::*;
 use std::collections::HashMap;
 
-use crate::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
+use crate::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
 use crate::data::hetero_graph::EdgeType;
 use crate::model::gat::GatConfig;
 use crate::model::graph_transformer::GraphTransformerConfig;
 use crate::model::graphsage::GraphSageModelConfig;
-use crate::model::lora::{LoraConfig, init_hetero_basis_adapter};
+use crate::model::lora::{init_hetero_basis_adapter, LoraConfig};
 use crate::model::mhc::MhcRgcnConfig;
 use crate::model::trainer::{
-    JepaTrainable, TrainConfig, TrainReport, embeddings_to_plain, link_prediction_auc,
-    sample_negative_edges, train_adapter, train_hybrid_input_weights, train_jepa_input_weights,
+    embeddings_to_plain, link_prediction_auc, sample_negative_edges, train_adapter,
+    train_hybrid_input_weights, train_jepa_input_weights, JepaTrainable, TrainConfig, TrainReport,
 };
 
 type B = NdArray;
@@ -363,6 +363,7 @@ pub fn select_temporal_policy(
         perturb_frac: base_train_config.perturb_frac,
         mode: base_train_config.mode,
         weight_decay: base_train_config.weight_decay,
+        decor_weight: base_train_config.decor_weight,
     };
 
     let mut candidates = Vec::new();
@@ -499,6 +500,7 @@ mod tests {
             perturb_frac: 0.3,
             mode: crate::model::trainer::TrainMode::Fast,
             weight_decay: 0.01,
+            decor_weight: 0.1,
         };
 
         let report = select_temporal_policy(&facts, 16, &config).expect("selector should run");

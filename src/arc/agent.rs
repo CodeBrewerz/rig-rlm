@@ -93,7 +93,8 @@ impl Module for ArcAgentModule {
         let result = ctx
             .run(program)
             .await
-            .map_err(|e| anyhow::anyhow!("ARC agent execution failed: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("ARC agent execution failed: {e}"))?
+            .into_completed();
 
         // 6. Extract code and outputs from the result
         let (code, outputs) = extract_arc_outputs(&result, &ctx);

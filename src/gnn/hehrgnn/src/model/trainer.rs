@@ -41,6 +41,11 @@ pub struct TrainConfig {
     /// Applied as `w *= (1 - weight_decay)` after each gradient step.
     /// Default: 0.01.
     pub weight_decay: f64,
+    /// Self-decorrelation weight (Stable-GNN paper).
+    /// Adds RFF-based feature independence loss to training.
+    /// Forces each model to produce decorrelated feature channels.
+    /// Default: 0.1. Set to 0.0 to disable.
+    pub decor_weight: f32,
 }
 
 impl Default for TrainConfig {
@@ -53,6 +58,7 @@ impl Default for TrainConfig {
             perturb_frac: 0.3,
             mode: TrainMode::Fast,
             weight_decay: 0.01, // grokking paper: drives cleanup phase
+            decor_weight: 0.1,  // Stable-GNN: self-decorrelation regularization
         }
     }
 }
@@ -718,7 +724,11 @@ fn mean_embedding_norm(embeddings: &HashMap<String, Vec<Vec<f32>>>) -> f32 {
             count += 1;
         }
     }
-    if count > 0 { total / count as f32 } else { 0.0 }
+    if count > 0 {
+        total / count as f32
+    } else {
+        0.0
+    }
 }
 
 fn model_input_weight_norm_sq<B: Backend, M: JepaTrainable<B>>(model: &M) -> f32 {
@@ -733,6 +743,67 @@ fn model_input_weight_norm_sq<B: Backend, M: JepaTrainable<B>>(model: &M) -> f32
         total += data.iter().map(|w| w * w).sum::<f32>();
     }
     total
+}
+
+/// Compute self-decorrelation loss for a single model's embeddings (Stable-GNN paper).
+///
+/// Splits each node's embedding into `n_channels` chunks and measures their
+/// cross-covariance via RFF. Returns loss → 0 as channels become independent.
+/// This forces the model to spread information across feature dimensions rather
+/// than concentrating correlated signals.
+fn compute_self_decor_loss(embeddings: &HashMap<String, Vec<Vec<f32>>>) -> f32 {
+    use crate::model::stable_decorrelation::StableDecorrelator;
+
+    let n_channels = 4; // Split hidden_dim into 4 sub-feature groups
+    let mut total_loss = 0.0f32;
+    let mut type_count = 0;
+
+    for (_nt, vecs) in embeddings {
+        if vecs.is_empty() {
+            continue;
+        }
+        let hidden_dim = vecs[0].len();
+        if hidden_dim < n_channels * 2 {
+            continue; // Need at least 2 dims per channel
+        }
+
+        let chunk_size = hidden_dim / n_channels;
+        let _n_samples = vecs.len();
+
+        // Split each embedding into n_channels sub-vectors
+        let mut channels: Vec<Vec<Vec<f32>>> = (0..n_channels)
+            .map(|c| {
+                vecs.iter()
+                    .map(|v| {
+                        let start = c * chunk_size;
+                        let end = if c == n_channels - 1 {
+                            hidden_dim
+                        } else {
+                            start + chunk_size
+                        };
+                        v[start..end].to_vec()
+                    })
+                    .collect()
+            })
+            .collect();
+
+        if channels.len() < 2 || channels[0].is_empty() {
+            continue;
+        }
+
+        let ch_dim = channels[0][0].len();
+        let rff_dim = (ch_dim * 2).max(8);
+        let decor = StableDecorrelator::new(ch_dim, rff_dim, 1.0, 2025);
+        let loss = decor.decorrelation_loss_uniform(&channels);
+        total_loss += loss;
+        type_count += 1;
+    }
+
+    if type_count > 0 {
+        total_loss / type_count as f32
+    } else {
+        0.0
+    }
 }
 
 /// JEPA SPSA training over model input projection matrices.
@@ -814,7 +885,11 @@ pub fn train_jepa_input_weights<B: Backend, M: JepaTrainable<B>>(
                     let delta: Vec<f32> = (0..w_data.len())
                         .map(|_| {
                             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                            if (seed >> 33) % 2 == 0 { 1.0 } else { -1.0 }
+                            if (seed >> 33) % 2 == 0 {
+                                1.0
+                            } else {
+                                -1.0
+                            }
                         })
                         .collect();
 
@@ -827,13 +902,16 @@ pub fn train_jepa_input_weights<B: Backend, M: JepaTrainable<B>>(
                         .reshape([dims[0], dims[1]]);
                     model.set_input_weight(li, wp_tensor);
                     let emb_plus = embeddings_to_plain(&model.forward_embeddings(graph));
-                    let loss_plus = crate::model::jepa::compute_jepa_loss(
+                    let mut loss_plus = crate::model::jepa::compute_jepa_loss(
                         &emb_plus,
                         &positive,
                         &negative,
                         epoch_temp,
                         uniformity_weight,
                     );
+                    if config.decor_weight > 0.0 {
+                        loss_plus += config.decor_weight * compute_self_decor_loss(&emb_plus);
+                    }
 
                     let w_minus: Vec<f32> = w_data
                         .iter()
@@ -844,13 +922,16 @@ pub fn train_jepa_input_weights<B: Backend, M: JepaTrainable<B>>(
                         .reshape([dims[0], dims[1]]);
                     model.set_input_weight(li, wm_tensor);
                     let emb_minus = embeddings_to_plain(&model.forward_embeddings(graph));
-                    let loss_minus = crate::model::jepa::compute_jepa_loss(
+                    let mut loss_minus = crate::model::jepa::compute_jepa_loss(
                         &emb_minus,
                         &positive,
                         &negative,
                         epoch_temp,
                         uniformity_weight,
                     );
+                    if config.decor_weight > 0.0 {
+                        loss_minus += config.decor_weight * compute_self_decor_loss(&emb_minus);
+                    }
 
                     let grad_scalar = (loss_plus - loss_minus) / (2.0 * eps);
                     let w_updated: Vec<f32> = w_data
@@ -904,13 +985,16 @@ pub fn train_jepa_input_weights<B: Backend, M: JepaTrainable<B>>(
                             .reshape([dims[0], dims[1]]);
                         model.set_input_weight(li, pw);
                         let p_emb = embeddings_to_plain(&model.forward_embeddings(graph));
-                        let p_loss = crate::model::jepa::compute_jepa_loss(
+                        let mut p_loss = crate::model::jepa::compute_jepa_loss(
                             &p_emb,
                             &positive,
                             &negative,
                             epoch_temp,
                             uniformity_weight,
                         );
+                        if config.decor_weight > 0.0 {
+                            p_loss += config.decor_weight * compute_self_decor_loss(&p_emb);
+                        }
                         let grad = (p_loss - base_loss) / eps;
                         w_data[idx] = orig - lr * grad;
                     }
@@ -1109,7 +1193,11 @@ pub fn train_hybrid_input_weights<B: Backend, M: JepaTrainable<B>>(
                     let delta: Vec<f32> = (0..w_data.len())
                         .map(|_| {
                             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                            if (seed >> 33) % 2 == 0 { 1.0 } else { -1.0 }
+                            if (seed >> 33) % 2 == 0 {
+                                1.0
+                            } else {
+                                -1.0
+                            }
                         })
                         .collect();
 
@@ -1122,7 +1210,7 @@ pub fn train_hybrid_input_weights<B: Backend, M: JepaTrainable<B>>(
                         .reshape([dims[0], dims[1]]);
                     model.set_input_weight(li, wp_tensor);
                     let emb_plus = embeddings_to_plain(&model.forward_embeddings(graph));
-                    let loss_plus = hybrid_weighted_loss(
+                    let mut loss_plus = hybrid_weighted_loss(
                         &emb_plus,
                         &positive,
                         &negative,
@@ -1130,6 +1218,9 @@ pub fn train_hybrid_input_weights<B: Backend, M: JepaTrainable<B>>(
                         uniformity_weight,
                         bpr_weight,
                     );
+                    if config.decor_weight > 0.0 {
+                        loss_plus += config.decor_weight * compute_self_decor_loss(&emb_plus);
+                    }
 
                     let w_minus: Vec<f32> = w_data
                         .iter()
@@ -1140,7 +1231,7 @@ pub fn train_hybrid_input_weights<B: Backend, M: JepaTrainable<B>>(
                         .reshape([dims[0], dims[1]]);
                     model.set_input_weight(li, wm_tensor);
                     let emb_minus = embeddings_to_plain(&model.forward_embeddings(graph));
-                    let loss_minus = hybrid_weighted_loss(
+                    let mut loss_minus = hybrid_weighted_loss(
                         &emb_minus,
                         &positive,
                         &negative,
@@ -1148,6 +1239,9 @@ pub fn train_hybrid_input_weights<B: Backend, M: JepaTrainable<B>>(
                         uniformity_weight,
                         bpr_weight,
                     );
+                    if config.decor_weight > 0.0 {
+                        loss_minus += config.decor_weight * compute_self_decor_loss(&emb_minus);
+                    }
 
                     let grad_scalar = (loss_plus - loss_minus) / (2.0 * eps);
                     let w_updated: Vec<f32> = w_data
@@ -1202,7 +1296,7 @@ pub fn train_hybrid_input_weights<B: Backend, M: JepaTrainable<B>>(
                             .reshape([dims[0], dims[1]]);
                         model.set_input_weight(li, pw);
                         let p_emb = embeddings_to_plain(&model.forward_embeddings(graph));
-                        let p_loss = hybrid_weighted_loss(
+                        let mut p_loss = hybrid_weighted_loss(
                             &p_emb,
                             &positive,
                             &negative,
@@ -1210,6 +1304,9 @@ pub fn train_hybrid_input_weights<B: Backend, M: JepaTrainable<B>>(
                             uniformity_weight,
                             bpr_weight,
                         );
+                        if config.decor_weight > 0.0 {
+                            p_loss += config.decor_weight * compute_self_decor_loss(&p_emb);
+                        }
                         let grad = (p_loss - base_loss) / eps;
                         w_data[idx] = orig - lr * grad;
                     }
@@ -1353,7 +1450,11 @@ pub fn train_graphsage<B: Backend>(
                     let delta: Vec<f32> = (0..w_data.len())
                         .map(|_| {
                             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                            if (seed >> 33) % 2 == 0 { 1.0 } else { -1.0 }
+                            if (seed >> 33) % 2 == 0 {
+                                1.0
+                            } else {
+                                -1.0
+                            }
                         })
                         .collect();
 
@@ -1490,7 +1591,11 @@ pub fn train_graphsage<B: Backend>(
                     count += 1;
                 }
             }
-            if count > 0 { total / count as f32 } else { 0.0 }
+            if count > 0 {
+                total / count as f32
+            } else {
+                0.0
+            }
         };
 
         final_loss = post_loss;
@@ -1607,7 +1712,11 @@ pub fn train_with_probe_reward<B: Backend>(
             let delta: Vec<f32> = (0..w_data.len())
                 .map(|_| {
                     seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                    if (seed >> 33) % 2 == 0 { 1.0 } else { -1.0 }
+                    if (seed >> 33) % 2 == 0 {
+                        1.0
+                    } else {
+                        -1.0
+                    }
                 })
                 .collect();
 
@@ -1792,7 +1901,11 @@ pub fn train_adapter<B: Backend>(
             let delta: Vec<f32> = (0..total)
                 .map(|_| {
                     seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                    if (seed >> 33) % 2 == 0 { 1.0 } else { -1.0 }
+                    if (seed >> 33) % 2 == 0 {
+                        1.0
+                    } else {
+                        -1.0
+                    }
                 })
                 .collect();
 
@@ -1868,7 +1981,11 @@ pub fn train_adapter<B: Backend>(
             let delta: Vec<f32> = (0..total)
                 .map(|_| {
                     seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                    if (seed >> 33) % 2 == 0 { 1.0 } else { -1.0 }
+                    if (seed >> 33) % 2 == 0 {
+                        1.0
+                    } else {
+                        -1.0
+                    }
                 })
                 .collect();
 
@@ -1948,7 +2065,11 @@ pub fn train_adapter<B: Backend>(
             let delta: Vec<f32> = (0..a_data.len())
                 .map(|_| {
                     seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                    if (seed >> 33) % 2 == 0 { 1.0 } else { -1.0 }
+                    if (seed >> 33) % 2 == 0 {
+                        1.0
+                    } else {
+                        -1.0
+                    }
                 })
                 .collect();
 
@@ -2021,7 +2142,11 @@ pub fn train_adapter<B: Backend>(
             let delta_b: Vec<f32> = (0..b_data.len())
                 .map(|_| {
                     seed_b = seed_b.wrapping_mul(6364136223846793005).wrapping_add(1);
-                    if (seed_b >> 33) % 2 == 0 { 1.0 } else { -1.0 }
+                    if (seed_b >> 33) % 2 == 0 {
+                        1.0
+                    } else {
+                        -1.0
+                    }
                 })
                 .collect();
 
@@ -2232,7 +2357,11 @@ pub fn train_adapter_with_distillation<B: Backend>(
             let delta: Vec<f32> = (0..total)
                 .map(|_| {
                     seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                    if (seed >> 33) % 2 == 0 { 1.0 } else { -1.0 }
+                    if (seed >> 33) % 2 == 0 {
+                        1.0
+                    } else {
+                        -1.0
+                    }
                 })
                 .collect();
 
@@ -2322,7 +2451,11 @@ pub fn train_adapter_with_distillation<B: Backend>(
             let delta: Vec<f32> = (0..total)
                 .map(|_| {
                     seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                    if (seed >> 33) % 2 == 0 { 1.0 } else { -1.0 }
+                    if (seed >> 33) % 2 == 0 {
+                        1.0
+                    } else {
+                        -1.0
+                    }
                 })
                 .collect();
 

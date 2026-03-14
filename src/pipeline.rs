@@ -114,8 +114,8 @@ async fn spawn_sub_agent(chunk: &CodeChunk, config: &SubAgentConfig) -> SubAgent
     let program = agent_task(&task);
 
     match ctx.run(program).await {
-        Ok(output) => SubAgentResult {
-            output,
+        Ok(run_result) => SubAgentResult {
+            output: run_result.into_completed(),
             chunk_name: chunk.name.clone(),
             success: true,
             turns_used: ctx.turn_count(),

@@ -177,6 +177,28 @@ fn interaction_loop() -> AgentMonad {
                     return AgentMonad::pure(result);
                 }
 
+                // Case 2a½: ELICIT() was called — pause for user input (HITL)
+                if output.starts_with("[elicit]") {
+                    let question = output
+                        .strip_prefix("[elicit] ")
+                        .unwrap_or(&output)
+                        .to_string();
+                    // Extract partial_result if present in the ELICIT markers
+                    let partial = crate::session::extract_elicit_request(&output)
+                        .and_then(|(_, p)| p);
+                    return AgentMonad::elicit_user_with_result(
+                        question.clone(),
+                        partial.unwrap_or_default(),
+                    ).bind(|user_response| {
+                        // User responded — feed back into the loop
+                        AgentMonad::insert(
+                            Role::Execution,
+                            format!("User responded to ELICIT:\n{user_response}"),
+                        )
+                        .then(interaction_loop())
+                    });
+                }
+
                 // Case 2b: Legacy return value (my_answer)
                 if output.contains("[return]") {
                     let result = output

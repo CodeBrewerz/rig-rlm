@@ -67,7 +67,7 @@ mod integration_tests {
             .bind(|result| AgentMonad::pure(result));
 
         let mut ctx = test_context();
-        let result = ctx.run(m).await.unwrap();
+        let result = ctx.run(m).await.unwrap().into_completed();
 
         assert!(
             result.contains("hello"),
@@ -87,7 +87,7 @@ mod integration_tests {
         ));
 
         let mut ctx = test_context();
-        let result = ctx.run(m).await.unwrap();
+        let result = ctx.run(m).await.unwrap().into_completed();
 
         assert!(result.contains("beta"), "should contain line 2");
         assert!(result.contains("gamma"), "should contain line 3");
@@ -106,7 +106,7 @@ mod integration_tests {
             .then(AgentMonad::list_contexts());
 
         let mut ctx = test_context();
-        let result = ctx.run(m).await.unwrap();
+        let result = ctx.run(m).await.unwrap().into_completed();
 
         assert!(result.contains("ctx_a"), "listing should include ctx_a");
         assert!(result.contains("ctx_b"), "listing should include ctx_b");
@@ -194,7 +194,7 @@ mod integration_tests {
             .bind(|summary| AgentMonad::pure(summary));
 
         let mut ctx = test_context();
-        let result = ctx.run(m).await.unwrap();
+        let result = ctx.run(m).await.unwrap().into_completed();
 
         assert!(
             result.contains("75"),
@@ -362,7 +362,7 @@ steps:
             .then(AgentMonad::capture("analysis", "3 rows, 2 cols"))
             .then(AgentMonad::retrieve("analysis"));
 
-        let result = ctx.run(m).await.unwrap();
+        let result = ctx.run(m).await.unwrap().into_completed();
         assert_eq!(result, "3 rows, 2 cols");
 
         // Verify evidence was collected
@@ -472,7 +472,7 @@ steps:
 
         // 4. Search context
         let m = AgentMonad::search_context("sales", "product_5");
-        let search_result = ctx.run(m).await.unwrap();
+        let search_result = ctx.run(m).await.unwrap().into_completed();
         assert!(
             search_result.contains("product_5"),
             "search should find product_5"
@@ -480,7 +480,7 @@ steps:
 
         // 5. Peek at specific lines
         let m = AgentMonad::peek_context("sales", 1, 3);
-        let peek_result = ctx.run(m).await.unwrap();
+        let peek_result = ctx.run(m).await.unwrap().into_completed();
         assert!(peek_result.contains("row 0"), "peek should show row 0");
 
         // 6. Think about it
@@ -490,7 +490,7 @@ steps:
 
         // 7. Evaluate progress
         let m = AgentMonad::evaluate_progress(0.6, "analyzed structure, need to compute totals");
-        let eval_result = ctx.run(m).await.unwrap();
+        let eval_result = ctx.run(m).await.unwrap().into_completed();
         assert!(eval_result.contains("60"), "should show 60% confidence");
 
         // 8. Capture result
@@ -499,7 +499,7 @@ steps:
 
         // 9. Retrieve and verify
         let m = AgentMonad::retrieve("conclusion");
-        let final_result = ctx.run(m).await.unwrap();
+        let final_result = ctx.run(m).await.unwrap().into_completed();
         assert_eq!(final_result, "10 products, 100 transactions");
 
         // Verify state

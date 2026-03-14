@@ -145,6 +145,101 @@ impl AgentConfig {
     }
 }
 
+/// Result of running a monadic computation.
+///
+/// `Completed` means the agent finished normally.
+/// `Suspended` means the agent paused to ask the user a question
+/// and can be resumed with `run()` using the stored continuation.
+#[derive(Debug)]
+pub enum RunResult {
+    /// Agent finished — here is the final answer.
+    Completed(String),
+    /// Agent paused — needs user input before continuing.
+    Suspended {
+        /// The question being asked.
+        question: String,
+        /// Optional partial result to show the user.
+        partial_result: Option<String>,
+        /// The remaining computation to resume with.
+        /// Feed the user's response as `ActionOutput::Value(response)` to this continuation.
+        continuation: AgentMonad,
+    },
+}
+
+impl RunResult {
+    /// Extract the completed string. Panics if suspended.
+    /// Intended for tests and fire-and-forget callers.
+    pub fn into_completed(self) -> String {
+        match self {
+            Self::Completed(s) => s,
+            Self::Suspended { question, .. } => {
+                panic!("RunResult::into_completed() called on Suspended (question: {question})")
+            }
+        }
+    }
+
+    /// Returns the completed string if available.
+    pub fn completed_string(&self) -> Option<&str> {
+        match self {
+            Self::Completed(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Returns true if the agent is suspended waiting for user input.
+    pub fn is_suspended(&self) -> bool {
+        matches!(self, Self::Suspended { .. })
+    }
+
+    /// Check if the result string contains a substring.
+    /// For Suspended, checks the question text.
+    pub fn contains(&self, s: &str) -> bool {
+        match self {
+            Self::Completed(text) => text.contains(s),
+            Self::Suspended { question, .. } => question.contains(s),
+        }
+    }
+
+    /// Check if the result string is empty.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Completed(text) => text.is_empty(),
+            Self::Suspended { question, .. } => question.is_empty(),
+        }
+    }
+
+    /// Get the result as a string slice.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Completed(s) => s,
+            Self::Suspended { question, .. } => question,
+        }
+    }
+
+    /// Convert to lowercase (delegates to inner string).
+    pub fn to_lowercase(&self) -> String {
+        self.as_str().to_lowercase()
+    }
+}
+
+impl std::fmt::Display for RunResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Completed(s) => write!(f, "{s}"),
+            Self::Suspended { question, .. } => write!(f, "[suspended] {question}"),
+        }
+    }
+}
+
+impl PartialEq<&str> for RunResult {
+    fn eq(&self, other: &&str) -> bool {
+        match self {
+            Self::Completed(s) => s.as_str() == *other,
+            _ => false,
+        }
+    }
+}
+
 /// The execution context for the agent monad interpreter.
 ///
 /// Owns: conversation history, variables, LLM provider, and code executor.
@@ -469,12 +564,13 @@ impl AgentContext {
         self.ensure_session().await
     }
 
-    /// Run a monadic computation to completion.
+    /// Run a monadic computation.
     ///
     /// Iterative interpreter loop — walks the monad tree:
-    /// - `Pure(value)` → return the value
+    /// - `Pure(value)` → return `RunResult::Completed(value)`
+    /// - `Perform { action: ElicitUser, next }` → return `RunResult::Suspended { continuation: next }`
     /// - `Perform { action, next }` → execute action, pass output to next
-    pub async fn run(&mut self, mut computation: AgentMonad) -> Result<String> {
+    pub async fn run(&mut self, mut computation: AgentMonad) -> Result<RunResult> {
         // Ensure session is ready before first execution
         self.ensure_session().await?;
 
@@ -497,7 +593,7 @@ impl AgentContext {
                         turns: self.turn,
                         final_answer_len: value.len(),
                     });
-                    return Ok(value);
+                    return Ok(RunResult::Completed(value));
                 }
 
                 AgentMonad::Perform { action, next } => {
@@ -509,6 +605,23 @@ impl AgentContext {
 
                     // Execute the action
                     let output = self.interpret_action(action).await?;
+
+                    // Check for suspension (HITL)
+                    if let ActionOutput::Suspended { question, partial_result } = output {
+                        // Return the continuation so caller can resume later
+                        return Ok(RunResult::Suspended {
+                            question,
+                            partial_result,
+                            continuation: AgentMonad::Perform {
+                                action: Action::Insert {
+                                    role: Role::User,
+                                    content: String::new(), // placeholder — caller fills this
+                                    attachments: vec![],
+                                },
+                                next,
+                            },
+                        });
+                    }
 
                     // Feed output to the continuation → get next step
                     computation = next(output);
@@ -551,6 +664,7 @@ impl AgentContext {
                 Action::ParallelBatch { .. } => "ParallelBatch",
                 Action::Orchestrate { .. } => "Orchestrate",
                 Action::ApplyPatch { .. } => "ApplyPatch",
+                Action::ElicitUser { .. } => "ElicitUser",
             };
             self.config
                 .capabilities
@@ -677,11 +791,11 @@ impl AgentContext {
                     let computation = agent_task(&task);
                     let sub_start = std::time::Instant::now();
                     // Box::pin breaks the recursive async type cycle
-                    let sub_result = Box::pin(child_ctx.run(computation)).await;
+                    let sub_run_result = Box::pin(child_ctx.run(computation)).await;
                     let sub_duration = sub_start.elapsed();
 
                     // Record OTEL sub-agent span
-                    let sub_success = sub_result.is_ok();
+                    let sub_success = sub_run_result.is_ok();
                     super::otel::record_subagent_span(
                         &self.agent_id,
                         &task,
@@ -690,8 +804,10 @@ impl AgentContext {
                         &self.trace_ctx,
                     );
 
-                    let result = sub_result
+                    let run_result = sub_run_result
                         .map_err(|e| AgentError::Internal(format!("sub-agent failed: {e}")))?;
+                    // Sub-agents always run to completion (no HITL)
+                    let result = run_result.into_completed();
 
                     // 🪝 Hook: AfterSubAgent
                     let _ = self.hooks.fire(&HookEvent::AfterSubAgent {
@@ -988,7 +1104,8 @@ impl AgentContext {
                                 let duration = agent_start.elapsed();
 
                                 match sub_result {
-                                    Ok(answer) => {
+                                    Ok(run_result) => {
+                                        let answer = run_result.into_completed();
                                         // ── Codex-style: Agent complete with snapshot ──
                                         let snapshot: String = answer.chars().take(150).collect();
                                         eprintln!(
@@ -1077,9 +1194,9 @@ impl AgentContext {
                                     let duration = agent_start.elapsed();
 
                                     let result = match sub_result {
-                                        Ok(answer) => SubAgentResult::success(
+                                        Ok(run_result) => SubAgentResult::success(
                                             spec.name.clone(),
-                                            answer,
+                                            run_result.into_completed(),
                                             child_ctx.turn,
                                             duration,
                                         ),
@@ -1210,6 +1327,15 @@ impl AgentContext {
                         .push(Evidence::from_code_exec(&output, Some(0)));
 
                     Ok(ActionOutput::Value(output))
+                }
+
+                // ── HITL: Elicit user input ──
+                Action::ElicitUser { question, partial_result } => {
+                    info!(question = %question, "agent requesting user input (HITL)");
+                    self.evidence.push(Evidence::from_think(&format!(
+                        "HITL: asking user: {question}"
+                    )));
+                    Ok(ActionOutput::Suspended { question, partial_result })
                 }
             }
         }) // close async move + Box::pin
@@ -1353,7 +1479,7 @@ impl AgentContext {
                         step_start.elapsed().as_secs_f64()
                     );
                     let step_cost = self.cost_tracker.total_cost_usd - cost_before;
-                    StepResult::completed(output, turns, step_start.elapsed(), step_cost)
+                    StepResult::completed(output.into_completed(), turns, step_start.elapsed(), step_cost)
                 }
                 Err(e) => {
                     let turns = self.turn;

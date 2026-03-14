@@ -391,7 +391,7 @@ async fn run_agent(
         let result = ctx.run(program).await;
 
         match result {
-            Ok(answer) => {
+            Ok(rig_rlm::monad::RunResult::Completed(answer)) => {
                 println!("\n═══════════════════════════════════════════");
                 println!("  ✅ Final Answer:");
                 println!("  {answer}");
@@ -441,6 +441,12 @@ async fn run_agent(
                     .finish_session(&session_id, Some(&answer), None)
                     .await?;
                 println!("\n📦 Session {session_id} saved to {db_path}");
+            }
+            Ok(rig_rlm::monad::RunResult::Suspended { question, .. }) => {
+                eprintln!("\n⏸️  Agent suspended (HITL): {question}");
+                eprintln!("   CLI mode does not support interactive resume.");
+                eprintln!("   Use the A2A server for HITL workflows.");
+                store.finish_session(&session_id, None, None).await?;
             }
             Err(e) => {
                 eprintln!("\n❌ Agent error: {e}");
@@ -598,7 +604,7 @@ async fn run_e2e_test(executor_name: &str, db_path: &str) -> anyhow::Result<()> 
                 .then(AgentMonad::pure(format!("The answer is {answer}")))
         });
 
-    let result = ctx.run(program).await?;
+    let result = ctx.run(program).await?.into_completed();
     assert_eq!(result, "The answer is 4");
     println!("  ✅ Monad: Pure → Insert → Capture → Retrieve → Bind → Log → Pure works");
     println!("  History: {} messages", ctx.history.len());

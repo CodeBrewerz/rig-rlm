@@ -296,6 +296,37 @@ def run_pipeline(recipe_yaml: str) -> str:
 "#
         .to_string()
     }
+
+    /// Generate the Python ELICIT() function for HITL pause/resume.
+    ///
+    /// ELICIT() is like SUBMIT() but non-terminal: it signals the agent
+    /// loop to pause, present a question to the user, and resume with
+    /// the user's response.
+    pub fn generate_elicit_code() -> String {
+        r#"
+def ELICIT(question: str, partial_result: str = "") -> str:
+    """Ask the user a question and wait for their response.
+
+    Call this when you need clarification, confirmation, or additional
+    input from the user before continuing. Execution pauses until the
+    user responds.
+
+    Args:
+        question: The question to ask the user.
+        partial_result: Optional partial work to show the user.
+
+    Returns:
+        The user's response text.
+    """
+    import json
+    payload = {"question": question}
+    if partial_result:
+        payload["partial_result"] = partial_result
+    print("__ELICIT__" + json.dumps(payload, default=str) + "__ELICIT__")
+    return "[elicit] " + question
+"#
+        .to_string()
+    }
 }
 
 /// Specification for a host-side tool to inject into the sandbox.
@@ -333,6 +364,27 @@ pub fn extract_submit_result(stdout: &str) -> Option<serde_json::Value> {
     let end = rest.find(SUBMIT_MARKER)?;
     let json_str = &rest[..end];
     serde_json::from_str(json_str).ok()
+}
+
+// ── ELICIT result extraction ─────────────────────────────────────
+
+/// Marker used to delimit ELICIT output in stdout.
+pub const ELICIT_MARKER: &str = "__ELICIT__";
+
+/// Try to extract an ELICIT request from execution stdout.
+///
+/// Returns `Some((question, partial_result))` if the output contains
+/// `__ELICIT__{json}__ELICIT__`, otherwise `None`.
+pub fn extract_elicit_request(stdout: &str) -> Option<(String, Option<String>)> {
+    let start = stdout.find(ELICIT_MARKER)?;
+    let json_start = start + ELICIT_MARKER.len();
+    let rest = &stdout[json_start..];
+    let end = rest.find(ELICIT_MARKER)?;
+    let json_str = &rest[..end];
+    let val: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let question = val["question"].as_str()?.to_string();
+    let partial = val["partial_result"].as_str().map(|s| s.to_string());
+    Some((question, partial))
 }
 
 #[cfg(test)]

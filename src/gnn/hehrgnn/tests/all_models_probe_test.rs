@@ -134,6 +134,7 @@ fn test_all_models_baseline_vs_probe() {
         perturb_frac: 0.3,
         mode: TrainMode::Fast,
         weight_decay: 0.01,
+            decor_weight: 0.1,
     };
 
     println!("\n  ╔═══════════════════════════════════════════════════════════════════════╗");
