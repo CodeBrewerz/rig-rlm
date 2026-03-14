@@ -37,6 +37,10 @@ pub mod restate_helpers;
 pub mod truncation;
 
 #[cfg(test)]
+mod hitl_live_test;
+#[cfg(test)]
+mod hitl_resource_test;
+#[cfg(test)]
 mod hitl_tests;
 #[cfg(test)]
 mod integration_tests;

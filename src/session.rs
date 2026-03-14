@@ -327,6 +327,55 @@ def ELICIT(question: str, partial_result: str = "") -> str:
 "#
         .to_string()
     }
+
+    /// Generate the **blocking** ELICIT() function for microsandbox.
+    ///
+    /// This variant blocks on a sentinel file — the container can be
+    /// stopped (zero resource use) while waiting. On resume, the host
+    /// writes the user's response to the sentinel file.
+    pub fn generate_elicit_code_blocking() -> String {
+        r#"
+def ELICIT(question: str, partial_result: str = "") -> str:
+    """Ask the user a question and wait for their response.
+
+    Execution blocks until the user responds. The sandbox may be
+    suspended during the wait to conserve resources.
+
+    Args:
+        question: The question to ask the user.
+        partial_result: Optional partial work to show the user.
+
+    Returns:
+        The user's response text.
+    """
+    import json, time, os, sys
+
+    payload = {"question": question}
+    if partial_result:
+        payload["partial_result"] = partial_result
+
+    # Clean up any stale sentinel from previous runs
+    _sentinel = "/tmp/.elicit_response"
+    if os.path.exists(_sentinel):
+        os.remove(_sentinel)
+
+    # Signal the host — markers are detected in stdout
+    print("__ELICIT__" + json.dumps(payload, default=str) + "__ELICIT__", flush=True)
+    sys.stdout.flush()
+
+    # Block: poll for sentinel file written by host on resume
+    while not os.path.exists(_sentinel):
+        time.sleep(0.1)
+
+    with open(_sentinel) as _f:
+        _response = _f.read().strip()
+    os.remove(_sentinel)
+
+    print(f"[elicit-resumed] User responded: {_response}")
+    return _response
+"#
+        .to_string()
+    }
 }
 
 /// Specification for a host-side tool to inject into the sandbox.

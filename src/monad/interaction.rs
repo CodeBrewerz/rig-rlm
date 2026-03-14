@@ -168,26 +168,30 @@ fn interaction_loop() -> AgentMonad {
         // Case 2: Code to execute
         if let Some(code) = generation.code {
             return AgentMonad::execute_code(code).bind(|output| {
-                // Case 2a: SUBMIT() was called — structured result
-                if output.starts_with("[submitted]") {
-                    let result = output
-                        .strip_prefix("[submitted] ")
-                        .unwrap_or(&output)
-                        .to_string();
-                    return AgentMonad::pure(result);
-                }
-
-                // Case 2a½: ELICIT() was called — pause for user input (HITL)
-                if output.starts_with("[elicit]") {
-                    let question = output
-                        .strip_prefix("[elicit] ")
-                        .unwrap_or(&output)
-                        .to_string();
+                // Case 2a: ELICIT() was called — pause for user input (HITL)
+                // Check ELICIT *before* SUBMIT: if the code called ELICIT(),
+                // it means the agent needs user input. Any SUBMIT in the same
+                // block was premature (agent used ELICIT's return value as data
+                // instead of actually pausing).
+                if output.contains("[elicit]") || output.contains("__ELICIT__") {
+                    let question = if output.contains("[elicit] ") {
+                        output
+                            .lines()
+                            .find(|l| l.starts_with("[elicit] "))
+                            .map(|l| l.strip_prefix("[elicit] ").unwrap_or(l))
+                            .unwrap_or(&output)
+                            .to_string()
+                    } else {
+                        output.to_string()
+                    };
                     // Extract partial_result if present in the ELICIT markers
                     let partial = crate::session::extract_elicit_request(&output)
                         .and_then(|(_, p)| p);
+                    let q = crate::session::extract_elicit_request(&output)
+                        .map(|(q, _)| q)
+                        .unwrap_or(question);
                     return AgentMonad::elicit_user_with_result(
-                        question.clone(),
+                        q.clone(),
                         partial.unwrap_or_default(),
                     ).bind(|user_response| {
                         // User responded — feed back into the loop
@@ -197,6 +201,15 @@ fn interaction_loop() -> AgentMonad {
                         )
                         .then(interaction_loop())
                     });
+                }
+
+                // Case 2b: SUBMIT() was called — structured result
+                if output.starts_with("[submitted]") {
+                    let result = output
+                        .strip_prefix("[submitted] ")
+                        .unwrap_or(&output)
+                        .to_string();
+                    return AgentMonad::pure(result);
                 }
 
                 // Case 2b: Legacy return value (my_answer)

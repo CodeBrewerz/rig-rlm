@@ -1591,6 +1591,19 @@ impl AgentContext {
     /// Interpret `Action::ExecuteCode` — validate safety, run in sandbox,
     /// sanitize output, auto-load large results, fire hooks, record evidence.
     async fn interpret_execute_code(&mut self, source: String) -> Result<ActionOutput> {
+        // HITL: if executor was suspended from a previous ELICIT, resume it.
+        // The user's response is already in the conversation history (injected
+        // by the interaction loop), so the LLM has context. We just need the
+        // executor running again for the next code block.
+        if self.executor.is_suspended() {
+            tracing::info!("Resuming executor after ELICIT suspension");
+            if let Err(e) = self.executor.resume_after_elicit("", None).await {
+                tracing::warn!(error = %e, "Failed to resume executor (will try fresh)");
+                // Attempt a full reset as fallback
+                let _ = self.executor.reset().await;
+            }
+        }
+
         // Phase 12: safety validation
         validate_code(&source, &self.config.safety)
             .map_err(|v| AgentError::SafetyViolation(v.to_string()))?;
@@ -1677,8 +1690,23 @@ impl AgentContext {
             attachments: vec![],
         });
 
-        // If SUBMIT was called, return the structured result
-        if result.is_submitted() {
+        // If SUBMIT was called, return the structured result.
+        // Exception: if ELICIT was *also* called (markers in stdout),
+        // ELICIT takes priority — return as Value so the interaction loop
+        // detects the [elicit] markers and triggers suspension.
+        let has_elicit = result.stdout.contains("__ELICIT__")
+            || result.stdout.contains("[elicit]");
+
+        // HITL: if ELICIT detected, suspend the executor to free resources.
+        // For microsandbox: snapshots state & stops container (zero resource use).
+        // For Pyo3: no-op (in-process, negligible overhead).
+        if has_elicit {
+            if let Err(e) = self.executor.suspend_for_elicit().await {
+                tracing::warn!(error = %e, "Failed to suspend executor for ELICIT (continuing)");
+            }
+        }
+
+        if result.is_submitted() && !has_elicit {
             if let Some(ref return_val) = result.return_value {
                 return Ok(ActionOutput::Submitted(return_val.clone()));
             }

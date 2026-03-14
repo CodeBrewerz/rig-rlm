@@ -126,10 +126,30 @@ impl Generation {
                 None => break,
             };
 
-            // Skip to next line after the opening fence
-            let code_start = match text[fence_start + fence_len..].find('\n') {
-                Some(i) => fence_start + fence_len + i + 1,
-                None => break,
+            // After the fence tag, check if there's a newline or inline content.
+            // Handles both:
+            //   ```repl\n  code...  (standard: newline after fence)
+            //   ```repl code...     (inline: code on same line as fence)
+            let after_tag = &text[fence_start + fence_len..];
+            let code_start = if after_tag.starts_with('\n') {
+                // Standard: code starts on next line
+                fence_start + fence_len + 1
+            } else if after_tag.starts_with(" ") || after_tag.starts_with("\t") {
+                // Inline: code on same line after whitespace, find start of actual content
+                // But we still need to include the rest of the line as code
+                let inline_start = fence_start + fence_len;
+                // Check if there's a newline somewhere — treat everything from
+                // after the fence to the closing ``` as code
+                match after_tag.find('\n') {
+                    Some(_) => inline_start, // include whitespace, trim later
+                    None => break,           // no newline at all, malformed
+                }
+            } else {
+                // No whitespace or newline after tag — try next line
+                match after_tag.find('\n') {
+                    Some(i) => fence_start + fence_len + i + 1,
+                    None => break,
+                }
             };
 
             // Find closing fence
@@ -278,7 +298,11 @@ impl Generation {
             }
         }
 
-        if specs.is_empty() { None } else { Some(specs) }
+        if specs.is_empty() {
+            None
+        } else {
+            Some(specs)
+        }
     }
 }
 
@@ -293,14 +317,17 @@ impl ErrorGuidance {
          1. Python code in ```repl blocks to work on the task\n\
          2. FINAL <answer> if you have completed the task";
 
-    pub const MISSING_CODE: &'static str = "No code block found in your response. To execute code, \
+    pub const MISSING_CODE: &'static str =
+        "No code block found in your response. To execute code, \
          wrap it in ```repl ... ``` blocks. To give a final answer, \
          use FINAL <your answer>.";
 
-    pub const EXECUTION_ERROR: &'static str = "Your code raised an error. Please review the traceback above, \
+    pub const EXECUTION_ERROR: &'static str =
+        "Your code raised an error. Please review the traceback above, \
          fix the issue, and try again with corrected code in ```repl blocks.";
 
-    pub const MULTIPLE_CODE_BLOCKS: &'static str = "Multiple code blocks detected. Only the first code block will \
+    pub const MULTIPLE_CODE_BLOCKS: &'static str =
+        "Multiple code blocks detected. Only the first code block will \
          be executed. Please combine your code into a single ```repl block.";
 }
 

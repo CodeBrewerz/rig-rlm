@@ -92,8 +92,15 @@ impl ExecutionResult {
     pub fn to_feedback(&self) -> String {
         let mut parts = Vec::new();
 
+        // HITL: If ELICIT markers are present in stdout, include them
+        // even when SUBMIT was also called. ELICIT takes priority
+        // because the agent needs user input before the SUBMIT result
+        // is meaningful.
+        let has_elicit = self.stdout.contains("__ELICIT__") || self.stdout.contains("[elicit]");
+
         // If this is a SUBMIT result, format it clearly
-        if self.is_submitted() {
+        // But skip early return if ELICIT was also called
+        if self.is_submitted() && !has_elicit {
             if let Some(ref val) = self.return_value {
                 parts.push(format!("[submitted] {val}"));
             }

@@ -104,6 +104,33 @@ pub trait CodeExecutor: Send + Sync {
     async fn shutdown(&mut self) -> anyhow::Result<()> {
         Ok(())
     }
+
+    /// Suspend the executor during HITL wait (resource conservation).
+    ///
+    /// For microsandbox: snapshots Python globals, stops the container.
+    /// For PyO3: no-op (in-process, no resource waste).
+    ///
+    /// Returns serialized state for restoration on resume.
+    async fn suspend_for_elicit(&mut self) -> anyhow::Result<Option<String>> {
+        Ok(None) // Default: no-op for Pyo3
+    }
+
+    /// Resume the executor after user responds to ELICIT.
+    ///
+    /// For microsandbox: restarts container, restores globals, injects response.
+    /// For PyO3: no-op (sandbox never paused).
+    async fn resume_after_elicit(
+        &mut self,
+        _user_response: &str,
+        _saved_state: Option<&str>,
+    ) -> anyhow::Result<()> {
+        Ok(()) // Default: no-op for Pyo3
+    }
+
+    /// Whether the executor is currently suspended for ELICIT.
+    fn is_suspended(&self) -> bool {
+        false
+    }
 }
 
 // ─── Microsandbox Executor ───────────────────────────────────
@@ -120,6 +147,10 @@ pub struct MicrosandboxExecutor {
     session_ready: bool,
     /// Sandbox name (for logging/debugging).
     pub name: String,
+    /// Whether the executor is suspended for HITL (ELICIT wait).
+    suspended: bool,
+    /// Saved Python state (pickled globals) for resume after ELICIT.
+    saved_state: Option<String>,
 }
 
 /// Configuration for the microsandbox executor.
@@ -159,6 +190,8 @@ impl MicrosandboxExecutor {
             sandbox,
             session_ready: false,
             name: config.name.clone(),
+            suspended: false,
+            saved_state: None,
         })
     }
 
@@ -236,6 +269,124 @@ impl CodeExecutor for MicrosandboxExecutor {
 
     async fn shutdown(&mut self) -> anyhow::Result<()> {
         self.stop().await
+    }
+
+    /// Suspend: snapshot Python globals, stop the container.
+    /// Zero resource consumption during HITL wait.
+    async fn suspend_for_elicit(&mut self) -> anyhow::Result<Option<String>> {
+        tracing::info!(name = %self.name, "Suspending microsandbox for ELICIT (saving state)");
+
+        // Snapshot Python globals via pickle (best-effort serialization)
+        let snapshot_code = r#"
+import pickle, base64, sys
+_state = {}
+for _k, _v in list(globals().items()):
+    if _k.startswith('_') or _k in ('__builtins__', '__name__', '__doc__', '__package__',
+                                      '__loader__', '__spec__', 'SUBMIT', 'ELICIT',
+                                      'http_call', 'http_get', 'http_post', 'http_put',
+                                      'http_delete', 'json_extract', 'json_pretty',
+                                      'fetch_all', 'assert_status', 'HttpResponse',
+                                      'memory_offload', 'memory_recall', 'memory_manifest',
+                                      'memory_search', 'llm_query'):
+        continue
+    try:
+        pickle.dumps(_v)
+        _state[_k] = _v
+    except Exception:
+        pass
+_encoded = base64.b64encode(pickle.dumps(_state)).decode()
+print(f"__STATE__{_encoded}__STATE__")
+"#;
+
+        let mut saved = None;
+        // Try to run snapshot code — if it fails, we still stop the container
+        match self.sandbox.run_or_start(snapshot_code).await {
+            Ok(execution) => {
+                let stdout = execution.output().await.unwrap_or_default();
+                // Extract encoded state from __STATE__...__STATE__ markers
+                if let Some(start) = stdout.find("__STATE__") {
+                    let rest = &stdout[start + 9..];
+                    if let Some(end) = rest.find("__STATE__") {
+                        saved = Some(rest[..end].to_string());
+                        tracing::info!(name = %self.name, state_bytes = saved.as_ref().map(|s| s.len()).unwrap_or(0), "State snapshot captured");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(name = %self.name, error = %e, "Failed to snapshot state (proceeding with stop)");
+            }
+        }
+
+        // Stop the container — zero resource consumption
+        self.stop().await?;
+        self.suspended = true;
+        self.saved_state = saved.clone();
+
+        Ok(saved)
+    }
+
+    /// Resume: restart container, restore globals, inject user response.
+    async fn resume_after_elicit(
+        &mut self,
+        user_response: &str,
+        saved_state: Option<&str>,
+    ) -> anyhow::Result<()> {
+        tracing::info!(name = %self.name, "Resuming microsandbox after ELICIT");
+
+        // Restart the container
+        self.sandbox
+            .start(None)
+            .await
+            .map_err(|e| anyhow::anyhow!("microsandbox restart: {e}"))?;
+
+        // Re-inject session setup (SUBMIT, ELICIT, toolkit)
+        // This is needed because the Python process is fresh after restart
+        self.session_ready = false;
+
+        // Restore saved state if available
+        let state_to_restore = saved_state.or(self.saved_state.as_deref());
+        if let Some(encoded) = state_to_restore {
+            let restore_code = format!(
+                r#"
+import pickle, base64
+_encoded = "{encoded}"
+_state = pickle.loads(base64.b64decode(_encoded))
+globals().update(_state)
+del _state, _encoded
+print(f"Restored {{len(globals())}} variables")
+"#
+            );
+            match self.sandbox.run_or_start(&restore_code).await {
+                Ok(_) => {
+                    tracing::info!(name = %self.name, "State restored successfully");
+                }
+                Err(e) => {
+                    tracing::warn!(name = %self.name, error = %e, "Failed to restore state (session will start fresh)");
+                }
+            }
+        }
+
+        // Write the sentinel file with user's response so blocking ELICIT() returns
+        let escaped_response = user_response.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+        let sentinel_code = format!(
+            r#"
+with open("/tmp/.elicit_response", "w") as _f:
+    _f.write("{escaped_response}")
+print("Sentinel written")
+"#
+        );
+        self.sandbox.run_or_start(&sentinel_code).await
+            .map_err(|e| anyhow::anyhow!("Failed to write sentinel: {e}"))?;
+
+        self.suspended = false;
+        self.saved_state = None;
+
+        tracing::info!(name = %self.name, "Microsandbox resumed, ready for next execution");
+        Ok(())
+    }
+
+    fn is_suspended(&self) -> bool {
+        self.suspended
     }
 }
 
