@@ -228,6 +228,7 @@ mod tests {
             add_reverse_edges: true,
             add_self_loops: false,
             add_positional_encoding: true,
+            add_cross_dependency_edges: true,
         };
 
         let graph = build_graph_from_export::<TestBackend>(&export, &config, &device);

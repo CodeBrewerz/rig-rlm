@@ -322,6 +322,7 @@ pub fn select_temporal_policy(
         add_reverse_edges: true,
         add_self_loops: true,
         add_positional_encoding: true,
+        add_cross_dependency_edges: true,
     };
     let train_graph = build_hetero_graph::<B>(train_facts, &build_config, &device);
     let node_types: Vec<String> = train_graph
@@ -364,6 +365,7 @@ pub fn select_temporal_policy(
         mode: base_train_config.mode,
         weight_decay: base_train_config.weight_decay,
         decor_weight: base_train_config.decor_weight,
+        exec_prob_weight: base_train_config.exec_prob_weight,
     };
 
     let mut candidates = Vec::new();
@@ -501,6 +503,7 @@ mod tests {
             mode: crate::model::trainer::TrainMode::Fast,
             weight_decay: 0.01,
             decor_weight: 0.1,
+            exec_prob_weight: 0.1,
         };
 
         let report = select_temporal_policy(&facts, 16, &config).expect("selector should run");

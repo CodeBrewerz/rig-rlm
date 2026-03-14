@@ -184,6 +184,7 @@ fn build_tuning_graph() -> hehrgnn::data::hetero_graph::HeteroGraph<B> {
             add_reverse_edges: true,
             add_self_loops: true,
             add_positional_encoding: true,
+            add_cross_dependency_edges: true,
         },
         &device,
     )
@@ -220,6 +221,7 @@ fn test_weight_decay_sweep() {
             mode: TrainMode::Fast,
             weight_decay: wd,
             decor_weight: 0.1,
+            exec_prob_weight: 0.1,
         };
 
         let report = train_graphsage(&mut model, &graph, &config);
@@ -269,6 +271,7 @@ fn test_patience_sweep() {
             mode: TrainMode::Fast,
             weight_decay: 0.01,
             decor_weight: 0.1,
+            exec_prob_weight: 0.1,
         };
 
         let report = train_graphsage(&mut model, &graph, &config);
@@ -319,6 +322,7 @@ fn test_epoch_scaling() {
             mode: TrainMode::Fast,
             weight_decay: 0.01,
             decor_weight: 0.1,
+            exec_prob_weight: 0.1,
         };
 
         let report = train_graphsage(&mut model, &graph, &config);
@@ -378,6 +382,7 @@ fn test_lr_vs_weight_decay() {
                 mode: TrainMode::Fast,
                 weight_decay: wd,
             decor_weight: 0.1,
+            exec_prob_weight: 0.1,
             };
 
             let report = train_graphsage(&mut model, &graph, &config);

@@ -81,6 +81,7 @@ fn test_adapter_zero_init() {
             add_reverse_edges: true,
             add_self_loops: true,
             add_positional_encoding: true,
+            add_cross_dependency_edges: true,
         },
     );
     let graph = build_hetero_graph::<B>(&facts, &build_config, &device);
@@ -171,6 +172,7 @@ fn test_full_vs_adapter_comparison() {
         add_reverse_edges: true,
         add_self_loops: true,
         add_positional_encoding: true,
+            add_cross_dependency_edges: true,
     };
     let graph = build_hetero_graph::<B>(&facts, &build_config, &device);
     let node_types: Vec<String> = graph.node_types().iter().map(|s| s.to_string()).collect();
@@ -185,6 +187,7 @@ fn test_full_vs_adapter_comparison() {
         mode: TrainMode::Fast,
         weight_decay: 0.01,
             decor_weight: 0.1,
+            exec_prob_weight: 0.1,
     };
 
     println!("\n  ╔═══════════════════════════════════════════════════════════╗");
@@ -357,6 +360,7 @@ fn test_adapter_persistence() {
         add_reverse_edges: true,
         add_self_loops: true,
         add_positional_encoding: true,
+            add_cross_dependency_edges: true,
     };
     let graph = build_hetero_graph::<B>(&facts, &build_config, &device);
     let node_types: Vec<String> = graph.node_types().iter().map(|s| s.to_string()).collect();
@@ -387,6 +391,7 @@ fn test_adapter_persistence() {
         mode: TrainMode::Fast,
         weight_decay: 0.01,
             decor_weight: 0.1,
+            exec_prob_weight: 0.1,
     };
     let _report = train_adapter(&mut model, &graph, &train_config);
 

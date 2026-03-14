@@ -135,6 +135,7 @@ fn test_jepa_latent_space_category_clustering() {
         add_reverse_edges: true,
         add_self_loops: true,
         add_positional_encoding: true,
+            add_cross_dependency_edges: true,
     };
 
     let mut graph = build_hetero_graph::<B>(&facts, &config, &device);
@@ -173,6 +174,7 @@ fn test_jepa_latent_space_category_clustering() {
         neg_ratio: 2,
         weight_decay: 0.001,
             decor_weight: 0.1,
+            exec_prob_weight: 0.1,
         perturb_frac: 1.0,
         mode: TrainMode::Fast,
     };

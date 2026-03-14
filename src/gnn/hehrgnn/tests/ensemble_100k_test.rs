@@ -984,6 +984,7 @@ mod tests {
                 add_reverse_edges: true,
                 add_self_loops: true,
                 add_positional_encoding: true,
+            add_cross_dependency_edges: true,
             };
             let graph = build_hetero_graph::<B>(&data.graph_facts, &config, &device_b);
             let build_time = start.elapsed();

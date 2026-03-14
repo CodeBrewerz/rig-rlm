@@ -6,4 +6,5 @@ pub mod fiduciary;
 pub mod learnable_scorer;
 pub mod metrics;
 pub mod probing;
+pub mod queue_reactive_sim;
 pub mod sae;

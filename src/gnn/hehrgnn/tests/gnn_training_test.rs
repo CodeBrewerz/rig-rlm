@@ -73,6 +73,7 @@ fn build_financial_graph() -> (Vec<GraphFact>, GraphBuildConfig) {
         add_reverse_edges: true,
         add_self_loops: true,
         add_positional_encoding: true,
+            add_cross_dependency_edges: true,
     };
     (facts, config)
 }
@@ -139,6 +140,7 @@ fn test_graphsage_training_improves_auc() {
             mode: TrainMode::Fast,
             weight_decay: 0.01,
             decor_weight: 0.1,
+            exec_prob_weight: 0.1,
         },
     );
 
@@ -380,6 +382,7 @@ fn test_multi_run_learning_with_checkpoints() {
             mode: TrainMode::Fast,
             weight_decay: 0.01,
             decor_weight: 0.1,
+            exec_prob_weight: 0.1,
         },
     );
 
@@ -536,6 +539,7 @@ fn test_multi_run_learning_with_checkpoints() {
             mode: TrainMode::Fast,
             weight_decay: 0.01,
             decor_weight: 0.1,
+            exec_prob_weight: 0.1,
         },
     );
 

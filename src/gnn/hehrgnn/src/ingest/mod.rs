@@ -4,3 +4,4 @@
 
 pub mod feature_engineer;
 pub mod json_loader;
+pub mod regime_weights;

@@ -54,6 +54,7 @@ fn build_test_graph() -> HeteroGraph<B> {
             add_reverse_edges: true,
             add_self_loops: true,
             add_positional_encoding: true,
+            add_cross_dependency_edges: true,
         },
         &device,
     )
@@ -67,6 +68,7 @@ fn test_config() -> TrainConfig {
         neg_ratio: 2,
         weight_decay: 0.001,
             decor_weight: 0.1,
+            exec_prob_weight: 0.1,
         perturb_frac: 1.0,
         mode: TrainMode::Fast,
     }

@@ -94,6 +94,7 @@ fn build_training_graph() -> (Vec<GraphFact>, GraphBuildConfig) {
         add_reverse_edges: true,
         add_self_loops: true,
         add_positional_encoding: true,
+            add_cross_dependency_edges: true,
     };
     (facts, config)
 }
@@ -146,6 +147,8 @@ impl Evaluator for TrainHyperEvaluator {
             perturb_frac,
             mode: TrainMode::Fast,
             weight_decay,
+            decor_weight: 0.1,
+            exec_prob_weight: 0.1,
         };
 
         // Train a fresh model

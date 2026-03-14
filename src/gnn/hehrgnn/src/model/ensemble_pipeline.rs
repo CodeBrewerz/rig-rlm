@@ -55,6 +55,7 @@ impl Default for PipelineConfig {
                 mode: TrainMode::Fast,
                 weight_decay: 0.01,
                 decor_weight: 0.1,
+            exec_prob_weight: 0.1,
             },
             scorer_config: ScorerConfig::default(),
         }
@@ -180,6 +181,7 @@ pub fn run_pipeline(
         add_reverse_edges: true,
         add_self_loops: true,
         add_positional_encoding: true,
+            add_cross_dependency_edges: true,
     };
     let graph = build_hetero_graph::<B>(facts, &build_config, &device);
     let node_types: Vec<String> = graph.node_types().iter().map(|s| s.to_string()).collect();

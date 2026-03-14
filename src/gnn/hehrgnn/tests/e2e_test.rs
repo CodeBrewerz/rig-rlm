@@ -26,11 +26,11 @@ mod tests {
 
     type B = NdArray;
 
-    use hehrgnn::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
+    use hehrgnn::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
     use hehrgnn::data::hetero_graph::EdgeType;
     use hehrgnn::feedback::collector::{FeedbackEntry, FeedbackStore, PredictionRecord, Verdict};
-    use hehrgnn::feedback::retrainer::{RetrainConfig, feedback_to_signals, should_retrain};
-    use hehrgnn::ingest::feature_engineer::{FeatureConfig, engineer_features, feature_stats};
+    use hehrgnn::feedback::retrainer::{feedback_to_signals, should_retrain, RetrainConfig};
+    use hehrgnn::ingest::feature_engineer::{engineer_features, feature_stats, FeatureConfig};
     use hehrgnn::ingest::json_loader::{build_graph_from_export, load_from_json, summarize};
     use hehrgnn::model::graphsage::GraphSageModelConfig;
     use hehrgnn::server::state::PlainEmbeddings;
@@ -91,6 +91,7 @@ mod tests {
             add_reverse_edges: true,
             add_self_loops: true,
             add_positional_encoding: true,
+            add_cross_dependency_edges: true,
         };
         let graph = build_hetero_graph::<B>(&facts, &config, &device);
 
@@ -155,6 +156,7 @@ mod tests {
             add_reverse_edges: true,
             add_self_loops: true,
             add_positional_encoding: true,
+            add_cross_dependency_edges: true,
         };
         let graph = build_hetero_graph::<B>(&facts, &config, &device);
 
@@ -238,6 +240,7 @@ mod tests {
             add_reverse_edges: true,
             add_self_loops: true,
             add_positional_encoding: true,
+            add_cross_dependency_edges: true,
         };
         let graph = build_hetero_graph::<B>(&facts, &config, &device);
 
@@ -297,6 +300,7 @@ mod tests {
             add_reverse_edges: true,
             add_self_loops: true,
             add_positional_encoding: true,
+            add_cross_dependency_edges: true,
         };
         let graph = build_hetero_graph::<B>(&facts, &config, &device);
 
@@ -397,6 +401,7 @@ mod tests {
             add_reverse_edges: true,
             add_self_loops: true,
             add_positional_encoding: true,
+            add_cross_dependency_edges: true,
         };
         let mut graph = build_graph_from_export::<B>(&export, &graph_config, &device);
 
@@ -404,6 +409,8 @@ mod tests {
         let feat_config = FeatureConfig {
             target_dim: 16,
             normalize: true,
+            enable_queue_regime: true,
+            enable_flow_ratio: true,
         };
         engineer_features(&mut graph, &export, &feat_config, &device);
         let stats = feature_stats(&graph);
@@ -425,7 +432,7 @@ mod tests {
         let edge_types: Vec<EdgeType> = graph.edge_types().iter().map(|e| (*e).clone()).collect();
 
         let sage_config = GraphSageModelConfig {
-            in_dim: 16,
+            in_dim: 20, // 16 base + 4 queue-regime bins
             hidden_dim: 32,
             num_layers: 2,
             dropout: 0.0,
@@ -577,6 +584,7 @@ mod tests {
             add_reverse_edges: true,
             add_self_loops: true,
             add_positional_encoding: true,
+            add_cross_dependency_edges: true,
         };
         let graph = build_hetero_graph::<B>(&facts, &config, &device);
 

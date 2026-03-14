@@ -87,6 +87,7 @@ fn build_financial_graph() -> (HeteroGraph<B>, Vec<GraphFact>) {
             add_reverse_edges: true,
             add_self_loops: true,
             add_positional_encoding: true,
+            add_cross_dependency_edges: true,
         },
         &device,
     );
@@ -110,6 +111,7 @@ fn train_model_round(
         neg_ratio: 2,
         weight_decay: 0.001,
             decor_weight: 0.1,
+            exec_prob_weight: 0.1,
         perturb_frac: 1.0,
         mode: TrainMode::Fast,
     };

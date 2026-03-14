@@ -23,6 +23,11 @@ pub struct GraphBuildConfig {
     /// Whether to add structural positional encoding (node-type ID, in/out degree).
     /// Adds 3 extra dimensions to node features. (KumoRFM §2.3)
     pub add_positional_encoding: bool,
+    /// Whether to add cross-dependency edges between entity types.
+    /// From the queue-reactive LOB paper (Huang et al. 2014):
+    /// entities sharing a common neighbor get direct "cross_dep" edges,
+    /// mirroring bid↔ask cross-queue dependencies.
+    pub add_cross_dependency_edges: bool,
 }
 
 impl Default for GraphBuildConfig {
@@ -32,6 +37,7 @@ impl Default for GraphBuildConfig {
             add_reverse_edges: true,
             add_self_loops: true,
             add_positional_encoding: true,
+            add_cross_dependency_edges: true,
         }
     }
 }
@@ -234,7 +240,107 @@ pub fn build_hetero_graph<B: Backend>(
         }
     }
 
+    // Step 6: Add cross-dependency edges (queue-reactive paper)
+    if config.add_cross_dependency_edges {
+        inject_cross_dependency_edges(&mut graph, facts, &entity_to_local, device);
+    }
+
     graph
+}
+
+/// Inject cross-dependency edges between entities of different types that share
+/// a common neighbor, inspired by the queue-reactive LOB paper's cross-queue
+/// correlation structure.
+///
+/// For example, if user_A owns account_X and user_B also has transactions on
+/// account_X, then user_A and user_B get a `cross_dep` edge. This captures
+/// the paper's insight that flows at one queue depend on the opposite queue state.
+///
+/// Algorithm:
+/// 1. For each entity, find all its neighbors (via existing edges)
+/// 2. For each pair of entities of different types sharing ≥1 neighbor,
+///    add a `cross_dep` edge
+/// 3. Deduplicate edges
+fn inject_cross_dependency_edges<B: Backend>(
+    graph: &mut HeteroGraph<B>,
+    facts: &[GraphFact],
+    entity_to_local: &HashMap<NodeType, HashMap<String, usize>>,
+    device: &B::Device,
+) {
+    use std::collections::HashSet;
+
+    // Build adjacency: for each (type, instance) → set of neighbor (type, instance)
+    let mut neighbors: HashMap<(String, String), HashSet<(String, String)>> = HashMap::new();
+
+    for fact in facts {
+        neighbors
+            .entry((fact.src.0.clone(), fact.src.1.clone()))
+            .or_default()
+            .insert((fact.dst.0.clone(), fact.dst.1.clone()));
+        neighbors
+            .entry((fact.dst.0.clone(), fact.dst.1.clone()))
+            .or_default()
+            .insert((fact.src.0.clone(), fact.src.1.clone()));
+    }
+
+    // For each node, find co-neighbors of the SAME type that share a common
+    // neighbor of a DIFFERENT type. These get cross_dep edges.
+    // This is the financial analog of bid↔ask: entities competing for the
+    // same resource (account, merchant, etc.) are cross-dependent.
+    let mut cross_edges: HashMap<EdgeType, HashSet<(i64, i64)>> = HashMap::new();
+
+    // Group entities by type
+    for (node_type, instances) in entity_to_local {
+        let instance_list: Vec<(&String, &usize)> = instances.iter().collect();
+
+        for i in 0..instance_list.len() {
+            let (name_a, &idx_a) = instance_list[i];
+            let key_a = (node_type.clone(), name_a.clone());
+            let neighbors_a = match neighbors.get(&key_a) {
+                Some(n) => n,
+                None => continue,
+            };
+
+            for j in (i + 1)..instance_list.len() {
+                let (name_b, &idx_b) = instance_list[j];
+                let key_b = (node_type.clone(), name_b.clone());
+                let neighbors_b = match neighbors.get(&key_b) {
+                    Some(n) => n,
+                    None => continue,
+                };
+
+                // Check if they share any common neighbor
+                let has_common = neighbors_a.iter().any(|n| neighbors_b.contains(n));
+                if has_common {
+                    let et: EdgeType = (
+                        node_type.clone(),
+                        "cross_dep".to_string(),
+                        node_type.clone(),
+                    );
+                    let edges = cross_edges.entry(et).or_default();
+                    edges.insert((idx_a as i64, idx_b as i64));
+                    edges.insert((idx_b as i64, idx_a as i64)); // bidirectional
+                }
+            }
+        }
+    }
+
+    // Add cross-dependency edges to graph
+    for (et, edge_set) in cross_edges {
+        if edge_set.is_empty() {
+            continue;
+        }
+        let (src_vec, dst_vec): (Vec<i64>, Vec<i64>) = edge_set.into_iter().unzip();
+        let num_edges = src_vec.len();
+        let mut flat = Vec::with_capacity(2 * num_edges);
+        flat.extend_from_slice(&src_vec);
+        flat.extend_from_slice(&dst_vec);
+
+        let edge_idx =
+            Tensor::<B, 1, Int>::from_data(flat.as_slice(), device).reshape([2, num_edges]);
+
+        graph.add_edge_type(et, edge_idx);
+    }
 }
 
 /// Convert synthetic raw facts from TQL into GraphFacts using the
@@ -349,6 +455,7 @@ mod tests {
             add_reverse_edges: true,
             add_self_loops: false,
             add_positional_encoding: true,
+            add_cross_dependency_edges: true,
         };
 
         let graph = build_hetero_graph::<TestBackend>(&facts, &config, &device);
@@ -426,6 +533,7 @@ relation user-owns-account,
             add_reverse_edges: true,
             add_self_loops: true,
             add_positional_encoding: true,
+            add_cross_dependency_edges: true,
         };
 
         let device = <TestBackend as Backend>::Device::default();

@@ -88,6 +88,7 @@ fn test_category_prediction_with_real_schema() {
         add_reverse_edges: true,
         add_self_loops: true,
         add_positional_encoding: true,
+            add_cross_dependency_edges: true,
     };
 
     let mut graph = build_from_schema::<B>(&schema, &syn_config, &graph_config, &device);
@@ -195,6 +196,7 @@ fn test_category_prediction_with_real_schema() {
         neg_ratio: 2,
         weight_decay: 0.001,
             decor_weight: 0.1,
+            exec_prob_weight: 0.1,
         perturb_frac: 1.0,
         mode: TrainMode::Fast,
     };

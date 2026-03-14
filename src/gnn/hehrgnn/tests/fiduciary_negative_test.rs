@@ -899,6 +899,7 @@ fn test_full_pipeline_adversarial_with_real_ensemble_and_scorer() {
             add_reverse_edges: true,
             add_self_loops: true,
             add_positional_encoding: true,
+            add_cross_dependency_edges: true,
         };
         let start = std::time::Instant::now();
         let graph = build_hetero_graph::<B>(&facts, &config, &device);

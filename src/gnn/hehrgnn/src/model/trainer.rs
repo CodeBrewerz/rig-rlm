@@ -46,6 +46,10 @@ pub struct TrainConfig {
     /// Forces each model to produce decorrelated feature channels.
     /// Default: 0.1. Set to 0.0 to disable.
     pub decor_weight: f32,
+    /// Execution probability auxiliary loss weight (queue-reactive paper).
+    /// Adds BCE loss from ExecProbHead as multi-task regularization.
+    /// Default: 0.1. Set to 0.0 to disable.
+    pub exec_prob_weight: f32,
 }
 
 impl Default for TrainConfig {
@@ -57,8 +61,9 @@ impl Default for TrainConfig {
             patience: 10, // was 5; grokking-aware: don't stop too early
             perturb_frac: 0.3,
             mode: TrainMode::Fast,
-            weight_decay: 0.01, // grokking paper: drives cleanup phase
-            decor_weight: 0.1,  // Stable-GNN: self-decorrelation regularization
+            weight_decay: 0.01,    // grokking paper: drives cleanup phase
+            decor_weight: 0.1,     // Stable-GNN: self-decorrelation regularization
+            exec_prob_weight: 0.1, // Queue-reactive: execution probability auxiliary task
         }
     }
 }

@@ -117,6 +117,7 @@ fn build_test_graph() -> hehrgnn::data::hetero_graph::HeteroGraph<B> {
             add_reverse_edges: true,
             add_self_loops: true,
             add_positional_encoding: true,
+            add_cross_dependency_edges: true,
         },
         &device,
     )
@@ -135,6 +136,7 @@ fn test_all_models_baseline_vs_probe() {
         mode: TrainMode::Fast,
         weight_decay: 0.01,
             decor_weight: 0.1,
+            exec_prob_weight: 0.1,
     };
 
     println!("\n  ╔═══════════════════════════════════════════════════════════════════════╗");

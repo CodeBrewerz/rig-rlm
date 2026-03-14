@@ -122,6 +122,7 @@ mod tests {
             add_reverse_edges: true,
             add_self_loops: true,
             add_positional_encoding: true,
+            add_cross_dependency_edges: true,
         };
         let graph = build_hetero_graph::<B>(&facts, &config, &device);
         println!(

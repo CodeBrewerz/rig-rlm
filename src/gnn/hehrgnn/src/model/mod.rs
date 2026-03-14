@@ -1,6 +1,7 @@
 pub mod backbone;
 pub mod embedding;
 pub mod ensemble_pipeline;
+pub mod execution_head;
 pub mod gat;
 pub mod gnn_layer;
 pub mod graph_transformer;

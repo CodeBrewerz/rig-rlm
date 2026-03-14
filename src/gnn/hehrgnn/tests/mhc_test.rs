@@ -107,6 +107,7 @@ fn build_test_graph() -> hehrgnn::data::hetero_graph::HeteroGraph<B> {
             add_reverse_edges: true,
             add_self_loops: true,
             add_positional_encoding: true,
+            add_cross_dependency_edges: true,
         },
         &device,
     )
