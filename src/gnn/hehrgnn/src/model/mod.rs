@@ -20,4 +20,5 @@ pub mod stable_decorrelation;
 pub mod temporal_selector;
 pub mod trainer;
 pub mod vicreg;
+pub mod vision;
 pub mod weights;
