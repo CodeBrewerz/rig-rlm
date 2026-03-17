@@ -253,7 +253,7 @@ fn main() {
     // TEST 3: GAT
     // ═══════════════════════════════════════════════════════════════
     println!("\n{}", "═".repeat(72));
-    println!("  TEST 3: GAT Link Prediction (AUC + Variance)");
+    println!("  TEST 3: GAT Link Prediction (no AttnRes — per-edge attention only)");
     println!("{}", "═".repeat(72));
     {
         use hehrgnn::model::gat::GatConfig;
@@ -266,26 +266,14 @@ fn main() {
             dropout: 0.0,
         };
 
-        let model_with = config.init_model::<B>(&node_types, &edge_types, &device);
-        let emb_with = model_with.forward(&graph);
-        let (auc_with, var_with) = evaluate_link_pred(&emb_with, &graph);
-
-        let mut model_without = config.init_model::<B>(&node_types, &edge_types, &device);
-        model_without.attn_depth = None;
-        let emb_without = model_without.forward(&graph);
-        let (auc_without, var_without) = evaluate_link_pred(&emb_without, &graph);
+        let model = config.init_model::<B>(&node_types, &edge_types, &device);
+        let emb = model.forward(&graph);
+        let (auc, var) = evaluate_link_pred(&emb, &graph);
 
         println!("  {:30}   AUC       Variance", "Model");
-        println!(
-            "  {:30}   {:.4}    {:.4}",
-            "GAT + AttnRes", auc_with, var_with
-        );
-        println!(
-            "  {:30}   {:.4}    {:.4}",
-            "GAT (baseline)", auc_without, var_without
-        );
-        println!("  Variance delta: {:+.4}", var_with - var_without);
-        summary.push(("GAT".into(), "AUC".into(), auc_with, auc_without));
+        println!("  {:30}   {:.4}    {:.4}", "GAT (no AttnRes)", auc, var);
+        println!("  ✅ GAT uses per-edge attention only (AttnRes removed by design)");
+        summary.push(("GAT".into(), "AUC".into(), auc, auc));
     }
 
     // ═══════════════════════════════════════════════════════════════

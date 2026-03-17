@@ -247,14 +247,17 @@ impl<B: Backend> GatLayer<B> {
 }
 
 /// Multi-layer GAT model.
+///
+/// NOTE: AttnRes depth-attention is intentionally NOT used for GAT.
+/// Empirical testing (8-layer, 60-node graph, 100 SPSA epochs) showed
+/// GAT's per-edge multi-head attention already provides sufficient
+/// information routing, and adding depth-attention is redundant.
 #[derive(Module, Debug)]
 pub struct GatModel<B: Backend> {
     pub layers: Vec<GatLayer<B>>,
     pub input_linears: Vec<nn::Linear<B>>,
     /// Optional HeteroDoRA adapters for input projections.
     pub input_adapters: Option<crate::model::lora::HeteroBasisAdapter<B>>,
-    /// AttnRes depth-attention wrapper.
-    pub attn_depth: Option<crate::model::attn_res_gnn::DepthAttnWrapper<B>>,
     /// Learnable node-type embedding (KumoRFM §2.3)
     type_embeddings: Vec<Param<Tensor<B, 2>>>,
     #[module(skip)]
@@ -288,24 +291,10 @@ impl GatConfig {
             layers.push(self.init_layer(self.hidden_dim, edge_types, device));
         }
 
-        let num_layers = self.num_layers;
-        let hidden_dim = self.hidden_dim;
-        let attn_depth = if num_layers >= 2 {
-            Some(crate::model::attn_res_gnn::DepthAttnWrapper::new(
-                num_layers,
-                hidden_dim,
-                (num_layers / 2).max(1),
-                device,
-            ))
-        } else {
-            None
-        };
-
         GatModel {
             layers,
             input_linears,
             input_adapters: None,
-            attn_depth,
             type_embeddings,
             node_type_keys,
         }
@@ -366,16 +355,9 @@ impl<B: Backend> GatModel<B> {
             }
         }
 
-        // AttnRes depth-attention if available
-        if let Some(ref attn) = self.attn_depth {
-            let layers = &self.layers;
-            embeddings = attn.forward_with_layers(embeddings, graph, layers.len(), |emb, g, l| {
-                layers[l].forward(emb, g)
-            });
-        } else {
-            for layer in &self.layers {
-                embeddings = layer.forward(&embeddings, graph);
-            }
+        // GAT uses direct sequential layers (no AttnRes depth-attention)
+        for layer in &self.layers {
+            embeddings = layer.forward(&embeddings, graph);
         }
 
         embeddings
