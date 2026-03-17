@@ -10,6 +10,9 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use crate::nuggets::NuggetShelf;
 
 // ── Parameter types ───────────────────────────────────────────────
 
@@ -41,6 +44,44 @@ pub struct PolicyParams {
     pub command: String,
 }
 
+// ── Nuggets param types ──────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct NuggetsRememberParams {
+    /// Topic nugget name (e.g. "prefs", "locations", "debug"). Auto-created if new.
+    pub nugget: String,
+    /// Key for the fact (e.g. "test_cmd", "auth_handler").
+    pub key: String,
+    /// Value to store (keep it short — one sentence max).
+    pub value: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct NuggetsRecallParams {
+    /// Query to search for (fuzzy-matched against stored keys).
+    pub query: String,
+    /// Optional: restrict search to a specific nugget.
+    pub nugget: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct NuggetsForgetParams {
+    /// Nugget name containing the fact to remove.
+    pub nugget: String,
+    /// Key to remove.
+    pub key: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct NuggetsFactsParams {
+    /// Nugget name to list facts from.
+    pub nugget: String,
+}
+
 // ── MCP Server ────────────────────────────────────────────────────
 
 /// The MCP server struct — holds the tool router and working directory.
@@ -50,15 +91,20 @@ pub struct AgentMcpServer {
     work_dir: PathBuf,
     /// Auto-generated tool router.
     tool_router: ToolRouter<Self>,
+    /// Holographic memory shelf (thread-safe).
+    shelf: Arc<Mutex<NuggetShelf>>,
 }
 
 #[tool_router]
 impl AgentMcpServer {
     /// Create a new MCP server with the given working directory.
     pub fn new(work_dir: PathBuf) -> Self {
+        let mut shelf = NuggetShelf::new(None, true);
+        shelf.load_all();
         Self {
             work_dir,
             tool_router: Self::tool_router(),
+            shelf: Arc::new(Mutex::new(shelf)),
         }
     }
 
@@ -72,7 +118,7 @@ impl AgentMcpServer {
     async fn run_task(&self, params: Parameters<TaskParams>) -> Result<CallToolResult, McpError> {
         let task = &params.0.task;
         let key = format!("mcp-{}", uuid::Uuid::new_v4());
-        let url = format!("http://localhost:8080/AgentWorkflow/{key}/run");
+        let url = format!("http://localhost:18080/AgentWorkflow/{key}/run");
 
         let client = reqwest::Client::new();
         let body = serde_json::json!({ "task": task });
@@ -197,6 +243,130 @@ impl AgentMcpServer {
         );
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
+
+    // ── Nuggets tools ─────────────────────────────────────────────
+
+    /// Store a key-value fact in holographic memory.
+    #[tool(
+        description = "Store a key-value fact in holographic memory. Facts persist across sessions. Auto-creates the nugget if it doesn't exist. Keep values short (one sentence max). Use nugget names like 'prefs', 'locations', 'debug', 'project'."
+    )]
+    async fn nuggets_remember(
+        &self,
+        params: Parameters<NuggetsRememberParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut shelf = self.shelf.lock().unwrap();
+        let nugget = shelf.get_or_create(&params.0.nugget);
+        nugget.remember(&params.0.key, &params.0.value);
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Remembered in '{}': {} → {}",
+            params.0.nugget, params.0.key, params.0.value
+        ))]))
+    }
+
+    /// Search holographic memory for a fact.
+    #[tool(
+        description = "Search holographic memory for a fact. Use BEFORE expensive searches (grep, file reads, codebase search). Returns the best matching answer with confidence score. Optionally restrict to a specific nugget."
+    )]
+    async fn nuggets_recall(
+        &self,
+        params: Parameters<NuggetsRecallParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut shelf = self.shelf.lock().unwrap();
+        let result = shelf.recall(
+            &params.0.query,
+            params.0.nugget.as_deref(),
+            "", // no session tracking via MCP
+        );
+
+        if result.result.found {
+            let json = serde_json::json!({
+                "found": true,
+                "answer": result.result.answer,
+                "confidence": result.result.confidence,
+                "margin": result.result.margin,
+                "key": result.result.key,
+                "nugget": result.nugget_name,
+            });
+            Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&json).unwrap_or_default(),
+            )]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text(
+                "Not found in memory.".to_string(),
+            )]))
+        }
+    }
+
+    /// Remove a fact from holographic memory.
+    #[tool(
+        description = "Remove a specific fact from a nugget in holographic memory."
+    )]
+    async fn nuggets_forget(
+        &self,
+        params: Parameters<NuggetsForgetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut shelf = self.shelf.lock().unwrap();
+        if !shelf.has(&params.0.nugget) {
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "Nugget '{}' not found.",
+                params.0.nugget
+            ))]));
+        }
+        let removed = shelf.forget(&params.0.nugget, &params.0.key);
+        if removed {
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "Removed '{}' from nugget '{}'.",
+                params.0.key, params.0.nugget
+            ))]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "Key '{}' not found in nugget '{}'.",
+                params.0.key, params.0.nugget
+            ))]))
+        }
+    }
+
+    /// List all nuggets and their status.
+    #[tool(
+        description = "List all nuggets in holographic memory with fact counts, capacity, and dimension info."
+    )]
+    async fn nuggets_list(&self) -> Result<CallToolResult, McpError> {
+        let shelf = self.shelf.lock().unwrap();
+        let statuses = shelf.list();
+        if statuses.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "No nuggets stored yet.".to_string(),
+            )]));
+        }
+        let json = serde_json::to_string_pretty(&statuses).unwrap_or_default();
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// List all facts in a specific nugget.
+    #[tool(
+        description = "List all facts stored in a specific nugget. Shows keys, values, and hit counts."
+    )]
+    async fn nuggets_facts(
+        &self,
+        params: Parameters<NuggetsFactsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let shelf = self.shelf.lock().unwrap();
+        if !shelf.has(&params.0.nugget) {
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "Nugget '{}' not found.",
+                params.0.nugget
+            ))]));
+        }
+        let facts = shelf.get(&params.0.nugget).facts();
+        if facts.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "Nugget '{}' has no facts.",
+                params.0.nugget
+            ))]));
+        }
+        let json = serde_json::to_string_pretty(&facts).unwrap_or_default();
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
 }
 
 // ── ServerHandler implementation ──────────────────────────────────
@@ -213,7 +383,7 @@ impl ServerHandler for AgentMcpServer {
                 title: Some("RIG-RLM Agent".into()),
                 description: Some(
                     "AI agent with Python sandbox, unified diff apply-patch, \
-                     and configurable execution policy."
+                     configurable execution policy, and holographic memory (nuggets)."
                         .into(),
                 ),
                 icons: None,
@@ -221,8 +391,9 @@ impl ServerHandler for AgentMcpServer {
             },
             instructions: Some(
                 "Use run_task for full agent workflows, execute_python for \
-                 direct code execution, apply_patch for file editing, and \
-                 check_policy to validate commands."
+                 direct code execution, apply_patch for file editing, \
+                 check_policy to validate commands, and nuggets_* tools for \
+                 persistent holographic memory (recall before searching!)."
                     .into(),
             ),
         }
@@ -265,6 +436,19 @@ mod tests {
             tool_names.iter().any(|n| n == "check_policy"),
             "should have check_policy: {tool_names:?}"
         );
+        // Nuggets tools
+        for name in &[
+            "nuggets_remember",
+            "nuggets_recall",
+            "nuggets_forget",
+            "nuggets_list",
+            "nuggets_facts",
+        ] {
+            assert!(
+                tool_names.iter().any(|n| n == name),
+                "should have {name}: {tool_names:?}"
+            );
+        }
     }
 
     #[tokio::test]

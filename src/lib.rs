@@ -34,3 +34,6 @@ pub mod pipeline;
 
 // ARC-AGI Benchmark
 pub mod arc;
+
+// Holographic memory (HRR-backed key-value cache for agents)
+pub mod nuggets;
