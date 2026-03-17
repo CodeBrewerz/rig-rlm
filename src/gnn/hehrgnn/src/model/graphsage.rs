@@ -198,6 +198,9 @@ pub struct GraphSageModel<B: Backend> {
     /// Optional HeteroDoRA adapters for input projections.
     /// When present: y = input_linear(x) + adapter(x)
     pub input_adapters: Option<crate::model::lora::HeteroBasisAdapter<B>>,
+    /// Optional AttnRes depth-attention wrapper.
+    /// When present: layers use attention over depth instead of simple sequential.
+    pub attn_depth: Option<crate::model::attn_res_gnn::DepthAttnWrapper<B>>,
     /// Learnable node-type embedding (KumoRFM §2.3)
     type_embeddings: Vec<Param<Tensor<B, 2>>>,
     #[module(skip)]
@@ -247,10 +250,26 @@ impl GraphSageModelConfig {
             layers.push(sage_config.init_layer(self.hidden_dim, edge_types, device));
         }
 
+        let num_layers = self.num_layers;
+        let hidden_dim = self.hidden_dim;
+
+        // Initialize AttnRes depth-attention wrapper
+        let attn_depth = if num_layers >= 2 {
+            Some(crate::model::attn_res_gnn::DepthAttnWrapper::new(
+                num_layers,
+                hidden_dim,
+                (num_layers / 2).max(1),
+                device,
+            ))
+        } else {
+            None
+        };
+
         GraphSageModel {
             layers,
             input_linears,
             input_adapters: None,
+            attn_depth,
             type_embeddings,
             node_type_keys,
         }
@@ -316,8 +335,16 @@ impl<B: Backend> GraphSageModel<B> {
             }
         }
 
-        for layer in &self.layers {
-            embeddings = layer.forward(&embeddings, graph);
+        // Use AttnRes depth-attention if available, else simple sequential
+        if let Some(ref attn) = self.attn_depth {
+            let layers = &self.layers;
+            embeddings = attn.forward_with_layers(embeddings, graph, layers.len(), |emb, g, l| {
+                layers[l].forward(emb, g)
+            });
+        } else {
+            for layer in &self.layers {
+                embeddings = layer.forward(&embeddings, graph);
+            }
         }
 
         embeddings
@@ -374,7 +401,7 @@ impl<B: Backend> crate::model::trainer::JepaTrainable<B> for GraphSageModel<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
+    use crate::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
     use burn::backend::NdArray;
 
     type TestBackend = NdArray;

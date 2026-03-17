@@ -12,6 +12,22 @@ path = "src/main.rs"
 name = "hehrgnn-server"
 path = "src/server_main.rs"
 
+[[bin]]
+name = "rl_metrics"
+path = "src/bin/rl_metrics.rs"
+
+[[bin]]
+name = "rl_evolution"
+path = "src/bin/rl_evolution.rs"
+
+[[bin]]
+name = "gepa_rl_tuning"
+path = "src/bin/gepa_rl_tuning.rs"
+
+[[bin]]
+name = "rl_proof"
+path = "src/bin/rl_proof.rs"
+
 [dependencies]
 burn = { version = "0.20", features = ["wgpu", "autodiff", "train", "ndarray", "cpu"] }
 serde = { version = "1", features = ["derive"] }
@@ -24,3 +40,12 @@ chrono = "0.4"
 rayon = "1.10"
 reqwest = { version = "0.12", features = ["json"] }
 dotenvy = "0.15"
+attnres = "0.1"
+
+[[bin]]
+name = "attnres_bench"
+path = "src/bin/attnres_bench.rs"
+
+[[bin]]
+name = "attnres_verify"
+path = "src/bin/attnres_verify.rs"

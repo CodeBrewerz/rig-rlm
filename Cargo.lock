@@ -535,6 +535,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "628d228f918ac3b82fe590352cc719d30664a0c13ca3a60266fe02c7132d480a"
 
 [[package]]
+name = "attnres"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "320f45e191234e33f2c56301af8181a7ecca8371f397fa3c8e4bf7cc3225c794"
+dependencies = [
+ "burn",
+ "burn-ndarray",
+ "burn-wgpu",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -728,7 +741,7 @@ dependencies = [
  "bitflags",
  "cexpr",
  "clang-sys",
- "itertools 0.12.1",
+ "itertools 0.13.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -1685,7 +1698,7 @@ checksum = "fe6d2e5af09e8c8ad56c969f2157a3d4238cebc7c55f0a517728c38f7b200f81"
 dependencies = [
  "serde",
  "termcolor",
- "unicode-width 0.1.14",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]
@@ -4029,6 +4042,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 name = "hehrgnn"
 version = "0.1.0"
 dependencies = [
+ "attnres",
  "axum",
  "burn",
  "chrono",
@@ -7056,6 +7070,7 @@ dependencies = [
  "opentelemetry_sdk",
  "pdf-extract",
  "pyo3",
+ "rayon",
  "reqwest",
  "restate-sdk",
  "rig-core 0.30.0",

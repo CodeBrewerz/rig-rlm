@@ -253,6 +253,8 @@ pub struct GatModel<B: Backend> {
     pub input_linears: Vec<nn::Linear<B>>,
     /// Optional HeteroDoRA adapters for input projections.
     pub input_adapters: Option<crate::model::lora::HeteroBasisAdapter<B>>,
+    /// AttnRes depth-attention wrapper.
+    pub attn_depth: Option<crate::model::attn_res_gnn::DepthAttnWrapper<B>>,
     /// Learnable node-type embedding (KumoRFM §2.3)
     type_embeddings: Vec<Param<Tensor<B, 2>>>,
     #[module(skip)]
@@ -286,10 +288,24 @@ impl GatConfig {
             layers.push(self.init_layer(self.hidden_dim, edge_types, device));
         }
 
+        let num_layers = self.num_layers;
+        let hidden_dim = self.hidden_dim;
+        let attn_depth = if num_layers >= 2 {
+            Some(crate::model::attn_res_gnn::DepthAttnWrapper::new(
+                num_layers,
+                hidden_dim,
+                (num_layers / 2).max(1),
+                device,
+            ))
+        } else {
+            None
+        };
+
         GatModel {
             layers,
             input_linears,
             input_adapters: None,
+            attn_depth,
             type_embeddings,
             node_type_keys,
         }
@@ -350,8 +366,16 @@ impl<B: Backend> GatModel<B> {
             }
         }
 
-        for layer in &self.layers {
-            embeddings = layer.forward(&embeddings, graph);
+        // AttnRes depth-attention if available
+        if let Some(ref attn) = self.attn_depth {
+            let layers = &self.layers;
+            embeddings = attn.forward_with_layers(embeddings, graph, layers.len(), |emb, g, l| {
+                layers[l].forward(emb, g)
+            });
+        } else {
+            for layer in &self.layers {
+                embeddings = layer.forward(&embeddings, graph);
+            }
         }
 
         embeddings
@@ -379,7 +403,7 @@ impl<B: Backend> crate::model::trainer::JepaTrainable<B> for GatModel<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
+    use crate::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
     use burn::backend::NdArray;
 
     type TestBackend = NdArray;

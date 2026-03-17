@@ -182,6 +182,8 @@ pub struct EdgePredictor {
     /// W2: [hidden_dim → embed_dim]
     pub w2: Vec<Vec<f32>>,
     pub b2: Vec<f32>,
+    /// AttnRes pseudo-query for depth-attention between layers
+    pub attn_query: Vec<f32>,
     pub input_dim: usize,
     pub hidden_dim: usize,
     pub embed_dim: usize,
@@ -215,13 +217,14 @@ impl EdgePredictor {
             b1: vec![0.1; hidden_dim],
             w2,
             b2: vec![0.0; embed_dim],
+            attn_query: vec![0.0; hidden_dim], // zero-init per AttnRes paper
             input_dim,
             hidden_dim,
             embed_dim,
         }
     }
 
-    /// Forward pass: predict edge embedding from two node embeddings.
+    /// Forward pass with AttnRes depth-attention between layers.
     pub fn predict(&self, z_u: &[f32], z_v: &[f32]) -> Vec<f32> {
         // Concat: [z_u || z_v]
         let mut input: Vec<f32> = z_u.to_vec();
@@ -238,10 +241,41 @@ impl EdgePredictor {
             *h = if *h > 0.0 { *h } else { 0.01 * *h }; // LeakyReLU
         }
 
-        // Output: W2 @ hidden + b2
+        // AttnRes depth-attention: blend input projection with hidden layer
+        // dot(query, hidden) vs dot(query, input_proj) → softmax → weighted sum
+        let input_proj: Vec<f32> = hidden
+            .iter()
+            .enumerate()
+            .map(|(i, _)| if i < input.len() { input[i] } else { 0.0 })
+            .collect();
+        let dot_hidden: f32 = self
+            .attn_query
+            .iter()
+            .zip(hidden.iter())
+            .map(|(q, h)| q * h)
+            .sum();
+        let dot_input: f32 = self
+            .attn_query
+            .iter()
+            .zip(input_proj.iter())
+            .map(|(q, h)| q * h)
+            .sum();
+        let max_d = dot_hidden.max(dot_input);
+        let w_h = (dot_hidden - max_d).exp();
+        let w_i = (dot_input - max_d).exp();
+        let w_sum = w_h + w_i + 1e-8;
+        let alpha_h = w_h / w_sum;
+        let alpha_i = w_i / w_sum;
+        let blended: Vec<f32> = hidden
+            .iter()
+            .zip(input_proj.iter())
+            .map(|(h, i)| alpha_h * h + alpha_i * i)
+            .collect();
+
+        // Output: W2 @ blended + b2
         let mut output = self.b2.clone();
         for (o, w_row) in output.iter_mut().zip(&self.w2) {
-            for (j, &h) in hidden.iter().enumerate() {
+            for (j, &h) in blended.iter().enumerate() {
                 if j < w_row.len() {
                     *o += w_row[j] * h;
                 }
@@ -275,6 +309,7 @@ impl EdgePredictor {
             .chain(self.b1.iter())
             .chain(self.w2.iter().flatten())
             .chain(self.b2.iter())
+            .chain(self.attn_query.iter())
             .cloned()
             .collect();
 
@@ -283,7 +318,11 @@ impl EdgePredictor {
         let delta: Vec<f32> = (0..flat.len())
             .map(|_| {
                 seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                if (seed >> 33) % 2 == 0 { 1.0 } else { -1.0 }
+                if (seed >> 33) % 2 == 0 {
+                    1.0
+                } else {
+                    -1.0
+                }
             })
             .collect();
 
@@ -368,6 +407,13 @@ impl EdgePredictor {
         for b in &mut self.b2 {
             *b = flat[idx];
             idx += 1;
+        }
+        // AttnRes pseudo-query
+        for q in &mut self.attn_query {
+            if idx < flat.len() {
+                *q = flat[idx];
+                idx += 1;
+            }
         }
     }
 }
@@ -509,7 +555,11 @@ pub fn train_hehrgnn_jepa<B: Backend>(
         let delta: Vec<f32> = (0..w_data.len())
             .map(|_| {
                 seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                if (seed >> 33) % 2 == 0 { 1.0 } else { -1.0 }
+                if (seed >> 33) % 2 == 0 {
+                    1.0
+                } else {
+                    -1.0
+                }
             })
             .collect();
 

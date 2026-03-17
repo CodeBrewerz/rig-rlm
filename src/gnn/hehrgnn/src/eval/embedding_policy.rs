@@ -25,6 +25,9 @@ pub struct EmbeddingPolicy {
     w2: Vec<Vec<f32>>,
     b2: Vec<f32>,
 
+    // AttnRes pseudo-query for depth-attention between layers
+    attn_query: Vec<f32>,
+
     temperature: f64,
     baseline: f64,
     lr: f64,
@@ -73,6 +76,7 @@ impl EmbeddingPolicy {
             b1,
             w2,
             b2,
+            attn_query: vec![0.0; hidden_dim], // zero-init per AttnRes paper
             temperature: 1.0,
             baseline: 0.0,
             lr: 0.01, // Higher LR to escape initialization bias
@@ -106,16 +110,44 @@ impl EmbeddingPolicy {
             h[i] = h[i].clamp(-10.0, 10.0); // Prevent explosion
         }
 
+        // AttnRes depth-attention: blend input projection with hidden
+        let input_proj: Vec<f32> = (0..self.hidden_dim)
+            .map(|i| if i < self.state_dim { state[i] } else { 0.0 })
+            .collect();
+        let dot_h: f32 = self
+            .attn_query
+            .iter()
+            .zip(h.iter())
+            .map(|(q, v)| q * v)
+            .sum();
+        let dot_i: f32 = self
+            .attn_query
+            .iter()
+            .zip(input_proj.iter())
+            .map(|(q, v)| q * v)
+            .sum();
+        let max_d = dot_h.max(dot_i);
+        let w_h = (dot_h - max_d).exp();
+        let w_i = (dot_i - max_d).exp();
+        let w_sum = w_h + w_i + 1e-8;
+        let alpha_h = w_h / w_sum;
+        let alpha_i = w_i / w_sum;
+        let blended: Vec<f32> = h
+            .iter()
+            .zip(input_proj.iter())
+            .map(|(hv, iv)| alpha_h * hv + alpha_i * iv)
+            .collect();
+
         let mut logits = vec![0.0f32; self.num_actions];
         for i in 0..self.num_actions {
             let mut sum = self.b2[i];
             for j in 0..self.hidden_dim {
-                sum += self.w2[i][j] * h[j];
+                sum += self.w2[i][j] * blended[j];
             }
             logits[i] = sum.clamp(-10.0, 10.0);
         }
 
-        (h, logits)
+        (blended, logits)
     }
 
     fn softmax(&self, logits: &[f32]) -> Vec<f32> {
@@ -180,13 +212,15 @@ impl EmbeddingPolicy {
             }
         }
 
-        // Backprop through Layer 1
+        // Backprop through Layer 1 + AttnRes
         for j in 0..self.hidden_dim {
             let dh = d_h[j];
             self.b1[j] += dh;
             for k in 0..self.state_dim {
                 self.w1[j][k] += dh * state[k];
             }
+            // Update AttnRes pseudo-query via gradient
+            self.attn_query[j] += (self.lr as f32 * 0.1) * dh * h[j];
         }
     }
 

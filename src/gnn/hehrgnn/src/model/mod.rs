@@ -1,3 +1,4 @@
+pub mod attn_res_gnn;
 pub mod backbone;
 pub mod ema;
 pub mod embedding;

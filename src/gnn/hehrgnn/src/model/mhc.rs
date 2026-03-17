@@ -157,6 +157,8 @@ pub struct MhcGraphSageModel<B: Backend> {
     pub input_linears: Vec<nn::Linear<B>>,
     /// Output aggregation: project n*hidden → hidden.
     pub output_linear: nn::Linear<B>,
+    /// AttnRes depth-attention for GNN layer depth.
+    pub attn_depth: Option<crate::model::attn_res_gnn::DepthAttnWrapper<B>>,
     /// Learnable node-type embedding (KumoRFM §2.3)
     type_embeddings: Vec<Param<Tensor<B, 2>>>,
     /// Node type key mapping.
@@ -215,11 +217,25 @@ impl MhcGraphSageConfig {
         let output_linear =
             nn::LinearConfig::new(self.hidden_dim * self.n_streams, self.hidden_dim).init(device);
 
+        let num_layers = self.num_layers;
+        let hidden_dim = self.hidden_dim;
+        let attn_depth = if num_layers >= 2 {
+            Some(crate::model::attn_res_gnn::DepthAttnWrapper::new(
+                num_layers,
+                hidden_dim,
+                (num_layers / 2).max(1),
+                device,
+            ))
+        } else {
+            None
+        };
+
         MhcGraphSageModel {
             layers,
             connections,
             input_linears,
             output_linear,
+            attn_depth,
             type_embeddings,
             node_type_keys,
             n_streams: self.n_streams,
@@ -259,7 +275,16 @@ impl<B: Backend> MhcGraphSageModel<B> {
             stream_embeddings.push(base_embeddings.clone());
         }
 
-        // Step 3: Apply each GNN layer with mHC mixing
+        // Step 3: Apply each GNN layer with mHC mixing + AttnRes depth-attention
+        // Track per-layer block outputs for AttnRes
+        let node_types: Vec<String> = graph.node_types().iter().map(|s| (*s).clone()).collect();
+        let mut attn_blocks: std::collections::HashMap<String, Vec<Tensor<B, 3>>> =
+            std::collections::HashMap::new();
+        for nt in &node_types {
+            attn_blocks.insert(nt.clone(), Vec::<Tensor<B, 3>>::new());
+        }
+        let attn_block_size = self.layers.len().max(1) / 2;
+
         for (l, layer) in self.layers.iter().enumerate() {
             let conn = &self.connections[l];
             let h_res = conn.h_res(); // [n × n] doubly stochastic
@@ -284,6 +309,30 @@ impl<B: Backend> MhcGraphSageModel<B> {
                     }
                 }
                 gnn_input.insert(node_type, aggregated);
+            }
+
+            // 3a+: AttnRes depth-attention on GNN input (attend over previous blocks)
+            if l > 0 {
+                if let Some(ref attn) = self.attn_depth {
+                    if l < attn.attn_ops.len() {
+                        let mut enhanced_input = NodeEmbeddings::new();
+                        for nt in &node_types {
+                            let blocks = attn_blocks.get(nt).unwrap();
+                            if let Some(inp) = gnn_input.get(nt) {
+                                if blocks.is_empty() {
+                                    enhanced_input.insert(nt, inp.clone());
+                                } else {
+                                    let [n, d] = inp.dims();
+                                    let partial = inp.clone().reshape([1, n, d]);
+                                    let h = attn.attn_ops[l].forward(blocks, &partial);
+                                    let [_, rn, rd] = h.dims();
+                                    enhanced_input.insert(nt, h.reshape([rn, rd]));
+                                }
+                            }
+                        }
+                        gnn_input = enhanced_input;
+                    }
+                }
             }
 
             // 3b: Run standard GNN layer on aggregated input
@@ -326,6 +375,19 @@ impl<B: Backend> MhcGraphSageModel<B> {
                 new_streams.push(new_emb);
             }
             stream_embeddings = new_streams;
+
+            // Track block outputs for AttnRes depth-attention
+            if attn_block_size > 0 && (l + 1) % attn_block_size == 0 {
+                for nt in &node_types {
+                    if let Some(emb) = stream_embeddings[0].get(nt) {
+                        let [n, d] = emb.dims();
+                        attn_blocks
+                            .get_mut(nt)
+                            .unwrap()
+                            .push(emb.clone().reshape([1, n, d]));
+                    }
+                }
+            }
         }
 
         // Step 4: Concatenate all streams and project to final embedding
@@ -420,6 +482,7 @@ pub struct MhcRgcnModel<B: Backend> {
     pub connections: Vec<MhcConnection<B>>,
     pub input_linears: Vec<nn::Linear<B>>,
     pub output_linear: nn::Linear<B>,
+    pub attn_depth: Option<crate::model::attn_res_gnn::DepthAttnWrapper<B>>,
     /// Learnable node-type embedding (KumoRFM §2.3)
     type_embeddings: Vec<Param<Tensor<B, 2>>>,
     #[module(skip)]
@@ -468,11 +531,23 @@ impl MhcRgcnConfig {
         let output_linear =
             nn::LinearConfig::new(self.hidden_dim * self.n_streams, self.hidden_dim).init(device);
 
+        let attn_depth = if self.num_layers >= 2 {
+            Some(crate::model::attn_res_gnn::DepthAttnWrapper::new(
+                self.num_layers,
+                self.hidden_dim,
+                (self.num_layers / 2).max(1),
+                device,
+            ))
+        } else {
+            None
+        };
+
         MhcRgcnModel {
             layers,
             connections,
             input_linears,
             output_linear,
+            attn_depth,
             type_embeddings,
             node_type_keys,
             n_streams: self.n_streams,
@@ -492,6 +567,7 @@ impl<B: Backend> MhcRgcnModel<B> {
             self.n_streams,
             self.hidden_dim,
             Some(&self.type_embeddings),
+            self.attn_depth.as_ref(),
             |layer_idx, input_emb, g| self.layers[layer_idx].forward(input_emb, g),
         )
     }
@@ -537,6 +613,7 @@ pub struct MhcGatModel<B: Backend> {
     pub connections: Vec<MhcConnection<B>>,
     pub input_linears: Vec<nn::Linear<B>>,
     pub output_linear: nn::Linear<B>,
+    pub attn_depth: Option<crate::model::attn_res_gnn::DepthAttnWrapper<B>>,
     /// Learnable node-type embedding (KumoRFM §2.3)
     type_embeddings: Vec<Param<Tensor<B, 2>>>,
     #[module(skip)]
@@ -585,11 +662,23 @@ impl MhcGatConfig {
         let output_linear =
             nn::LinearConfig::new(self.hidden_dim * self.n_streams, self.hidden_dim).init(device);
 
+        let attn_depth = if self.num_layers >= 2 {
+            Some(crate::model::attn_res_gnn::DepthAttnWrapper::new(
+                self.num_layers,
+                self.hidden_dim,
+                (self.num_layers / 2).max(1),
+                device,
+            ))
+        } else {
+            None
+        };
+
         MhcGatModel {
             layers,
             connections,
             input_linears,
             output_linear,
+            attn_depth,
             type_embeddings,
             node_type_keys,
             n_streams: self.n_streams,
@@ -609,6 +698,7 @@ impl<B: Backend> MhcGatModel<B> {
             self.n_streams,
             self.hidden_dim,
             Some(&self.type_embeddings),
+            self.attn_depth.as_ref(),
             |layer_idx, input_emb, g| self.layers[layer_idx].forward(input_emb, g),
         )
     }
@@ -637,6 +727,7 @@ pub struct MhcGpsModel<B: Backend> {
     pub connections: Vec<MhcConnection<B>>,
     pub input_linears: Vec<nn::Linear<B>>,
     pub output_linear: nn::Linear<B>,
+    pub attn_depth: Option<crate::model::attn_res_gnn::DepthAttnWrapper<B>>,
     /// Learnable node-type embedding (KumoRFM §2.3)
     type_embeddings: Vec<Param<Tensor<B, 2>>>,
     #[module(skip)]
@@ -692,11 +783,23 @@ impl MhcGpsConfig {
         let output_linear =
             nn::LinearConfig::new(self.hidden_dim * self.n_streams, self.hidden_dim).init(device);
 
+        let attn_depth = if self.num_layers >= 2 {
+            Some(crate::model::attn_res_gnn::DepthAttnWrapper::new(
+                self.num_layers,
+                self.hidden_dim,
+                (self.num_layers / 2).max(1),
+                device,
+            ))
+        } else {
+            None
+        };
+
         MhcGpsModel {
             layers,
             connections,
             input_linears,
             output_linear,
+            attn_depth,
             type_embeddings,
             node_type_keys,
             n_streams: self.n_streams,
@@ -716,6 +819,7 @@ impl<B: Backend> MhcGpsModel<B> {
             self.n_streams,
             self.hidden_dim,
             Some(&self.type_embeddings),
+            self.attn_depth.as_ref(),
             |layer_idx, input_emb, g| self.layers[layer_idx].forward(input_emb, g),
         )
     }
@@ -738,6 +842,7 @@ fn mhc_forward_generic<B: Backend, F>(
     n_streams: usize,
     hidden_dim: usize,
     type_embeddings: Option<&Vec<Param<Tensor<B, 2>>>>,
+    attn_depth: Option<&crate::model::attn_res_gnn::DepthAttnWrapper<B>>,
     layer_forward: F,
 ) -> NodeEmbeddings<B>
 where
@@ -766,6 +871,16 @@ where
         stream_embeddings.push(base_embeddings.clone());
     }
 
+    // AttnRes block tracking
+    let node_types: Vec<String> = graph.node_types().iter().map(|s| (*s).clone()).collect();
+    let mut attn_blocks: std::collections::HashMap<String, Vec<Tensor<B, 3>>> =
+        std::collections::HashMap::new();
+    for nt in &node_types {
+        attn_blocks.insert(nt.clone(), Vec::<Tensor<B, 3>>::new());
+    }
+    let num_layers = connections.len();
+    let attn_block_size = num_layers.max(1) / 2;
+
     // Step 3: Apply each GNN layer with mHC mixing
     for (l, conn) in connections.iter().enumerate() {
         let h_res = conn.h_res();
@@ -790,6 +905,30 @@ where
                 }
             }
             gnn_input.insert(node_type, aggregated);
+        }
+
+        // 3a+: AttnRes depth-attention on GNN input
+        if l > 0 {
+            if let Some(attn) = attn_depth {
+                if l < attn.attn_ops.len() {
+                    let mut enhanced = NodeEmbeddings::new();
+                    for nt in &node_types {
+                        let blocks = attn_blocks.get(nt).unwrap();
+                        if let Some(inp) = gnn_input.get(nt) {
+                            if blocks.is_empty() {
+                                enhanced.insert(nt, inp.clone());
+                            } else {
+                                let [n, d] = inp.dims();
+                                let partial = inp.clone().reshape([1, n, d]);
+                                let h = attn.attn_ops[l].forward(blocks, &partial);
+                                let [_, rn, rd] = h.dims();
+                                enhanced.insert(nt, h.reshape([rn, rd]));
+                            }
+                        }
+                    }
+                    gnn_input = enhanced;
+                }
+            }
         }
 
         // 3b: Run GNN layer
@@ -829,6 +968,19 @@ where
             new_streams.push(new_emb);
         }
         stream_embeddings = new_streams;
+
+        // Track block outputs for AttnRes
+        if attn_block_size > 0 && (l + 1) % attn_block_size == 0 {
+            for nt in &node_types {
+                if let Some(emb) = stream_embeddings[0].get(nt) {
+                    let [n, d] = emb.dims();
+                    attn_blocks
+                        .get_mut(nt)
+                        .unwrap()
+                        .push(emb.clone().reshape([1, n, d]));
+                }
+            }
+        }
     }
 
     // Step 4: Concatenate streams → output projection
@@ -853,7 +1005,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::graph_builder::{GraphBuildConfig, GraphFact, build_hetero_graph};
+    use crate::data::graph_builder::{build_hetero_graph, GraphBuildConfig, GraphFact};
     use burn::backend::NdArray;
 
     type B = NdArray;
@@ -895,7 +1047,7 @@ mod tests {
                 add_reverse_edges: true,
                 add_self_loops: true,
                 add_positional_encoding: true,
-            add_cross_dependency_edges: true,
+                add_cross_dependency_edges: true,
             },
             &device,
         )
