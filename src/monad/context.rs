@@ -24,6 +24,7 @@ use super::interaction::agent_task;
 use super::memory::MemoryConfig;
 use super::monad::AgentMonad;
 use super::provider::{LlmProvider, ProviderConfig};
+use crate::channels;
 use crate::safety::{ExecutionLimits, sanitize_output, validate_code};
 use crate::sandbox::{CodeExecutor, ExecutorKind, Pyo3CodeExecutor, create_executor};
 use crate::session::SessionConfig;
@@ -281,6 +282,10 @@ pub struct AgentContext {
     pub cost_tracker: super::cost::CostTracker,
     /// Lifecycle hooks registry (Codex pattern).
     pub hooks: HookRegistry,
+    /// Channel hub for external event injection (hub-and-spoke).
+    pub channel_hub: Option<std::sync::Arc<tokio::sync::RwLock<channels::hub::ChannelHub>>>,
+    /// Channel event receiver for this agent session's subscription.
+    pub channel_rx: Option<tokio::sync::broadcast::Receiver<std::sync::Arc<channels::ChannelEvent>>>,
 }
 
 impl AgentContext {
@@ -307,6 +312,8 @@ impl AgentContext {
             trace_ctx: super::otel::TraceContext::new(),
             cost_tracker: super::cost::CostTracker::new(),
             hooks: HookRegistry::new(),
+            channel_hub: None,
+            channel_rx: None,
         }
     }
 
@@ -332,6 +339,8 @@ impl AgentContext {
             trace_ctx: super::otel::TraceContext::new(),
             cost_tracker: super::cost::CostTracker::new(),
             hooks: HookRegistry::new(),
+            channel_hub: None,
+            channel_rx: None,
         })
     }
 
@@ -363,6 +372,8 @@ impl AgentContext {
             trace_ctx: super::otel::TraceContext::new(),
             cost_tracker: super::cost::CostTracker::new(),
             hooks: HookRegistry::new(),
+            channel_hub: None,
+            channel_rx: None,
         }
     }
 
@@ -665,6 +676,9 @@ impl AgentContext {
                 Action::Orchestrate { .. } => "Orchestrate",
                 Action::ApplyPatch { .. } => "ApplyPatch",
                 Action::ElicitUser { .. } => "ElicitUser",
+                Action::ChannelInject(_) => "ChannelInject",
+                Action::ChannelReply { .. } => "ChannelReply",
+                Action::ListenChannels => "ListenChannels",
             };
             self.config
                 .capabilities
@@ -1329,13 +1343,71 @@ impl AgentContext {
                     Ok(ActionOutput::Value(output))
                 }
 
-                // ── HITL: Elicit user input ──
                 Action::ElicitUser { question, partial_result } => {
                     info!(question = %question, "agent requesting user input (HITL)");
                     self.evidence.push(Evidence::from_think(&format!(
                         "HITL: asking user: {question}"
                     )));
                     Ok(ActionOutput::Suspended { question, partial_result })
+                }
+
+                // ── Channels: event injection + reply ──
+                Action::ChannelInject(event) => {
+                    let prompt = event.to_prompt();
+                    debug!(source = %event.source, topic = %event.topic, "injecting channel event");
+                    self.history.push(HistoryMessage {
+                        role: Role::System,
+                        content: std::borrow::Cow::Owned(prompt),
+                        attachments: vec![],
+                    });
+                    self.evidence.push(Evidence::from_think(&format!(
+                        "Channel event: [{}] {}", event.source, event.topic
+                    )));
+                    Ok(ActionOutput::Unit)
+                }
+
+                Action::ChannelReply { spoke, meta, text } => {
+                    info!(spoke = %spoke, "sending channel reply");
+                    match &self.channel_hub {
+                        Some(hub) => {
+                            let hub = hub.read().await;
+                            hub.reply(&spoke, &meta, &text)
+                                .await
+                                .map_err(|e| AgentError::Internal(format!("channel reply failed: {e}")))?;
+                            Ok(ActionOutput::Unit)
+                        }
+                        None => Err(AgentError::Internal(
+                            "No channel hub configured — cannot send reply".to_string(),
+                        )),
+                    }
+                }
+
+                Action::ListenChannels => {
+                    // Non-blocking drain of pending channel events
+                    let mut events: Vec<String> = Vec::new();
+                    if let Some(ref mut rx) = self.channel_rx {
+                        loop {
+                            match rx.try_recv() {
+                                Ok(arc_event) => {
+                                    // Inject into history (CoW: we read from Arc, no clone)
+                                    let prompt = arc_event.to_prompt();
+                                    self.history.push(HistoryMessage {
+                                        role: Role::System,
+                                        content: std::borrow::Cow::Owned(prompt.clone()),
+                                        attachments: vec![],
+                                    });
+                                    events.push(prompt);
+                                }
+                                Err(_) => break, // No more events
+                            }
+                        }
+                    }
+                    if events.is_empty() {
+                        Ok(ActionOutput::Value("[]".to_string()))
+                    } else {
+                        let json = serde_json::to_string(&events).unwrap_or_else(|_| "[]".into());
+                        Ok(ActionOutput::Value(json))
+                    }
                 }
             }
         }) // close async move + Box::pin

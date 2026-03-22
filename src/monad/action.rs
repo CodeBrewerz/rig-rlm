@@ -125,6 +125,22 @@ pub enum Action {
         question: String,
         partial_result: Option<String>,
     },
+
+    // ─── Channels: event injection + reply ──────────────────────
+    /// Inject a channel event into the conversation history.
+    /// The event is formatted as an XML `<channel>` tag.
+    ChannelInject(crate::channels::ChannelEvent),
+
+    /// Send a reply through a named spoke.
+    ChannelReply {
+        spoke: String,
+        meta: crate::channels::ChannelMeta,
+        text: String,
+    },
+
+    /// Non-blocking drain of pending channel events.
+    /// Returns a JSON array of any events waiting in the subscription.
+    ListenChannels,
 }
 
 impl Action {
@@ -150,6 +166,9 @@ impl Action {
             Self::Orchestrate { .. } => "orchestrate",
             Self::ApplyPatch { .. } => "apply_patch",
             Self::ElicitUser { .. } => "elicit_user",
+            Self::ChannelInject(_) => "channel_inject",
+            Self::ChannelReply { .. } => "channel_reply",
+            Self::ListenChannels => "listen_channels",
         }
     }
 
@@ -166,6 +185,8 @@ impl Action {
                 | Self::Orchestrate { .. }
                 | Self::ApplyPatch { .. }
                 | Self::ElicitUser { .. }
+                | Self::ChannelReply { .. }
+                | Self::ListenChannels
         )
     }
 }

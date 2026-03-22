@@ -303,6 +303,46 @@ impl AgentMonad {
             |output| Self::Pure(output.into_string()),
         )
     }
+
+    // ─── Channels ───────────────────────────────────────────────
+
+    /// Non-blocking drain of pending channel events.
+    ///
+    /// Returns a JSON array of any events waiting in the subscription.
+    /// Used between turns to check for external events.
+    pub fn listen_channels() -> Self {
+        Self::perform(Action::ListenChannels, |output| {
+            Self::Pure(output.into_string())
+        })
+    }
+
+    /// Send a reply through a named spoke.
+    ///
+    /// The `meta` should include routing info (e.g. `chat_id` for Telegram).
+    pub fn channel_reply(
+        spoke: impl Into<String>,
+        meta: crate::channels::ChannelMeta,
+        text: impl Into<String>,
+    ) -> Self {
+        Self::perform(
+            Action::ChannelReply {
+                spoke: spoke.into(),
+                meta,
+                text: text.into(),
+            },
+            |_| Self::Pure(String::new()),
+        )
+    }
+
+    /// Inject a channel event into the conversation.
+    ///
+    /// Formats the event as an XML `<channel>` tag and inserts it
+    /// as a system message in the conversation history.
+    pub fn channel_inject(event: crate::channels::ChannelEvent) -> Self {
+        Self::perform(Action::ChannelInject(event), |_| {
+            Self::Pure(String::new())
+        })
+    }
 }
 
 // Debug impl that doesn't try to print the continuation closure.

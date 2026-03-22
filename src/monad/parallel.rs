@@ -35,6 +35,7 @@ impl Action {
             | Self::ListContexts
             | Self::Think { .. }
             | Self::EvaluateProgress { .. }
+            | Self::ListenChannels
             | Self::Log { .. } => ActionSafety::ReadOnly,
 
             // Mutating: these modify conversation history, execute code, etc.
@@ -48,7 +49,9 @@ impl Action {
             | Self::CompactContext
             | Self::Orchestrate { .. }
             | Self::ApplyPatch { .. }
-            | Self::ElicitUser { .. } => ActionSafety::Mutating,
+            | Self::ElicitUser { .. }
+            | Self::ChannelInject(_)
+            | Self::ChannelReply { .. } => ActionSafety::Mutating,
 
             // ParallelBatch: inherently parallel (contains only read-only actions)
             Self::ParallelBatch { .. } => ActionSafety::ReadOnly,

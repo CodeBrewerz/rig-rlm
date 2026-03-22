@@ -64,11 +64,15 @@ tokio-util = "0.7.18"
 # MCP Server
 rmcp = { version = "0.16", features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
 
+# Channels
+teloxide = { version = "0.17", features = ["macros"] }
+
 # A2A Server (HTTP)
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "0.8", features = ["macros", "ws"] }
 tower-http = { version = "0.6", features = ["cors"] }
 tokio-stream = "0.1"
 async-stream = "0.3"
+futures-util = "0.3"
 
 [[bin]]
 name = "rig-rlm"
@@ -85,6 +89,18 @@ path = "src/bin/mcp_server.rs"
 [[bin]]
 name = "a2a-server"
 path = "src/bin/a2a_server.rs"
+
+[[bin]]
+name = "ws-channel-demo"
+path = "src/bin/ws_channel_demo.rs"
+
+[[bin]]
+name = "ws-agent-demo"
+path = "src/bin/ws_agent_demo.rs"
+
+[[bin]]
+name = "ws-hub-demo"
+path = "src/bin/ws_hub_demo.rs"
 
 [dev-dependencies]
 tempfile = "3"

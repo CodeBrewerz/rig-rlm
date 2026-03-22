@@ -37,3 +37,6 @@ pub mod arc;
 
 // Holographic memory (HRR-backed key-value cache for agents)
 pub mod nuggets;
+
+// Channel system (hub-and-spoke, broadcasting, multiplexing, topic streaming)
+pub mod channels;

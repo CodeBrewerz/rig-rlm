@@ -49,3 +49,7 @@ path = "src/bin/attnres_bench.rs"
 [[bin]]
 name = "attnres_verify"
 path = "src/bin/attnres_verify.rs"
+
+[[bin]]
+name = "attnres_train"
+path = "src/bin/attnres_train.rs"
