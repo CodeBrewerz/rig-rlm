@@ -91,7 +91,7 @@ pub struct AgentMcpServer {
     work_dir: PathBuf,
     /// Auto-generated tool router.
     tool_router: ToolRouter<Self>,
-    /// Holographic memory shelf (thread-safe).
+    /// Disk-backed memory shelf with LRU cache (thread-safe).
     shelf: Arc<Mutex<NuggetShelf>>,
 }
 
@@ -246,9 +246,9 @@ impl AgentMcpServer {
 
     // ── Nuggets tools ─────────────────────────────────────────────
 
-    /// Store a key-value fact in holographic memory.
+    /// Store a key-value fact in persistent memory.
     #[tool(
-        description = "Store a key-value fact in holographic memory. Facts persist across sessions. Auto-creates the nugget if it doesn't exist. Keep values short (one sentence max). Use nugget names like 'prefs', 'locations', 'debug', 'project'."
+        description = "Store a key-value fact in persistent memory. Facts persist across sessions. Auto-creates the nugget if it doesn't exist. Keep values short (one sentence max). Use nugget names like 'prefs', 'locations', 'debug', 'project'."
     )]
     async fn nuggets_remember(
         &self,
@@ -263,9 +263,9 @@ impl AgentMcpServer {
         ))]))
     }
 
-    /// Search holographic memory for a fact.
+    /// Search persistent memory for a fact.
     #[tool(
-        description = "Search holographic memory for a fact. Use BEFORE expensive searches (grep, file reads, codebase search). Returns the best matching answer with confidence score. Optionally restrict to a specific nugget."
+        description = "Search persistent memory for a fact. Use BEFORE expensive searches (grep, file reads, codebase search). Returns the best matching answer with confidence score. Optionally restrict to a specific nugget."
     )]
     async fn nuggets_recall(
         &self,
@@ -297,9 +297,9 @@ impl AgentMcpServer {
         }
     }
 
-    /// Remove a fact from holographic memory.
+    /// Remove a fact from persistent memory.
     #[tool(
-        description = "Remove a specific fact from a nugget in holographic memory."
+        description = "Remove a specific fact from a nugget in persistent memory."
     )]
     async fn nuggets_forget(
         &self,
@@ -328,10 +328,10 @@ impl AgentMcpServer {
 
     /// List all nuggets and their status.
     #[tool(
-        description = "List all nuggets in holographic memory with fact counts, capacity, and dimension info."
+        description = "List all nuggets in persistent memory with fact counts and capacity info."
     )]
     async fn nuggets_list(&self) -> Result<CallToolResult, McpError> {
-        let shelf = self.shelf.lock().unwrap();
+        let mut shelf = self.shelf.lock().unwrap();
         let statuses = shelf.list();
         if statuses.is_empty() {
             return Ok(CallToolResult::success(vec![Content::text(
@@ -350,7 +350,7 @@ impl AgentMcpServer {
         &self,
         params: Parameters<NuggetsFactsParams>,
     ) -> Result<CallToolResult, McpError> {
-        let shelf = self.shelf.lock().unwrap();
+        let mut shelf = self.shelf.lock().unwrap();
         if !shelf.has(&params.0.nugget) {
             return Ok(CallToolResult::success(vec![Content::text(format!(
                 "Nugget '{}' not found.",

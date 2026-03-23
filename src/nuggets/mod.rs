@@ -1,17 +1,18 @@
-//! Nuggets — Holographic Reduced Representation (HRR) memory for LLM agents.
+//! Nuggets — disk-backed fuzzy key-value memory for LLM agents.
 //!
-//! A fast, fixed-capacity associative key-value memory backed by complex-valued
-//! tensors. Think of it as L1 cache for an agent — tiny, sub-microsecond recall,
-//! lossy, and associative (fuzzy key lookup).
+//! A fast, persistent key-value memory with fuzzy key lookup.
+//! Think of it as an associative cache for an agent — sub-millisecond
+//! recall, fuzzy matching, and fully disk-backed with an LRU cache.
 //!
 //! # Architecture
 //!
-//! - **Nugget**: A single holographic memory unit storing key→value facts
-//!   as superposed complex vectors. Deterministic rebuild from facts using
-//!   seeded PRNG (vectors are never serialized, only facts are).
+//! - **Nugget**: A single disk-backed memory unit storing key→value facts
+//!   as JSON.  Recall uses fuzzy string matching — no vectors or complex
+//!   math at runtime.
 //!
-//! - **NuggetShelf**: Multi-nugget manager supporting broadcast recall
-//!   across all loaded nuggets (e.g., "prefs", "locations", "debug").
+//! - **NuggetShelf**: Multi-nugget manager with LRU cache.  At startup
+//!   only a lightweight catalog is built by scanning the save directory.
+//!   Nugget data is loaded on-demand and evicted when the cache is full.
 //!
 //! - **Promote**: Promotes frequently-recalled facts (3+ hits) to MEMORY.md.
 //!
@@ -38,6 +39,9 @@ pub mod memory;
 pub mod promote;
 pub mod shelf;
 
-pub use advanced::{CleanupNetwork, Resonator, RffDecorrelator};
+// Re-export main types
 pub use memory::{Nugget, NuggetOpts, RecallResult};
 pub use shelf::NuggetShelf;
+
+// HRR engine primitives — kept for direct use, benchmarking, and future experimentation
+pub use advanced::{CleanupNetwork, Resonator, RffDecorrelator};

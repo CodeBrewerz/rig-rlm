@@ -101,7 +101,7 @@ fn render_memory_md(sections: &Sections) -> String {
 ///
 /// Merges into existing MEMORY.md (idempotent). Returns count of
 /// newly promoted facts.
-pub fn promote_facts(shelf: &NuggetShelf, memory_path: &Path) -> usize {
+pub fn promote_facts(shelf: &mut NuggetShelf, memory_path: &Path) -> usize {
     // Collect promotable facts
     let mut candidates: Vec<(String, String, String)> = Vec::new(); // (nugget, key, value)
     for info in shelf.list() {
@@ -219,7 +219,7 @@ Auto-promoted from nuggets (3+ recalls across sessions).
             }
         }
 
-        let promoted = promote_facts(&shelf, &memory_path);
+        let promoted = promote_facts(&mut shelf, &memory_path);
         assert!(promoted > 0);
         assert!(memory_path.exists());
 

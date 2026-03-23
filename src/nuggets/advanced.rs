@@ -9,6 +9,7 @@
 
 use super::core::{bind, unbind, ComplexVector, Mulberry32};
 use std::f64::consts::TAU;
+use rayon::prelude::*;
 
 // ═══════════════════════════════════════════════════════════════════
 // 1. Cleanup Network — Codebook Nearest-Neighbor
@@ -52,6 +53,11 @@ impl CleanupNetwork {
         }
     }
 
+    /// Returns the underlying codebook vectors.
+    pub fn codebook(&self) -> &[ComplexVector] {
+        &self.codebook
+    }
+
     /// Clean up a noisy signal by finding the nearest codebook entry.
     ///
     /// Returns (best_index, similarity, cleaned_vector).
@@ -72,16 +78,11 @@ impl CleanupNetwork {
             *x /= norm;
         }
 
-        // Find highest cosine similarity using core::dot_product (AVX2 optimized)
-        let mut best_idx = 0;
-        let mut best_sim = f64::NEG_INFINITY;
-        for (i, row) in self.codebook_norm.iter().enumerate() {
-            let dot = super::core::dot_product(row, &query);
-            if dot > best_sim {
-                best_sim = dot;
-                best_idx = i;
-            }
-        }
+        // Find highest cosine similarity using core::dot_product (AVX2 optimized) in parallel
+        let (best_idx, best_sim) = self.codebook_norm.par_iter().enumerate()
+            .map(|(i, row)| (i, super::core::dot_product(row, &query)))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or((0, f64::NEG_INFINITY));
 
         (best_idx, best_sim, self.codebook[best_idx].clone())
     }
@@ -89,6 +90,35 @@ impl CleanupNetwork {
     /// Batch cleanup — process multiple noisy signals.
     pub fn cleanup_batch(&self, noisy: &[ComplexVector]) -> Vec<(usize, f64, ComplexVector)> {
         noisy.iter().map(|n| self.cleanup(n)).collect()
+    }
+
+    /// Clean up a noisy signal and return the full vector of cosine similarities
+    /// for all codebook entries. Avoids redundant calculations in downstream softmax.
+    pub fn cleanup_with_sims_real(&self, mut query: &mut [f64]) -> (usize, f64, ComplexVector, Vec<f64>) {
+        if self.codebook.is_empty() {
+            return (0, 0.0, ComplexVector::zeros(query.len()/2), Vec::new());
+        }
+
+        let norm: f64 = query.iter().map(|x| x * x).sum::<f64>().sqrt() + 1e-12;
+        let inv = 1.0 / norm;
+        for x in query.iter_mut() {
+            *x *= inv;
+        }
+
+        let sims: Vec<f64> = self.codebook_norm.par_iter()
+            .map(|row| super::core::dot_product(row, query))
+            .collect();
+
+        let mut best_idx = 0;
+        let mut best_sim = f64::NEG_INFINITY;
+        for (i, &dot) in sims.iter().enumerate() {
+            if dot > best_sim {
+                best_sim = dot;
+                best_idx = i;
+            }
+        }
+
+        (best_idx, best_sim, self.codebook[best_idx].clone(), sims)
     }
 }
 

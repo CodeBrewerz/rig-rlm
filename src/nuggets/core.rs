@@ -237,16 +237,46 @@ pub fn sharpen(z: &ComplexVector, p: f64) -> ComplexVector {
 #[target_feature(enable = "avx2,fma")]
 unsafe fn dot_product_avx2(a: &[f64], b: &[f64]) -> f64 {
     use std::arch::x86_64::*;
-    let mut sum_vec = _mm256_setzero_pd();
+    
+    // Unroll 4-ways to avoid pipeline dependency stalls (Latencies of FMA -> 4 cycles)
+    // By having 4 accumulators, we hit 2 FMAs per cycle perfectly on Zen/Core architectures.
+    let mut sum0 = _mm256_setzero_pd();
+    let mut sum1 = _mm256_setzero_pd();
+    let mut sum2 = _mm256_setzero_pd();
+    let mut sum3 = _mm256_setzero_pd();
+    
     let mut i = 0;
+    while i + 16 <= a.len() {
+        let va0 = _mm256_loadu_pd(a.as_ptr().add(i));
+        let vb0 = _mm256_loadu_pd(b.as_ptr().add(i));
+        let va1 = _mm256_loadu_pd(a.as_ptr().add(i + 4));
+        let vb1 = _mm256_loadu_pd(b.as_ptr().add(i + 4));
+        let va2 = _mm256_loadu_pd(a.as_ptr().add(i + 8));
+        let vb2 = _mm256_loadu_pd(b.as_ptr().add(i + 8));
+        let va3 = _mm256_loadu_pd(a.as_ptr().add(i + 12));
+        let vb3 = _mm256_loadu_pd(b.as_ptr().add(i + 12));
+
+        sum0 = _mm256_fmadd_pd(va0, vb0, sum0);
+        sum1 = _mm256_fmadd_pd(va1, vb1, sum1);
+        sum2 = _mm256_fmadd_pd(va2, vb2, sum2);
+        sum3 = _mm256_fmadd_pd(va3, vb3, sum3);
+        i += 16;
+    }
+    
+    // Fallback for remaining blocks of 4
     while i + 4 <= a.len() {
-        let va = _mm256_loadu_pd(a.as_ptr().add(i));
-        let vb = _mm256_loadu_pd(b.as_ptr().add(i));
-        sum_vec = _mm256_fmadd_pd(va, vb, sum_vec);
+        let va0 = _mm256_loadu_pd(a.as_ptr().add(i));
+        let vb0 = _mm256_loadu_pd(b.as_ptr().add(i));
+        sum0 = _mm256_fmadd_pd(va0, vb0, sum0);
         i += 4;
     }
+
+    sum0 = _mm256_add_pd(sum0, sum1);
+    sum2 = _mm256_add_pd(sum2, sum3);
+    sum0 = _mm256_add_pd(sum0, sum2);
+
     let mut arr = [0.0; 4];
-    _mm256_storeu_pd(arr.as_mut_ptr(), sum_vec);
+    _mm256_storeu_pd(arr.as_mut_ptr(), sum0);
     let mut dot = arr[0] + arr[1] + arr[2] + arr[3];
     while i < a.len() {
         dot += a[i] * b[i];
@@ -452,6 +482,127 @@ fn unbind_fallback(m: &ComplexVector, key: &ComplexVector) -> ComplexVector {
         im[i] = -m.re[i] * key.im[i] + m.im[i] * key.re[i];
     }
     ComplexVector { re, im }
+}
+
+/// Unbind exactly into an existing ComplexVector (zero memory allocation)
+pub fn unbind_into(m: &ComplexVector, key: &ComplexVector, out: &mut ComplexVector) {
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        unsafe { unbind_into_avx2(m, key, out); return; }
+    }
+    let d = m.dim();
+    for i in 0..d {
+        out.re[i] = m.re[i] * key.re[i] + m.im[i] * key.im[i];
+        out.im[i] = -m.re[i] * key.im[i] + m.im[i] * key.re[i];
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn unbind_into_avx2(m: &ComplexVector, key: &ComplexVector, out: &mut ComplexVector) {
+    let d = m.dim();
+    let mut i = 0;
+    
+    // 4-way unrolled
+    while i + 16 <= d {
+        let mr0 = _mm256_loadu_pd(m.re.as_ptr().add(i));
+        let mi0 = _mm256_loadu_pd(m.im.as_ptr().add(i));
+        let kr0 = _mm256_loadu_pd(key.re.as_ptr().add(i));
+        let ki0 = _mm256_loadu_pd(key.im.as_ptr().add(i));
+        
+        let mr1 = _mm256_loadu_pd(m.re.as_ptr().add(i + 4));
+        let mi1 = _mm256_loadu_pd(m.im.as_ptr().add(i + 4));
+        let kr1 = _mm256_loadu_pd(key.re.as_ptr().add(i + 4));
+        let ki1 = _mm256_loadu_pd(key.im.as_ptr().add(i + 4));
+
+        let mr2 = _mm256_loadu_pd(m.re.as_ptr().add(i + 8));
+        let mi2 = _mm256_loadu_pd(m.im.as_ptr().add(i + 8));
+        let kr2 = _mm256_loadu_pd(key.re.as_ptr().add(i + 8));
+        let ki2 = _mm256_loadu_pd(key.im.as_ptr().add(i + 8));
+
+        let mr3 = _mm256_loadu_pd(m.re.as_ptr().add(i + 12));
+        let mi3 = _mm256_loadu_pd(m.im.as_ptr().add(i + 12));
+        let kr3 = _mm256_loadu_pd(key.re.as_ptr().add(i + 12));
+        let ki3 = _mm256_loadu_pd(key.im.as_ptr().add(i + 12));
+
+        let r0 = _mm256_fmadd_pd(mr0, kr0, _mm256_mul_pd(mi0, ki0));
+        let i0 = _mm256_fmsub_pd(mi0, kr0, _mm256_mul_pd(mr0, ki0));
+        
+        let r1 = _mm256_fmadd_pd(mr1, kr1, _mm256_mul_pd(mi1, ki1));
+        let i1 = _mm256_fmsub_pd(mi1, kr1, _mm256_mul_pd(mr1, ki1));
+        
+        let r2 = _mm256_fmadd_pd(mr2, kr2, _mm256_mul_pd(mi2, ki2));
+        let i2 = _mm256_fmsub_pd(mi2, kr2, _mm256_mul_pd(mr2, ki2));
+        
+        let r3 = _mm256_fmadd_pd(mr3, kr3, _mm256_mul_pd(mi3, ki3));
+        let i3 = _mm256_fmsub_pd(mi3, kr3, _mm256_mul_pd(mr3, ki3));
+
+        _mm256_storeu_pd(out.re.as_mut_ptr().add(i), r0);
+        _mm256_storeu_pd(out.im.as_mut_ptr().add(i), i0);
+        _mm256_storeu_pd(out.re.as_mut_ptr().add(i + 4), r1);
+        _mm256_storeu_pd(out.im.as_mut_ptr().add(i + 4), i1);
+        _mm256_storeu_pd(out.re.as_mut_ptr().add(i + 8), r2);
+        _mm256_storeu_pd(out.im.as_mut_ptr().add(i + 8), i2);
+        _mm256_storeu_pd(out.re.as_mut_ptr().add(i + 12), r3);
+        _mm256_storeu_pd(out.im.as_mut_ptr().add(i + 12), i3);
+        i += 16;
+    }
+    
+    while i + 4 <= d {
+        let mr = _mm256_loadu_pd(m.re.as_ptr().add(i));
+        let mi = _mm256_loadu_pd(m.im.as_ptr().add(i));
+        let kr = _mm256_loadu_pd(key.re.as_ptr().add(i));
+        let ki = _mm256_loadu_pd(key.im.as_ptr().add(i));
+        let r = _mm256_fmadd_pd(mr, kr, _mm256_mul_pd(mi, ki));
+        let m_mul = _mm256_fmsub_pd(mi, kr, _mm256_mul_pd(mr, ki));
+        _mm256_storeu_pd(out.re.as_mut_ptr().add(i), r);
+        _mm256_storeu_pd(out.im.as_mut_ptr().add(i), m_mul);
+        i += 4;
+    }
+    
+    while i < d {
+        out.re[i] = m.re[i] * key.re[i] + m.im[i] * key.im[i];
+        out.im[i] = -m.re[i] * key.im[i] + m.im[i] * key.re[i];
+        i += 1;
+    }
+}
+
+/// Unbind exactly into a dual-stacked real f64 array [re, im] without allocating.
+pub fn unbind_into_real(m: &ComplexVector, key: &ComplexVector, out: &mut [f64]) {
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        unsafe { unbind_into_real_avx2(m, key, out); return; }
+    }
+    let d = m.dim();
+    for i in 0..d {
+        out[i] = m.re[i] * key.re[i] + m.im[i] * key.im[i];
+        out[d + i] = -m.re[i] * key.im[i] + m.im[i] * key.re[i];
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn unbind_into_real_avx2(m: &ComplexVector, key: &ComplexVector, out: &mut [f64]) {
+    let d = m.dim();
+    let mut i = 0;
+    while i + 4 <= d {
+        let mr = _mm256_loadu_pd(m.re.as_ptr().add(i));
+        let mi = _mm256_loadu_pd(m.im.as_ptr().add(i));
+        let kr = _mm256_loadu_pd(key.re.as_ptr().add(i));
+        let ki = _mm256_loadu_pd(key.im.as_ptr().add(i));
+
+        let r = _mm256_fmadd_pd(mr, kr, _mm256_mul_pd(mi, ki));
+        let m_mul = _mm256_fmsub_pd(mi, kr, _mm256_mul_pd(mr, ki));
+
+        _mm256_storeu_pd(out.as_mut_ptr().add(i), r);
+        _mm256_storeu_pd(out.as_mut_ptr().add(d + i), m_mul);
+        i += 4;
+    }
+    while i < d {
+        out[i] = m.re[i] * key.re[i] + m.im[i] * key.im[i];
+        out[d + i] = -m.re[i] * key.im[i] + m.im[i] * key.re[i];
+        i += 1;
+    }
 }
 
 // ---------------------------------------------------------------------------
