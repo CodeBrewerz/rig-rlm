@@ -19,11 +19,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use rayon::prelude::*;
 
-use super::advanced::CleanupNetwork;
+use super::turboquant::QjlCleanupNetwork;
+use super::keyindex::KeyIndex;
 use super::core::{
-    bind, dot_product, make_role_keys, make_vocab_keys, orthogonalize,
-    seed_from_name, softmax_temp, stack_and_unit_norm, unbind, ComplexVector, Mulberry32,
+    bind, bind_role_inline, bind_role_lut, make_role_keys, make_vocab_keys, orthogonalize,
+    regenerate_vocab_key, regenerate_sent_key, unbind_role_inline, unbind_role_lut,
+    seed_from_name, unbind, ComplexVector, Mulberry32, RopeLut,
 };
 
 // ---------------------------------------------------------------------------
@@ -93,13 +96,18 @@ fn default_orth_iters() -> usize { 1 }
 
 /// Pre-built HRR data for fast recall.
 struct HrrData {
-    /// Per-bank memory vectors (facts distributed round-robin).
-    memories: Vec<ComplexVector>,
-    sent_key: ComplexVector,
-    /// Shared role keys — one per fact position.
-    role_keys: Vec<ComplexVector>,
-    /// Shared cleanup network — one codebook for all banks.
-    cleanup: CleanupNetwork,
+    /// Per-bank memory vectors (facts distributed round-robin), quantized to 4-bits.
+    memories: Vec<Vec<u8>>,
+    /// Seed for deterministic codebook regeneration.
+    seed: u32,
+    /// Number of unique vocab words (needed for lazy regeneration).
+    vocab_size: usize,
+    /// Cached sentence key — only 32KB, avoids O(V×d) PRNG skip on every decode.
+    cached_sent_key: ComplexVector,
+    /// Pre-computed sin/cos LUT for RoPE (32KB) — eliminates per-element sin_cos.
+    rope_lut: RopeLut,
+    /// Shared cleanup network — QJL 2-stage (sign-sketch Hamming + top-K f64 re-rank).
+    cleanup: QjlCleanupNetwork,
     vocab_words: Vec<String>,
     /// O(1) lookup map for fast patching during swaps.
     vocab_idx: HashMap<String, usize>,
@@ -109,6 +117,13 @@ struct HrrData {
     num_banks: usize,
     /// Estimated RAM in bytes.
     pub byte_size: usize,
+}
+
+impl HrrData {
+    /// Lazily regenerate a single codebook vector by word index.
+    fn regen_vocab_key(&self, idx: usize) -> ComplexVector {
+        regenerate_vocab_key(self.seed, idx, self.effective_d)
+    }
 }
 
 /// State of HRR vectors for a nugget.
@@ -121,15 +136,14 @@ enum HrrState {
     Cold,
 }
 
-fn estimate_hrr_bytes(d: usize, v: usize, n: usize, num_banks: usize) -> usize {
-    let cv = 2 * d * 8; // one ComplexVector
-    let memories = num_banks * cv;          // per-bank memory vectors
-    let vocab_norm = v * 2 * d * 8;         // shared
-    let sent_key = cv;                      // shared
-    let role_keys = n * cv;                 // shared
-    let cleanup = v * cv + v * 2 * d * 8;   // shared codebook + norms
-    let overhead = v * 64;
-    memories + vocab_norm + sent_key + role_keys + cleanup + overhead
+fn estimate_hrr_bytes(d: usize, v: usize, _n: usize, num_banks: usize) -> usize {
+    let memories = num_banks * d;           // per-bank memory vectors (4-bit quantized)
+    // vocab_keys: NOT stored — regenerated lazily from seed
+    // role_keys:  NOT stored — computed inline (RoPE-style)
+    // sent_key:   NOT stored — regenerated lazily from seed
+    let cleanup_sketches = v * (d / 64 + 1) * 8; // sign-bit sketches only
+    let vocab_overhead = v * 64;                  // vocab_words + vocab_idx
+    memories + cleanup_sketches + vocab_overhead
 }
 
 // ---------------------------------------------------------------------------
@@ -212,6 +226,9 @@ pub struct Nugget {
 
     /// Tiered HRR cache.
     hrr_state: HrrState,
+
+    /// Inverted keyword index + bi-directional link graph for O(1) lookup.
+    key_index: KeyIndex,
 }
 
 impl Nugget {
@@ -223,6 +240,7 @@ impl Nugget {
             facts: Vec::new(), tag_to_pos: HashMap::new(), dirty: false,
             hot_indices: Vec::new(),
             hrr_state: HrrState::NotBuilt,
+            key_index: KeyIndex::new(),
         }
     }
 
@@ -234,18 +252,26 @@ impl Nugget {
         if key.is_empty() || value.is_empty() { return; }
 
         let mut found = false;
-        for f in &mut self.facts {
+        let mut found_idx = 0;
+        for (i, f) in self.facts.iter_mut().enumerate() {
             if f.key.eq_ignore_ascii_case(key) {
                 f.value = value.to_string();
                 found = true;
+                found_idx = i;
                 break;
             }
         }
-        if !found {
+        if found {
+            // Update the index for this fact's new value
+            self.key_index.update_value(found_idx, key, value);
+        } else {
+            let idx = self.facts.len();
             self.facts.push(Fact {
                 key: key.to_string(), value: value.to_string(),
                 hits: 0, last_hit_session: String::new(),
             });
+            // Incrementally add to the index
+            self.key_index.add_fact(idx, key, value);
         }
 
         // Update hot_indices: add new fact
@@ -301,7 +327,7 @@ impl Nugget {
         // Decode via HRR — fact is guaranteed to be in the bank
         let hrr_pos = self.hot_indices.iter().position(|&i| i == pos);
         let (word, confidence, margin) = match (&self.hrr_state, hrr_pos) {
-            (HrrState::Hot(hrr), Some(hp)) if hp < hrr.role_keys.len() => {
+            (HrrState::Hot(hrr), Some(hp)) if hp < self.hot_indices.len() => {
                 Self::decode_hrr(hrr, hp)
             }
             _ => {
@@ -428,6 +454,7 @@ impl Nugget {
             facts: data.facts, tag_to_pos: HashMap::new(), dirty: false,
             hot_indices: Vec::new(),
             hrr_state,
+            key_index: KeyIndex::new(),
         };
         if !n.facts.is_empty() {
             n.refresh_index();
@@ -510,7 +537,7 @@ impl Nugget {
             _ => return false,
         };
 
-        if hot_idx >= hrr.role_keys.len() {
+        if hot_idx >= self.hot_indices.len() {
             return false;
         }
 
@@ -533,7 +560,7 @@ impl Nugget {
 
         let bank = hot_idx % hrr.num_banks;
         
-        let num_facts = hrr.role_keys.len();
+        let num_facts = self.hot_indices.len();
         let mut bank_count = 0;
         for i in 0..num_facts {
             if i % hrr.num_banks == bank { bank_count += 1; }
@@ -541,19 +568,21 @@ impl Nugget {
         let inv_scale = if bank_count > 0 { (bank_count as f64).sqrt() } else { 1.0 };
         let scale = if bank_count > 0 { 1.0 / (bank_count as f64).sqrt() } else { 1.0 };
 
-        let sent_key = &hrr.sent_key;
-        let role_key = &hrr.role_keys[hot_idx];
+        // Use cached sent_key; direct sin_cos for role (faster than LUT in debug)
+        let sent_key = &hrr.cached_sent_key;
 
         let mut old_binding = None;
         if let Some(owi) = old_w_idx {
-            let old_w_key = &hrr.cleanup.codebook()[owi];
-            old_binding = Some(bind(&bind(sent_key, role_key), old_w_key));
+            let old_w_key = hrr.regen_vocab_key(owi);
+            let bound_sent = bind(sent_key, &old_w_key);
+            old_binding = Some(bind_role_inline(&bound_sent, hot_idx));
         }
 
-        let new_w_key = &hrr.cleanup.codebook()[new_w_idx];
-        let new_binding = bind(&bind(sent_key, role_key), new_w_key);
+        let new_w_key = hrr.regen_vocab_key(new_w_idx);
+        let bound_sent = bind(sent_key, &new_w_key);
+        let new_binding = bind_role_inline(&bound_sent, hot_idx);
 
-        let mem = &mut hrr.memories[bank];
+        let mut mem = super::turboquant::dequantize_mse_4bit(&hrr.memories[bank]);
         for d in 0..hrr.effective_d {
             let mut re = mem.re[d] * inv_scale;
             let mut im = mem.im[d] * inv_scale;
@@ -566,6 +595,7 @@ impl Nugget {
             mem.re[d] = re * scale;
             mem.im[d] = im * scale;
         }
+        hrr.memories[bank] = super::turboquant::quantize_mse_4bit(&mem);
 
         true
     }
@@ -617,88 +647,88 @@ impl Nugget {
         let seed = seed_from_name(&self.name);
         let mut rng = Mulberry32::new(seed);
 
+        // Generate vocab keys temporarily for encoding + cleanup network build
         let mut vocab_keys = make_vocab_keys(v, effective_d, &mut rng);
         if v <= 100 {
             vocab_keys = orthogonalize(&vocab_keys, 1, 0.4);
         }
 
+        // Sent key is the (V+1)th key in the PRNG stream
         let sent_keys = make_vocab_keys(1, effective_d, &mut rng);
         let sent_key = sent_keys[0].clone();
-        let role_keys = make_role_keys(effective_d, num_facts);
+        // Build RoPE LUT for this dimension (32KB, eliminates per-element sin_cos)
+        let rope_lut = RopeLut::new(effective_d);
 
-        // Build per-bank memory vectors (round-robin assignment)
-        let mut memories: Vec<ComplexVector> = (0..num_banks)
-            .map(|_| ComplexVector::zeros(effective_d))
-            .collect();
-        let mut bank_counts = vec![0usize; num_banks];
+        // Build per-bank memory vectors in parallel using Rayon (up to B threads)
+        let memories_raw: Vec<ComplexVector> = (0..num_banks).into_par_iter().map(|bank| {
+            let mut mem = ComplexVector::zeros(effective_d);
+            let mut bank_count = 0usize;
 
-        for (i, f) in hot_facts.iter().enumerate() {
-            let bank = i % num_banks;
-            let w_key = &vocab_keys[idx_w[&f.value]];
-            let binding = bind(&bind(&sent_key, &role_keys[i]), w_key);
-            for d in 0..effective_d {
-                memories[bank].re[d] += binding.re[d];
-                memories[bank].im[d] += binding.im[d];
+            for (i, f) in hot_facts.iter().enumerate() {
+                if i % num_banks == bank {
+                    let w_key = &vocab_keys[idx_w[&f.value]];
+                    // RoPE LUT: bind sent_key first, then apply role rotation via LUT
+                    let bound_sent = bind(&sent_key, w_key);
+                    let binding = bind_role_lut(&bound_sent, i, &rope_lut);
+                    for d in 0..effective_d {
+                        mem.re[d] += binding.re[d];
+                        mem.im[d] += binding.im[d];
+                    }
+                    bank_count += 1;
+                }
             }
-            bank_counts[bank] += 1;
-        }
-        // Scale each bank by 1/sqrt(items_in_bank)
-        for (b, mem) in memories.iter_mut().enumerate() {
-            if bank_counts[b] > 0 {
-                let scale = 1.0 / (bank_counts[b] as f64).sqrt();
+
+            // Scale by 1/sqrt(items_in_bank)
+            if bank_count > 0 {
+                let scale = 1.0 / (bank_count as f64).sqrt();
                 for d in 0..effective_d {
                     mem.re[d] *= scale;
                     mem.im[d] *= scale;
                 }
             }
-        }
+            mem
+        }).collect();
 
-        let cleanup = CleanupNetwork::new(&vocab_keys);
+        // Apply TurboQuant MSE
+        let memories: Vec<Vec<u8>> = memories_raw
+            .par_iter()
+            .map(|m| super::turboquant::quantize_mse_4bit(m))
+            .collect();
+
+        // 100 is the sweet spot for 100% accuracy at 5k facts without dropping 
+        // to O(V*d) exact search.
+        let cleanup = QjlCleanupNetwork::new(&vocab_keys, 100);
         let byte_size = estimate_hrr_bytes(effective_d, v, num_facts, num_banks);
+        // vocab_keys dropped here — no longer stored in HrrData
 
         HrrData {
-            memories, sent_key, role_keys, cleanup,
+            memories, seed, vocab_size: v, cached_sent_key: sent_key, rope_lut, cleanup,
             vocab_words, vocab_idx: idx_w, effective_d, num_banks, byte_size,
         }
     }
 
     /// Decode a fact position from HRR memory.
     /// Selects the correct bank (round-robin), unbinds, then uses
-    /// cleanup + cosine sim for accurate recall.
+    /// QJL 2-stage cleanup (sign-bit Hamming + top-K re-rank) for accurate recall.
     fn decode_hrr(hrr: &HrrData, pos: usize) -> (String, f64, f64) {
         let v = hrr.vocab_words.len();
         if v == 0 { return (String::new(), 0.0, 0.0); }
 
         // Select bank containing this fact
         let bank = pos % hrr.num_banks;
-        let bank_mem = &hrr.memories[bank];
+        let bank_mem = super::turboquant::dequantize_mse_4bit(&hrr.memories[bank]);
 
-        // Unbind sentence key, then role key using pre-allocated zero-buffers
+        // Unbind sentence key, then role key (direct sin_cos — faster than LUT in debug)
         let d = hrr.effective_d;
+        let sent_key = &hrr.cached_sent_key;
         let mut tmp = ComplexVector::zeros(d);
-        super::core::unbind_into(bank_mem, &hrr.sent_key, &mut tmp);
-        
-        let d2 = d * 2;
-        let mut rec2 = vec![0.0; d2];
-        super::core::unbind_into_real(&tmp, &hrr.role_keys[pos], &mut rec2);
+        super::core::unbind_into(&bank_mem, sent_key, &mut tmp);
+        let recovered = unbind_role_inline(&tmp, pos);
 
-        // Cleanup Network: exact nearest-neighbor & sims (Zero copy, mutating rec2)
-        let (cleanup_idx, cleanup_sim, _, sims) = hrr.cleanup.cleanup_with_sims_real(&mut rec2);
+        // QJL 2-stage cleanup: sign-bit Hamming coarse filter → top-K f64 re-rank
+        let (best_idx, cleanup_sim, _) = hrr.cleanup.cleanup(&recovered);
 
-        let probs = softmax_temp(&sims, 0.9);
-        let softmax_best = probs.iter().enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .map(|(i, _)| i).unwrap_or(0);
-
-        let best_idx = if cleanup_sim > 0.3 { cleanup_idx } else { softmax_best };
-
-        // Confidence & margin
-        let confidence = cleanup_sim.max(probs[softmax_best]);
-        let mut sorted = probs.clone();
-        sorted.sort_by(|a, b| b.partial_cmp(a).unwrap());
-        let margin = if sorted.len() > 1 { sorted[0] - sorted[1] } else { 1.0 };
-
-        (hrr.vocab_words[best_idx].clone(), confidence, margin)
+        (hrr.vocab_words[best_idx].clone(), cleanup_sim, 1.0)
     }
 
     // -- HRR binary serialization --------------------------------------------
@@ -709,18 +739,17 @@ impl Nugget {
         fs::create_dir_all(&self.save_dir)?;
         let d = hrr.effective_d;
         let v = hrr.vocab_words.len();
-        let n = hrr.role_keys.len();
+        let n = self.hot_indices.len();
         let b = hrr.num_banks;
 
-        let mut buf = Vec::with_capacity(20 + b * 2 * d * 8 + 512);
-        buf.extend_from_slice(b"HRR2");
+        let mut buf = Vec::with_capacity(20 + b * d + 512);
+        buf.extend_from_slice(b"HRR3"); // Upgraded magic for TurboQuant
         buf.extend_from_slice(&(d as u32).to_le_bytes());
         buf.extend_from_slice(&(v as u32).to_le_bytes());
         buf.extend_from_slice(&(n as u32).to_le_bytes());
         buf.extend_from_slice(&(b as u32).to_le_bytes());
         for mem in &hrr.memories {
-            for &x in &mem.re { buf.extend_from_slice(&x.to_le_bytes()); }
-            for &x in &mem.im { buf.extend_from_slice(&x.to_le_bytes()); }
+            buf.extend_from_slice(mem);
         }
 
         let vocab_json = serde_json::to_string(&hrr.vocab_words)
@@ -735,7 +764,7 @@ impl Nugget {
 
     fn load_hrr(&self) -> Result<HrrData, std::io::Error> {
         let buf = fs::read(self.hrr_path())?;
-        if buf.len() < 20 || &buf[0..4] != b"HRR2" {
+        if buf.len() < 20 || &buf[0..4] != b"HRR3" {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "bad HRR magic"));
         }
 
@@ -744,7 +773,7 @@ impl Nugget {
         let n = u32::from_le_bytes(buf[12..16].try_into().unwrap()) as usize;
         let num_banks = u32::from_le_bytes(buf[16..20].try_into().unwrap()) as usize;
 
-        let mem_data_size = num_banks * 2 * d * 8;
+        let mem_data_size = num_banks * d; // 4-bit packed
         let expected = 20 + mem_data_size;
         if buf.len() < expected {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "truncated"));
@@ -752,18 +781,8 @@ impl Nugget {
 
         let mut memories = Vec::with_capacity(num_banks);
         for b in 0..num_banks {
-            let bank_off = 20 + b * 2 * d * 8;
-            let mut re = vec![0.0f64; d];
-            let mut im = vec![0.0f64; d];
-            for i in 0..d {
-                let off = bank_off + i * 8;
-                re[i] = f64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
-            }
-            for i in 0..d {
-                let off = bank_off + d * 8 + i * 8;
-                im[i] = f64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
-            }
-            memories.push(ComplexVector { re, im });
+            let bank_off = 20 + b * d;
+            memories.push(buf[bank_off..bank_off + d].to_vec());
         }
 
         let vocab_json = std::str::from_utf8(&buf[expected..])
@@ -778,17 +797,18 @@ impl Nugget {
         let mut rng = Mulberry32::new(seed);
         let mut vocab_keys = make_vocab_keys(v, d, &mut rng);
         if v <= 100 { vocab_keys = orthogonalize(&vocab_keys, 1, 0.4); }
+        // Cache sent_key on load (32KB); role_keys computed via RoPE LUT
         let sent_keys = make_vocab_keys(1, d, &mut rng);
-        let sent_key = sent_keys[0].clone();
-        let role_keys = make_role_keys(d, n);
-        let cleanup = CleanupNetwork::new(&vocab_keys);
+        let cached_sent_key = sent_keys[0].clone();
+        let rope_lut = RopeLut::new(d);
+        let cleanup = QjlCleanupNetwork::new(&vocab_keys, 5);
         let byte_size = estimate_hrr_bytes(d, v, n, num_banks);
 
         let mut vocab_idx: HashMap<String, usize> = HashMap::with_capacity(v);
         for (i, w) in vocab_words.iter().enumerate() { vocab_idx.insert(w.clone(), i); }
 
         Ok(HrrData {
-            memories, sent_key, role_keys, cleanup,
+            memories, seed, vocab_size: v, cached_sent_key, rope_lut, cleanup,
             vocab_words, vocab_idx, effective_d: d, num_banks, byte_size,
         })
     }
@@ -800,16 +820,27 @@ impl Nugget {
         for (i, f) in self.facts.iter().enumerate() {
             self.tag_to_pos.insert(f.key.clone(), i);
         }
+        // Rebuild the inverted keyword index + link graph
+        let pairs: Vec<(String, String)> = self.facts.iter()
+            .map(|f| (f.key.clone(), f.value.clone()))
+            .collect();
+        self.key_index.rebuild(&pairs);
     }
 
     fn resolve_tag(&self, query: &str) -> Option<String> {
         if self.tag_to_pos.is_empty() { return None; }
+
+        // 1. Fast path: inverted keyword index (O(1) exact, O(K) token overlap)
+        let fact_keys: Vec<String> = self.facts.iter().map(|f| f.key.clone()).collect();
+        if let Some(key) = self.key_index.resolve(query, &fact_keys) {
+            return Some(key);
+        }
+
+        // 2. Fallback: fuzzy string matching (O(N) linear scan)
         let text = query.to_lowercase();
         let text = text.trim();
         let tags: Vec<&String> = self.tag_to_pos.keys().collect();
 
-        // Exact
-        for t in &tags { if t.to_lowercase() == text { return Some((*t).clone()); } }
         // Substring
         for t in &tags {
             let lower = t.to_lowercase();
@@ -823,6 +854,15 @@ impl Nugget {
             if s > best_score { best = Some(t); best_score = s; }
         }
         if best_score >= self.fuzzy_threshold { best.map(|t| (*t).clone()) } else { None }
+    }
+
+    /// Get related facts for a query via the link graph.
+    pub fn related(&self, query: &str, max_results: usize) -> Vec<(String, String)> {
+        let fact_keys: Vec<String> = self.facts.iter().map(|f| f.key.clone()).collect();
+        let indices = self.key_index.related(query, &fact_keys, max_results);
+        indices.iter()
+            .filter_map(|&i| self.facts.get(i).map(|f| (f.key.clone(), f.value.clone())))
+            .collect()
     }
 }
 

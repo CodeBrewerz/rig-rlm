@@ -64,6 +64,9 @@ tokio-util = "0.7.18"
 # MCP Server
 rmcp = { version = "0.16", features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
 
+# Sync deps
+regex = "1.11"
+
 # Channels
 teloxide = { version = "0.17", features = ["macros"] }
 
@@ -73,6 +76,7 @@ tower-http = { version = "0.6", features = ["cors"] }
 tokio-stream = "0.1"
 async-stream = "0.3"
 futures-util = "0.3"
+hashbrown = "0.16.1"
 
 [[bin]]
 name = "rig-rlm"
@@ -101,6 +105,10 @@ path = "src/bin/ws_agent_demo.rs"
 [[bin]]
 name = "ws-hub-demo"
 path = "src/bin/ws_hub_demo.rs"
+
+[[bin]]
+name = "cross-channel-demo"
+path = "src/bin/cross_channel_demo.rs"
 
 [dev-dependencies]
 tempfile = "3"

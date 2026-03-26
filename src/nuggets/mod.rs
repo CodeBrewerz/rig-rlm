@@ -34,7 +34,15 @@
 pub mod advanced;
 #[cfg(test)]
 mod bench;
+#[cfg(test)]
+mod bench_turboquant;
+#[cfg(test)]
+mod stress_5k;
+#[cfg(test)]
+mod test_knowledge_graph;
 pub mod core;
+pub mod turboquant;
+pub mod keyindex;
 pub mod memory;
 pub mod promote;
 pub mod shelf;

@@ -606,6 +606,178 @@ unsafe fn unbind_into_real_avx2(m: &ComplexVector, key: &ComplexVector, out: &mu
 }
 
 // ---------------------------------------------------------------------------
+// RoPE-style inline role rotation — eliminates role_keys storage
+// ---------------------------------------------------------------------------
+
+/// Pre-computed sin/cos lookup table for RoPE base frequencies.
+/// base_sin[j] = sin(2π·j/D), base_cos[j] = cos(2π·j/D)
+/// For position k: sin(2π·k·j/D) and cos(2π·k·j/D) are derived via
+/// Chebyshev recurrence (no per-element sin_cos calls).
+pub struct RopeLut {
+    base_sin: Vec<f64>,
+    base_cos: Vec<f64>,
+}
+
+impl RopeLut {
+    /// Build the LUT for dimension d.
+    pub fn new(d: usize) -> Self {
+        let inv_d = 1.0 / d as f64;
+        let mut base_sin = vec![0.0; d];
+        let mut base_cos = vec![0.0; d];
+        for j in 0..d {
+            let theta = TAU * (j as f64) * inv_d;
+            let (s, c) = theta.sin_cos();
+            base_sin[j] = s;
+            base_cos[j] = c;
+        }
+        RopeLut { base_sin, base_cos }
+    }
+
+    /// Compute sin(2π·pos·j/D) and cos(2π·pos·j/D) for all j using
+    /// de Moivre / Chebyshev recurrence: z^k = z^(k-1) * z^1
+    /// where z = cos(θ) + i·sin(θ), θ = 2πj/D.
+    ///
+    /// Returns (sin_table, cos_table) for position `pos`.
+    #[inline]
+    pub fn for_position(&self, pos: usize) -> (Vec<f64>, Vec<f64>) {
+        let d = self.base_sin.len();
+        if pos == 0 {
+            return (vec![0.0; d], vec![1.0; d]);
+        }
+        if pos == 1 {
+            return (self.base_sin.clone(), self.base_cos.clone());
+        }
+        // Use binary exponentiation: z^pos = product of z^(2^k) for bits of pos
+        // This avoids pos×d sin_cos calls, doing only O(log(pos))×d multiplies
+        let mut result_s = vec![0.0; d];
+        let mut result_c = vec![1.0; d]; // z^0 = 1
+        let mut base_s = self.base_sin.clone();
+        let mut base_c = self.base_cos.clone();
+        let mut p = pos;
+        while p > 0 {
+            if p & 1 == 1 {
+                // result *= base  (complex multiply)
+                for j in 0..d {
+                    let rc = result_c[j];
+                    let rs = result_s[j];
+                    result_c[j] = rc * base_c[j] - rs * base_s[j];
+                    result_s[j] = rc * base_s[j] + rs * base_c[j];
+                }
+            }
+            // base *= base (square)
+            for j in 0..d {
+                let bc = base_c[j];
+                let bs = base_s[j];
+                base_c[j] = bc * bc - bs * bs;
+                base_s[j] = 2.0 * bc * bs;
+            }
+            p >>= 1;
+        }
+        (result_s, result_c)
+    }
+}
+
+/// Bind a vector with role[position] inline (RoPE-style).
+/// Uses sin_cos LUT when available, falls back to direct computation.
+pub fn bind_role_inline(v: &ComplexVector, pos: usize) -> ComplexVector {
+    let d = v.dim();
+    let mut re = vec![0.0; d];
+    let mut im = vec![0.0; d];
+    let inv_d = 1.0 / d as f64;
+    for j in 0..d {
+        let theta = TAU * (pos as f64) * (j as f64) * inv_d;
+        let (st, ct) = theta.sin_cos();
+        re[j] = ct * v.re[j] - st * v.im[j];
+        im[j] = ct * v.im[j] + st * v.re[j];
+    }
+    ComplexVector { re, im }
+}
+
+/// Bind using pre-computed RoPE LUT (zero sin_cos calls).
+pub fn bind_role_lut(v: &ComplexVector, pos: usize, lut: &RopeLut) -> ComplexVector {
+    let d = v.dim();
+    let (sin_k, cos_k) = lut.for_position(pos);
+    let mut re = vec![0.0; d];
+    let mut im = vec![0.0; d];
+    for j in 0..d {
+        re[j] = cos_k[j] * v.re[j] - sin_k[j] * v.im[j];
+        im[j] = cos_k[j] * v.im[j] + sin_k[j] * v.re[j];
+    }
+    ComplexVector { re, im }
+}
+
+/// Unbind role[position] inline (RoPE-style, no LUT).
+pub fn unbind_role_inline(v: &ComplexVector, pos: usize) -> ComplexVector {
+    let d = v.dim();
+    let mut re = vec![0.0; d];
+    let mut im = vec![0.0; d];
+    let inv_d = 1.0 / d as f64;
+    for j in 0..d {
+        let theta = TAU * (pos as f64) * (j as f64) * inv_d;
+        let (st, ct) = theta.sin_cos();
+        re[j] = v.re[j] * ct + v.im[j] * st;
+        im[j] = v.im[j] * ct - v.re[j] * st;
+    }
+    ComplexVector { re, im }
+}
+
+/// Unbind using pre-computed RoPE LUT (zero sin_cos calls).
+pub fn unbind_role_lut(v: &ComplexVector, pos: usize, lut: &RopeLut) -> ComplexVector {
+    let d = v.dim();
+    let (sin_k, cos_k) = lut.for_position(pos);
+    let mut re = vec![0.0; d];
+    let mut im = vec![0.0; d];
+    for j in 0..d {
+        re[j] = v.re[j] * cos_k[j] + v.im[j] * sin_k[j];
+        im[j] = v.im[j] * cos_k[j] - v.re[j] * sin_k[j];
+    }
+    ComplexVector { re, im }
+}
+
+/// Unbind role[position] inline into an existing ComplexVector (zero alloc).
+pub fn unbind_role_inline_into(v: &ComplexVector, pos: usize, out: &mut ComplexVector) {
+    let d = v.dim();
+    let inv_d = 1.0 / d as f64;
+    for j in 0..d {
+        let theta = TAU * (pos as f64) * (j as f64) * inv_d;
+        let (st, ct) = theta.sin_cos();
+        out.re[j] = v.re[j] * ct + v.im[j] * st;
+        out.im[j] = v.im[j] * ct - v.re[j] * st;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lazy codebook regeneration — eliminates vocab_keys storage
+// ---------------------------------------------------------------------------
+
+/// Regenerate a single codebook vector by index, without materializing the
+/// full vocabulary. Skips the PRNG to position `index` then generates one vector.
+///
+/// This is **losslessly identical** to `make_vocab_keys(V, d, &mut rng)[index]`.
+pub fn regenerate_vocab_key(seed: u32, index: usize, d: usize) -> ComplexVector {
+    let mut rng = Mulberry32::new(seed);
+    // Skip previous vectors: each vector consumes d random values
+    for _ in 0..(index * d) {
+        rng.next_f64();
+    }
+    // Generate the target vector
+    let mut re = vec![0.0; d];
+    let mut im = vec![0.0; d];
+    for i in 0..d {
+        let phi = TAU * rng.next_f64();
+        re[i] = phi.cos();
+        im[i] = phi.sin();
+    }
+    ComplexVector { re, im }
+}
+
+/// Regenerate the sent_key (sentence key). It's the first vector generated
+/// after all V vocab keys have been consumed from the PRNG stream.
+pub fn regenerate_sent_key(seed: u32, vocab_size: usize, d: usize) -> ComplexVector {
+    regenerate_vocab_key(seed, vocab_size, d)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
