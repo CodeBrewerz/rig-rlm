@@ -177,6 +177,58 @@ impl ExecutionPlan {
             self.neural_compose,
         )
     }
+
+    /// Generates a Category Theory String Diagram (Mermaid format).
+    /// Visually maps the entire Map-Reduce (Hylomorphism) execution tree dynamically.
+    pub fn to_mermaid(&self) -> String {
+        let mut out = String::new();
+        out.push_str("graph TD\n");
+        // Monoidal categories colors
+        out.push_str("    classDef pure fill:#e1f5fe,stroke:#01579b,stroke-width:2px;\n");
+        out.push_str("    classDef neural fill:#fce4ec,stroke:#880e4f,stroke-width:2px,stroke-dasharray: 5 5;\n");
+        out.push_str("    classDef input fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px;\n\n");
+        
+        out.push_str("    P((Massive Context P)):::input\n");
+        
+        // Root Split (Comultiplication)
+        out.push_str(&format!("    P --> S0{{\"SPLIT(k*={})\"}}:::pure\n", self.k_star));
+        
+        // Parallel map evaluation
+        let branches = self.k_star.min(4); // Cap rendering at 4 for sanity
+        for i in 1..=branches {
+            let label = if i == branches && self.k_star > 4 { 
+                format!("... {} more", self.k_star - 3) 
+            } else { 
+                format!("Chunk {}", i) 
+            };
+            
+            out.push_str(&format!("    S0 -->|{}| C{}\n", label, i));
+            
+            if self.has_prefilter {
+                out.push_str(&format!("    C{} --> F{}{{\"FILTER (Pure)\"}}:::pure\n", i, i));
+                out.push_str(&format!("    F{} --> M{}[[\"M (Base LLM)\"]]:::neural\n", i, i));
+            } else {
+                out.push_str(&format!("    C{} --> M{}[[\"M (Base LLM)\"]]:::neural\n", i, i));
+            }
+            out.push_str(&format!("    M{} --> R0\n", i));
+        }
+        
+        // Reduction (Multiplication)
+        let red_class = if self.neural_compose { "neural" } else { "pure" };
+        let red_type = if self.neural_compose { "Neural" } else { "Symbolic" };
+        out.push_str(&format!("    R0{{\"REDUCE ({})\"}}:::{} \n", red_type, red_class));
+        
+        out.push_str(&format!("    R0 --> Out((Final {} Result)):::input\n\n", self.task_type));
+        
+        // Add global metrics panel
+        out.push_str("    subgraph Metrics [Execution Plan Metrics]\n");
+        out.push_str(&format!("        M_depth[\"Tree Depth: {}\"]\n", self.depth));
+        out.push_str(&format!("        M_calls[\"Est. LLM Calls: {}\"]\n", self.estimated_calls));
+        out.push_str(&format!("        M_cost[\"Est. Cost: ${}\"]\n", format!("{:.4}", self.estimated_cost)));
+        out.push_str("    end\n");
+        
+        out
+    }
 }
 
 // ─── Task Detection (Phase 2) ───────────────────────────────────────

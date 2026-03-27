@@ -59,6 +59,15 @@ impl LambdaExecutor {
     /// No open-ended REPL loop.
     pub async fn execute(&self, prompt: &str) -> crate::monad::error::Result<String> {
         let mut metrics = ExecutionMetrics::default();
+        
+        // Print the Topological Open Cover / Monoidal String Diagram before execution
+        println!("\n{}\n🔮 CATEGORY THEORY: λ-RLM Execution String Diagram\n{}\n{}\n{}\n", 
+            "═".repeat(60),
+            "═".repeat(60),
+            self.plan.to_mermaid(),
+            "═".repeat(60)
+        );
+
         let result = self.phi(prompt, 0, &mut metrics).await?;
 
         tracing::info!(

@@ -26,6 +26,7 @@ pub mod planner;
 pub mod templates;
 pub mod yoneda;
 pub mod effects;
+pub mod gepa_rlm;
 
 #[cfg(test)]
 
