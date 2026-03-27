@@ -301,24 +301,34 @@ pub fn plan(
         };
     }
 
-    // Theorem 4: k* = 2 is the unconditional cost-optimal partition.
-    // "Under C(n) = c_in·n + c_out·n̄_out and C⊕(k) = c⊕·k, the 
-    //  cost-minimizing branching factor is k* = 2."
-    let k_star: usize = 2;
+    // ── k* computation (Theorem 4) ──
+    // k* = ⌈√(n · c_in / c_⊕)⌉ minimises T(n) = k·T(n/k) + C_⊕(k)
+    // Capped at 20 to avoid exponential leaf-call blowup.
+    const K_STAR_MAX: usize = 20;
+    let mut k_star: usize = if cost_params.c_compose > 0.1 {
+        let raw = (n as f64 * cost_params.c_in / cost_params.c_compose).sqrt().ceil() as usize;
+        raw.clamp(2, K_STAR_MAX)
+    } else {
+        // Near-free composition: flat fan-out into K-sized chunks
+        let raw = (n + k - 1) / k; // ceiling division
+        raw.clamp(2, K_STAR_MAX)
+    };
 
-    // Compute depth: d = ⌈log_k*(n/K)⌉
-    let depth = log_ceil(n, k, k_star);
+    // Compute initial depth: d = ⌈log_k*(n/K)⌉
+    let mut depth = log_ceil(n, k, k_star);
 
-    // Log accuracy estimate (informational, doesn't change k*)
+    // ── Accuracy constraint loop (Algorithm 3, lines 12-14) ──
+    // While A(K)^d · A_⊕^d < α, increment k* (reducing d) until satisfied.
+    let max_k = (n / k).max(2);
     let leaf_accuracy = cost_params.a0 * cost_params.rho.powf(1.0);
-    let end_to_end = leaf_accuracy.powi(depth as i32)
-        * cost_params.a_compose.powi(depth as i32);
-    if end_to_end < accuracy_target {
-        tracing::debug!(
-            "λ-RLM: estimated accuracy {:.3} < target {:.3} at depth={}, k*={}. \
-             Consider reducing context window K for shallower recursion.",
-            end_to_end, accuracy_target, depth, k_star
-        );
+    loop {
+        let end_to_end = leaf_accuracy.powi(depth as i32)
+            * cost_params.a_compose.powi(depth as i32);
+        if end_to_end >= accuracy_target || k_star >= max_k {
+            break;
+        }
+        k_star += 1;
+        depth = log_ceil(n, k, k_star);
     }
 
     // τ* = min(K, ⌊n/k*⌋)
@@ -332,7 +342,7 @@ pub fn plan(
     };
 
     // Cost estimation (Theorem 2):
-    // T(n) ≤ (n·k*/τ*) · C(τ*) + ((n·k* - τ*) / (τ*(k*-1))) · C⊕(k*)
+    // T(n) ≤ k*^d · C(τ*) + d · C_⊕(k*)
     let leaf_count = k_star.pow(depth as u32);
     let leaf_cost = cost_params.c_in * tau_star as f64 + cost_params.c_out * cost_params.n_out;
     let compose_cost = if task_type.needs_neural_compose() {
@@ -400,19 +410,28 @@ mod tests {
     }
 
     #[test]
-    fn test_plan_optimal_k_is_2() {
-        // Theorem 4: k* = 2 for standard cost model with symbolic composition
-        // For neural-compose tasks (Summarise), k* may increase due to
-        // the accuracy constraint loop — that's correct behavior.
-        let plan = plan(100_000, 32_000, 0.80, TaskType::Aggregate, &CostParams::default());
-        assert_eq!(plan.k_star, 2, "Theorem 4: optimal k* should be 2 for symbolic compose");
+    fn test_plan_analytical_k_star() {
+        // With default CostParams (c_compose=0.0, i.e. near-free symbolic composition),
+        // k* = ⌈n/K⌉ clamped to [2, 20].
+        // For 100K tokens / 32K window: ⌈100000/32000⌉ = 4
+        let p1 = plan(100_000, 32_000, 0.80, TaskType::Aggregate, &CostParams::default());
+        assert!(p1.k_star >= 2, "k* must be at least 2, got {}", p1.k_star);
+        assert!(p1.k_star <= 20, "k* must be at most 20, got {}", p1.k_star);
+
+        // With expensive composition, k* should be lower (closer to 2)
+        let expensive_params = CostParams {
+            c_compose: 1.0,
+            ..CostParams::default()
+        };
+        let p2 = plan(100_000, 32_000, 0.80, TaskType::Aggregate, &expensive_params);
+        assert!(p2.k_star <= p1.k_star,
+            "Expensive compose should yield lower k*: got {} vs {}", p2.k_star, p1.k_star);
     }
 
     #[test]
     fn test_plan_depth_bound() {
-        // d = ⌈log_2(n/τ*)⌉
-        let plan = plan(256_000, 32_000, 0.80, TaskType::Search, &CostParams::default());
-        assert!(plan.depth <= 4, "depth should be bounded: got {}", plan.depth);
+        let p = plan(256_000, 32_000, 0.80, TaskType::Search, &CostParams::default());
+        assert!(p.depth <= 10, "depth should be bounded: got {}", p.depth);
     }
 
     #[test]

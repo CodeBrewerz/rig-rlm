@@ -35,80 +35,56 @@ pub fn split(input: &str, k: usize) -> Vec<String> {
         return merge_into_k_chunks(&lines, k);
     }
 
-    // Fallback: character-count splitting at sentence boundaries
+    // Fallback: character-count splitting at sentence boundaries (clean partition, no overlap)
     let mut chunks = Vec::with_capacity(k);
     let mut start = 0;
     for i in 0..k {
         if start >= total {
             break;
         }
-        let target_end = ((i + 1) * total) / k;
-        let mut end = target_end.min(total);
+        let end = if i == k - 1 {
+            total  // Last chunk gets everything remaining
+        } else {
+            let target_end = ((i + 1) * total) / k;
+            let mut end = target_end.min(total);
 
-        // Try to snap to a sentence boundary (., !, ?) within ±10% of target
-        let snap_range = chunk_size / 10;
-        let snap_start = end.saturating_sub(snap_range);
-        let snap_end = (end + snap_range).min(total);
+            // Try to snap to a sentence boundary (., !, ?) within ±10% of target
+            let snap_range = chunk_size / 10;
+            let snap_start = end.saturating_sub(snap_range);
+            let snap_end = (end + snap_range).min(total);
 
-        for j in (snap_start..snap_end).rev() {
-            if j < total && matches!(chars[j], '.' | '!' | '?' | '\n') {
-                end = j + 1;
-                break;
+            for j in (snap_start..snap_end).rev() {
+                if j < total && matches!(chars[j], '.' | '!' | '?' | '\n') {
+                    end = j + 1;
+                    break;
+                }
             }
-        }
+            end
+        };
 
         let chunk: String = chars[start..end].iter().collect();
         if !chunk.is_empty() {
-            eprintln!(
-                "🔮 [Cohomology] Evaluating local section {}: boundary overlap = {} chars",
-                i,
-                start.saturating_sub((i * total) / k)
-            );
             chunks.push(chunk);
         }
-        
-        // Cohomology / Sheaf Gluing: Create Topological Open Cover (20% boundary overlap)
-        let overlap = chunk_size / 5;
-        start = end.saturating_sub(overlap);
+        start = end; // Clean partition: no overlap
     }
-    // If we didn't generate enough chunks or reach the end, push the remainder
-    let final_end = chunks.iter().map(|s| s.len()).sum::<usize>(); // simplistic check
-    // Actually, just push the remainder if the final 'end' didn't reach total!
-    // But since 'end' is lost from the loop, we should just let the loop handle it, 
-    // or store `last_end`.
-    // Since this is just a fallback, let's track the maximum characters consumed.
-    // Wait, since we are doing 20% overlaps, we are guaranteed to span the text 
-    // because `target_end` scales to `total`.
-    // The previous implementation used `start < total`. We should only push remainder
-    // if the absolute last emitted `end` was `< total`.
-
 
     chunks
 }
 
 /// Merge a list of text segments into exactly `k` chunks,
-/// distributing segments as evenly as possible.
+/// distributing segments as evenly as possible (clean partition, no overlap).
 fn merge_into_k_chunks(segments: &[&str], k: usize) -> Vec<String> {
     let n = segments.len();
-    
     let mut chunks = Vec::with_capacity(k);
 
     for i in 0..k {
-        let target_start = (i * n) / k;
-        let target_end = ((i + 1) * n) / k;
-        
-        // Cohomology / Sheaf Gluing: Create Topological Open Cover (20% boundary overlap)
-        let overlap = (target_end - target_start) / 5;
-        let actual_start = if i == 0 { 0 } else { target_start.saturating_sub(overlap) };
-        let actual_end = target_end.min(n);
-
-        let chunk = segments[actual_start..actual_end].join("\n\n");
-        eprintln!(
-            "🔮 [Cohomology] Evaluating local section {}: semantic boundary overlap = {} segments",
-            i,
-            target_start - actual_start
-        );
-        chunks.push(chunk);
+        let start = (i * n) / k;
+        let end = ((i + 1) * n) / k;
+        let chunk = segments[start..end.min(n)].join("\n\n");
+        if !chunk.is_empty() {
+            chunks.push(chunk);
+        }
     }
 
     chunks
@@ -190,9 +166,9 @@ mod tests {
         let input = "Hello world. This is a test. More text here.";
         let chunks = split(input, 2);
         assert_eq!(chunks.len(), 2);
-        // Recombining should give back the original (or close to it)
+        // Clean partition: recombining gives back the original exactly
         let combined: String = chunks.join("");
-        assert_eq!(combined.len(), input.len());
+        assert_eq!(combined, input, "Clean partition must reconstruct the original");
     }
 
     #[test]

@@ -27,6 +27,8 @@ pub mod templates;
 pub mod yoneda;
 pub mod effects;
 pub mod gepa_rlm;
+pub mod profunctor;
+pub mod adaptive_yoneda;
 
 #[cfg(test)]
 
@@ -38,7 +40,9 @@ use crate::monad::provider::LlmProvider;
 
 pub use executor::{ExecutionMetrics, LambdaExecutor};
 pub use planner::{CostParams, ExecutionPlan, TaskType};
-pub use yoneda::YonedaContext;
+pub use yoneda::{YonedaContext, QueryMorphism, YonedaEquivalence, yoneda_equivalence, check_naturality};
+pub use profunctor::{TypedPipeline, AsyncProfunctor, Profunctor};
+pub use adaptive_yoneda::{AdaptiveYoneda, TrajectoryStore, MorphismPopulation, EvolutionResult};
 
 // ─── Configuration ──────────────────────────────────────────────────
 
@@ -132,6 +136,66 @@ pub async fn lambda_rlm(
     eprintln!("⚡ [λ-RLM] Complete — {} chars output", result.len());
 
     Ok(result)
+}
+
+/// Typed λ-RLM entry point — structured I/O via Profunctor optics.
+///
+/// Same as [`lambda_rlm`] but with typed input/output via `lmap` and `rmap`.
+///
+/// # Arguments
+/// - `input` — domain-specific input of type `C`
+/// - `user_query` — the query string for leaf templates
+/// - `provider` — the LLM provider
+/// - `config` — λ-RLM config (context window, accuracy target, cost params)
+/// - `lmap` — contravariant mapping: extracts prompt text from `C`
+/// - `rmap` — covariant mapping: parses raw output into `D`
+///
+/// # Example
+/// ```rust,ignore
+/// struct Doc { content: String, metadata: HashMap<String, String> }
+/// struct Summary { title: String, key_points: Vec<String> }
+///
+/// let summary: Summary = lambda_rlm_typed(
+///     &doc,
+///     "summarize the key findings",
+///     provider,
+///     config,
+///     |d: &Doc| d.content.clone(),
+///     |raw: String| parse_summary(&raw),
+/// ).await?;
+/// ```
+pub async fn lambda_rlm_typed<C, D, F, G>(
+    input: &C,
+    user_query: &str,
+    provider: Arc<LlmProvider>,
+    config: LambdaConfig,
+    lmap: F,
+    rmap: G,
+) -> crate::monad::error::Result<D>
+where
+    F: Fn(&C) -> String,
+    G: Fn(String) -> D,
+{
+    // Contravariant: C → String
+    let prompt = lmap(input);
+
+    eprintln!(
+        "🔬 [λ-RLM/Profunctor] {} → {} tokens → λ-RLM → {}",
+        std::any::type_name::<C>(),
+        combinators::token_count(&prompt),
+        std::any::type_name::<D>(),
+    );
+
+    // Core λ-RLM execution
+    let raw_output = lambda_rlm(
+        &prompt,
+        user_query,
+        provider,
+        config,
+    ).await?;
+
+    // Covariant: String → D
+    Ok(rmap(raw_output))
 }
 
 #[cfg(test)]

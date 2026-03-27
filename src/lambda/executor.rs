@@ -10,6 +10,7 @@
 //! - **Accuracy** (Theorem 3): power-law decay, not exponential
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::combinators;
 use super::planner::ExecutionPlan;
@@ -29,7 +30,7 @@ pub struct LambdaExecutor {
     user_query: String,
 }
 
-/// Metrics collected during execution.
+/// Metrics collected during execution (atomic for parallel MAP).
 #[derive(Debug, Clone, Default)]
 pub struct ExecutionMetrics {
     /// Total M invocations (leaf β-reductions).
@@ -40,6 +41,34 @@ pub struct ExecutionMetrics {
     pub max_depth_reached: usize,
     /// Chunks that were pre-filtered out.
     pub filtered_chunks: usize,
+}
+
+/// Thread-safe atomic metrics for parallel MAP execution.
+struct AtomicMetrics {
+    leaf_calls: AtomicUsize,
+    compose_steps: AtomicUsize,
+    max_depth_reached: AtomicUsize,
+    filtered_chunks: AtomicUsize,
+}
+
+impl AtomicMetrics {
+    fn new() -> Self {
+        Self {
+            leaf_calls: AtomicUsize::new(0),
+            compose_steps: AtomicUsize::new(0),
+            max_depth_reached: AtomicUsize::new(0),
+            filtered_chunks: AtomicUsize::new(0),
+        }
+    }
+
+    fn snapshot(&self) -> ExecutionMetrics {
+        ExecutionMetrics {
+            leaf_calls: self.leaf_calls.load(Ordering::Relaxed),
+            compose_steps: self.compose_steps.load(Ordering::Relaxed),
+            max_depth_reached: self.max_depth_reached.load(Ordering::Relaxed),
+            filtered_chunks: self.filtered_chunks.load(Ordering::Relaxed),
+        }
+    }
 }
 
 impl LambdaExecutor {
@@ -56,25 +85,27 @@ impl LambdaExecutor {
     ///
     /// This is a single invocation that recursively decomposes the prompt,
     /// processes leaves with M, and composes results with ⊕.
-    /// No open-ended REPL loop.
+    /// MAP branches run in parallel via `join_all`.
     pub async fn execute(&self, prompt: &str) -> crate::monad::error::Result<String> {
-        let mut metrics = ExecutionMetrics::default();
+        let metrics = AtomicMetrics::new();
         
-        // Print the Topological Open Cover / Monoidal String Diagram before execution
-        println!("\n{}\n🔮 CATEGORY THEORY: λ-RLM Execution String Diagram\n{}\n{}\n{}\n", 
+        // Print the String Diagram before execution
+        println!("\n{}\n🔮 λ-RLM Execution String Diagram\n{}\n{}\n{}\n", 
             "═".repeat(60),
             "═".repeat(60),
             self.plan.to_mermaid(),
             "═".repeat(60)
         );
 
-        let result = self.phi(prompt, 0, &mut metrics).await?;
+        let result = self.phi(prompt, 0, &metrics).await?;
+
+        let snapshot = metrics.snapshot();
 
         tracing::info!(
-            leaf_calls = metrics.leaf_calls,
-            compose_steps = metrics.compose_steps,
-            max_depth = metrics.max_depth_reached,
-            filtered = metrics.filtered_chunks,
+            leaf_calls = snapshot.leaf_calls,
+            compose_steps = snapshot.compose_steps,
+            max_depth = snapshot.max_depth_reached,
+            filtered = snapshot.filtered_chunks,
             "λ-RLM execution complete"
         );
 
@@ -100,15 +131,16 @@ impl LambdaExecutor {
     /// ```
     ///
     /// `depth` tracks current recursion level for metrics and safety.
+    /// MAP branches execute in **parallel** via `join_all` (paper §4.1).
     fn phi<'a>(
         &'a self,
         prompt: &'a str,
         depth: usize,
-        metrics: &'a mut ExecutionMetrics,
+        metrics: &'a AtomicMetrics,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::monad::error::Result<String>> + Send + 'a>>
     {
         Box::pin(async move {
-            metrics.max_depth_reached = metrics.max_depth_reached.max(depth);
+            metrics.max_depth_reached.fetch_max(depth, Ordering::Relaxed);
 
             let token_len = combinators::token_count(prompt);
 
@@ -119,12 +151,11 @@ impl LambdaExecutor {
                     self.plan.task_type,
                     &self.user_query,
                 );
-                metrics.leaf_calls += 1;
+                metrics.leaf_calls.fetch_add(1, Ordering::Relaxed);
 
                 tracing::debug!(
                     depth,
                     tokens = token_len,
-                    leaf_call = metrics.leaf_calls,
                     "λ-RLM leaf: invoking M"
                 );
 
@@ -143,7 +174,7 @@ impl LambdaExecutor {
                     self.plan.task_type,
                     &self.user_query,
                 );
-                metrics.leaf_calls += 1;
+                metrics.leaf_calls.fetch_add(1, Ordering::Relaxed);
                 return self.provider.complete(&leaf_prompt).await;
             }
 
@@ -169,7 +200,7 @@ impl LambdaExecutor {
                         let preview = combinators::peek(chunk, 0, preview_len);
                         let is_relevant = self.is_relevant_preview(&preview);
                         if !is_relevant {
-                            metrics.filtered_chunks += 1;
+                            metrics.filtered_chunks.fetch_add(1, Ordering::Relaxed);
                         }
                         is_relevant
                     })
@@ -186,17 +217,20 @@ impl LambdaExecutor {
                 chunks
             };
 
-            // MAP(λpi. Φ(pi)): recursive sub-calls
-            // We process sequentially to avoid shared mutable metrics.
-            // For production: use Arc<AtomicUsize> counters and join_all.
-            let mut results = Vec::with_capacity(chunks.len());
-            for chunk in &chunks {
-                let result = self.phi(chunk, depth + 1, metrics).await?;
-                results.push(result);
+            // MAP(λpi. Φ(pi)): parallel recursive sub-calls via join_all
+            let futures: Vec<_> = chunks
+                .iter()
+                .map(|chunk| self.phi(chunk, depth + 1, metrics))
+                .collect();
+
+            let results_vec = futures_util::future::join_all(futures).await;
+            let mut results = Vec::with_capacity(results_vec.len());
+            for r in results_vec {
+                results.push(r?);
             }
 
             // REDUCE(⊕): deterministic composition
-            metrics.compose_steps += 1;
+            metrics.compose_steps.fetch_add(1, Ordering::Relaxed);
             let composed = templates::compose_symbolic(results, self.plan.task_type);
 
             Ok(composed)

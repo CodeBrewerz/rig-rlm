@@ -7279,6 +7279,7 @@ dependencies = [
  "frunk_core",
  "futures-util",
  "hashbrown 0.16.1",
+ "hehrgnn",
  "indexmap 2.12.1",
  "microsandbox",
  "oneshot",

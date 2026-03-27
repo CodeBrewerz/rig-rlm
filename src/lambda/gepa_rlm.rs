@@ -2,8 +2,9 @@ use std::sync::Arc;
 use tokio::runtime::Handle;
 use hehrgnn::optimizer::gepa::{Candidate, Evaluator, EvalResult, SideInfo};
 use crate::monad::provider::{LlmProvider, ProviderConfig};
-use crate::lambda::planner::{ExecutionPlan, TaskType};
+use crate::lambda::planner::{self, ExecutionPlan, TaskType, CostParams};
 use crate::lambda::executor::LambdaExecutor;
+use crate::lambda::combinators;
 
 /// Build a live LlmProvider pointed at OpenRouter + Trinity for GEPA evaluation.
 pub fn trinity_provider() -> Arc<LlmProvider> {
@@ -32,17 +33,19 @@ impl Evaluator for LambdaExecutorEvaluator {
         let k_star = candidate.get_f32("k_star", 2.0).round() as usize;
         let tau_star = candidate.get_f32("tau_star", 1500.0).round() as usize;
         
-        // Build a synthetic execution plan based on the mutated params
-        let plan = ExecutionPlan {
-            task_type: TaskType::Summarise,
-            k_star: k_star.max(2),      // Prevent infinite loops
-            tau_star: tau_star.max(50), // Prevent token explosion
-            depth: 3,
-            estimated_cost: 0.0,
-            estimated_calls: 0,
-            has_prefilter: false,
-            neural_compose: true,
-        };
+        // Build a PROPER execution plan using the planner (not hardcoded depth!)
+        let n = combinators::token_count(&self.massive_context);
+        let mut cost_params = CostParams::default();
+        // Override c_compose so the planner respects the mutated k_star
+        cost_params.c_compose = if k_star <= 2 { 1.0 } else { 0.01 };
+        
+        let plan = planner::plan(
+            n,
+            tau_star.max(50),
+            0.80,
+            TaskType::Summarise,
+            &cost_params,
+        );
 
         // 2. GEPA Evaluator is a synchronous trait, so we spin up a local runtime
         let executor = LambdaExecutor::new(plan.clone(), self.provider.clone(), self.query.clone());

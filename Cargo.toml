@@ -81,6 +81,8 @@ hashbrown = "0.16.1"
 corophage = "0.3.1"
 frunk_core = "0.4.4"
 
+hehrgnn = { path = "src/gnn/hehrgnn" }
+
 [[bin]]
 name = "rig-rlm"
 path = "src/main.rs"
@@ -88,6 +90,10 @@ path = "src/main.rs"
 [[bin]]
 name = "restate-server"
 path = "src/restate_server.rs"
+
+[[bin]]
+name = "optimize_rlm"
+path = "src/bin/optimize_rlm.rs"
 
 [[bin]]
 name = "mcp-server"

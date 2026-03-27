@@ -626,4 +626,487 @@ mod lambda_live {
         }
         eprintln!("  └─────────────────────────────────────");
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 5. Yoneda Representable Functor — fmap + QueryMorphism
+    //    Tests the full category theory stack end-to-end
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Tests the representable functor y(P) with query morphisms:
+    /// 1. probe(q) — evaluate on a base query
+    /// 2. fmap(refine, q) — apply a query morphism and evaluate
+    /// 3. Verify the morphism produces a more specific result
+    #[tokio::test]
+    #[ignore]
+    async fn live_yoneda_representable_functor() {
+        let provider = trinity_provider();
+
+        let sep = "═".repeat(60);
+        eprintln!("\n{sep}");
+        eprintln!("⚡ YONEDA: Representable Functor y(P) with Query Morphisms");
+        eprintln!("{sep}");
+
+        // Build a document that has multiple topics
+        let document = long_document(2000);
+        let doc_tokens = combinators::token_count(&document);
+        eprintln!("  📄 Document: {} chars, ~{} tokens", document.len(), doc_tokens);
+
+        // Lift into Yoneda representation (lazy — no computation yet)
+        let config = LambdaConfig::default().with_context_window(1500);
+        let y_p = lambda::yoneda::YonedaContext::lift(document, provider, config);
+        eprintln!("  🧿 y(P) created — document is unevaluated\n");
+
+        // ── 1. Evaluate y(P)(q) for a base query ──
+        let base_query = "What are the main topics covered?";
+        eprintln!("  ── y(P)(q₁) — Base query: {:?}", base_query);
+
+        let timer = std::time::Instant::now();
+        let result1 = y_p.probe(base_query).await;
+        let t1 = timer.elapsed();
+
+        match &result1 {
+            Ok(answer) => {
+                eprintln!("  ✅ y(P)(q₁) = {} chars in {:.1}s:", answer.len(), t1.as_secs_f64());
+                for line in answer.lines().take(8) {
+                    eprintln!("  │ {line}");
+                }
+            }
+            Err(e) => {
+                eprintln!("  ⚠️ y(P)(q₁) failed: {e}");
+                return;
+            }
+        }
+
+        // ── 2. Apply a query morphism: refine → "focus on science" ──
+        let refine = lambda::QueryMorphism::new(
+            "focus_on_science",
+            |q: &str| format!("{} Focus specifically on scientific contributions and Nobel Prize winners.", q),
+        );
+
+        eprintln!("\n  ── y(P)(f(q₁)) — Morphism: {} ──", refine.name);
+
+        let timer2 = std::time::Instant::now();
+        let result2 = y_p.fmap(&refine, base_query).await;
+        let t2 = timer2.elapsed();
+
+        match &result2 {
+            Ok(answer) => {
+                eprintln!("  ✅ y(P)(f(q₁)) = {} chars in {:.1}s:", answer.len(), t2.as_secs_f64());
+                for line in answer.lines().take(8) {
+                    eprintln!("  │ {line}");
+                }
+
+                // The refined result should mention science-related terms
+                let has_science = answer.to_lowercase().contains("science")
+                    || answer.to_lowercase().contains("nobel")
+                    || answer.to_lowercase().contains("pasteur")
+                    || answer.to_lowercase().contains("curie");
+                eprintln!("\n  📊 Refined result mentions science terms: {}", has_science);
+            }
+            Err(e) => eprintln!("  ⚠️ y(P)(f(q₁)) failed: {e}"),
+        }
+
+        // ── 3. Compose two morphisms: g ∘ f ──
+        let add_format = lambda::QueryMorphism::new(
+            "request_bullet_points",
+            |q: &str| format!("{} Answer in bullet points.", q),
+        );
+        let composed = add_format.compose(lambda::QueryMorphism::new(
+            "focus_on_science",
+            |q: &str| format!("{} Focus specifically on scientific contributions.", q),
+        ));
+        eprintln!("\n  ── y(P)((g∘f)(q₁)) — Composed: {} ──", composed.name);
+
+        let result3 = y_p.fmap(&composed, base_query).await;
+        match &result3 {
+            Ok(answer) => {
+                eprintln!("  ✅ y(P)((g∘f)(q₁)) = {} chars:", answer.len());
+                for line in answer.lines().take(8) {
+                    eprintln!("  │ {line}");
+                }
+            }
+            Err(e) => eprintln!("  ⚠️ Composed morphism failed: {e}"),
+        }
+
+        eprintln!("\n{sep}\n");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 6. Profunctor Typed Pipeline — end-to-end struct → struct
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Tests the Profunctor typed pipeline with real LLM calls:
+    /// AnalysisRequest → [λ-RLM] → AnalysisReport
+    #[tokio::test]
+    #[ignore]
+    async fn live_profunctor_typed_pipeline() {
+        let provider = trinity_provider();
+
+        let sep = "═".repeat(60);
+        eprintln!("\n{sep}");
+        eprintln!("⚡ PROFUNCTOR: TypedPipeline — AnalysisRequest → AnalysisReport");
+        eprintln!("{sep}");
+
+        // Domain types
+        #[derive(Debug)]
+        struct AnalysisRequest {
+            document: String,
+            focus_area: String,
+            max_points: usize,
+        }
+
+        #[derive(Debug)]
+        struct AnalysisReport {
+            summary: String,
+            point_count: usize,
+            word_count: usize,
+        }
+
+        // Build the typed pipeline via Profunctor
+        let config = LambdaConfig::default().with_context_window(1500);
+
+        let pipeline = lambda::TypedPipeline::new(
+            provider,
+            config,
+            "Analyze the document",
+            // lmap (contravariant): AnalysisRequest → String
+            |req: &AnalysisRequest| {
+                format!(
+                    "{}\n\nFocus on: {}\nProvide up to {} key points.",
+                    req.document, req.focus_area, req.max_points
+                )
+            },
+            // rmap (covariant): String → AnalysisReport
+            |raw: String| {
+                AnalysisReport {
+                    point_count: raw.lines().filter(|l| l.starts_with('-') || l.starts_with('•') || l.starts_with('*')).count(),
+                    word_count: raw.split_whitespace().count(),
+                    summary: raw,
+                }
+            },
+        );
+
+        let request = AnalysisRequest {
+            document: long_document(2000),
+            focus_area: "economic and scientific achievements".to_string(),
+            max_points: 5,
+        };
+
+        eprintln!("  🔬 Input: AnalysisRequest {{ focus: {:?}, doc: {} chars }}",
+            request.focus_area, request.document.len());
+
+        let timer = std::time::Instant::now();
+        let result = pipeline.execute(&request).await;
+        let elapsed = timer.elapsed();
+
+        match result {
+            Ok(report) => {
+                eprintln!("  ✅ Output: AnalysisReport in {:.1}s", elapsed.as_secs_f64());
+                eprintln!("     point_count: {}", report.point_count);
+                eprintln!("     word_count:  {}", report.word_count);
+                eprintln!("     summary:");
+                for line in report.summary.lines().take(10) {
+                    eprintln!("     │ {line}");
+                }
+                assert!(report.word_count > 0, "Report should have content");
+            }
+            Err(e) => eprintln!("  ⚠️ Pipeline error: {e}"),
+        }
+
+        eprintln!("\n{sep}\n");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 7. Yoneda Equivalence — Full Faithfulness Check
+    //    Two different representations of the "same" info
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Tests the Yoneda Embedding's full faithfulness guarantee:
+    /// P₁ ≅ P₂ ⟺ ∀q: probe(P₁, q) ≅ probe(P₂, q)
+    ///
+    /// We compare a document against a shuffled version of itself.
+    /// They should be Yoneda-equivalent (same info, different order).
+    #[tokio::test]
+    #[ignore]
+    async fn live_yoneda_equivalence_check() {
+        let provider = trinity_provider();
+
+        let sep = "═".repeat(60);
+        eprintln!("\n{sep}");
+        eprintln!("⚡ YONEDA EMBEDDING: Full Faithfulness — P₁ ≅? P₂");
+        eprintln!("{sep}");
+
+        // P₁: original document
+        let doc1 = "France is in Western Europe. Its capital is Paris. \
+                    The economy is the 7th largest globally. \
+                    Key sectors include aerospace (Airbus) and nuclear energy. \
+                    French scientists include Pasteur and Curie.";
+
+        // P₂: same facts, different order + wording
+        let doc2 = "Pasteur and Curie are famous French scientists. \
+                    The French economy ranks 7th in the world, \
+                    driven by Airbus (aerospace) and nuclear power. \
+                    Paris is the capital of France, a Western European nation.";
+
+        // P₃: completely different document (should NOT be equivalent)
+        let doc3 = "Japan is an island nation in East Asia. \
+                    Tokyo is its capital. The economy focuses on electronics \
+                    and automotive manufacturing. Honda and Toyota are key companies.";
+
+        let config = LambdaConfig::default().with_context_window(2000);
+
+        let y1 = lambda::yoneda::YonedaContext::lift(doc1, Arc::clone(&provider), config.clone());
+        let y2 = lambda::yoneda::YonedaContext::lift(doc2, Arc::clone(&provider), config.clone());
+        let y3 = lambda::yoneda::YonedaContext::lift(doc3, provider, config);
+
+        let test_queries = &[
+            "What country is this about?",
+            "What is the capital city?",
+            "Name a scientist mentioned.",
+        ];
+
+        // Simple word-overlap similarity for testing
+        let similarity = |a: &str, b: &str| -> f64 {
+            let a_lower = a.to_lowercase();
+            let b_lower = b.to_lowercase();
+            let words_a: std::collections::HashSet<&str> = a_lower
+                .split_whitespace()
+                .filter(|w| w.len() > 3)
+                .collect();
+            let words_b: std::collections::HashSet<&str> = b_lower
+                .split_whitespace()
+                .filter(|w| w.len() > 3)
+                .collect();
+            let intersection = words_a.intersection(&words_b).count();
+            let union = words_a.union(&words_b).count();
+            if union == 0 { 1.0 } else { intersection as f64 / union as f64 }
+        };
+
+        // ── Test 1: P₁ ≅ P₂ (same info) ──
+        eprintln!("\n  ── Test 1: P₁ ≅? P₂ (same facts, different wording) ──");
+        let eq12 = lambda::yoneda::yoneda_equivalence(&y1, &y2, test_queries, &similarity, 0.15).await;
+        match &eq12 {
+            Ok(eq) => {
+                eprintln!("  📊 Equivalent: {}, Mean similarity: {:.3}", eq.equivalent, eq.mean_similarity);
+                for (q, s) in &eq.scores {
+                    eprintln!("     {:40} sim={:.3}", q, s);
+                }
+            }
+            Err(e) => eprintln!("  ⚠️ Error: {e}"),
+        }
+
+        // ── Test 2: P₁ ≇ P₃ (different info) ──
+        eprintln!("\n  ── Test 2: P₁ ≅? P₃ (completely different content) ──");
+        let eq13 = lambda::yoneda::yoneda_equivalence(&y1, &y3, test_queries, &similarity, 0.15).await;
+        match &eq13 {
+            Ok(eq) => {
+                eprintln!("  📊 Equivalent: {}, Mean similarity: {:.3}", eq.equivalent, eq.mean_similarity);
+                for (q, s) in &eq.scores {
+                    eprintln!("     {:40} sim={:.3}", q, s);
+                }
+                // P₁ and P₃ should NOT be equivalent
+                if !eq.equivalent {
+                    eprintln!("  ✅ Correctly identified as non-equivalent!");
+                }
+            }
+            Err(e) => eprintln!("  ⚠️ Error: {e}"),
+        }
+
+        eprintln!("\n{sep}\n");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 8. Adaptive Yoneda — Self-Learning via GEPA Trajectory Evolution
+    //    Each probe learns from past probes and improves morphism selection
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Tests the full self-learning loop:
+    /// 1. Creates an AdaptiveYoneda with trajectory memory
+    /// 2. Runs 5 adaptive probes — each selects morphisms via epsilon-greedy
+    /// 3. Scores each result
+    /// 4. Shows improving morphism selection over generations
+    #[tokio::test]
+    #[ignore]
+    async fn live_adaptive_yoneda_self_learning() {
+        let provider = trinity_provider();
+
+        let sep = "═".repeat(60);
+        eprintln!("\n{sep}");
+        eprintln!("⚡ ADAPTIVE YONEDA: Self-Learning via GEPA Trajectory Evolution");
+        eprintln!("{sep}");
+
+        // Build a document with facts we can verify
+        let document = long_document(2000);
+        let config = LambdaConfig::default().with_context_window(1500);
+
+        let mut adaptive = lambda::AdaptiveYoneda::new(
+            document.clone(),
+            provider,
+            config,
+        );
+
+        // ── Multi-Dimensional Scoring ──
+        //
+        // The scorer evaluates 4 dimensions so morphisms actually compete:
+        //
+        // 1. Recall (30%)       — did the expected keywords appear?
+        // 2. Precision (30%)    — is the answer focused (low word count = better)?
+        // 3. Conciseness (20%)  — penalize answers > 200 words
+        // 4. Format (20%)       — reward bullet points / structured output
+        //
+        // Identity will get decent recall but poor precision/format scores.
+        // "be_concise" and "extract_key_facts" should score higher on 
+        // precision + format, creating real learning signal.
+
+        struct TestCase {
+            query: &'static str,
+            required_keywords: Vec<&'static str>,
+            max_ideal_words: usize,      // ideal answer length (shorter = higher precision score)
+            wants_bullets: bool,          // reward •/- bullet format
+        }
+
+        let test_cases = vec![
+            TestCase {
+                query: "What are the main economic sectors mentioned?",
+                required_keywords: vec!["airbus", "nuclear", "aerospace"],
+                max_ideal_words: 50,     // a focused answer is short
+                wants_bullets: true,     // bullet points are ideal for listing sectors
+            },
+            TestCase {
+                query: "Who are the scientists mentioned?",
+                required_keywords: vec!["pasteur", "curie"],
+                max_ideal_words: 40,
+                wants_bullets: true,
+            },
+            TestCase {
+                query: "What is the capital city?",
+                required_keywords: vec!["paris"],
+                max_ideal_words: 15,     // should be a one-liner
+                wants_bullets: false,
+            },
+            TestCase {
+                query: "What historical events are discussed?",
+                required_keywords: vec!["revolution", "1789"],
+                max_ideal_words: 50,
+                wants_bullets: true,
+            },
+            TestCase {
+                query: "How large is the country in area?",
+                required_keywords: vec!["643"],
+                max_ideal_words: 20,
+                wants_bullets: false,
+            },
+        ];
+
+        let timer = std::time::Instant::now();
+
+        for (i, tc) in test_cases.iter().enumerate() {
+            eprintln!("\n  ── Probe {} — {:?} ──", i + 1, tc.query);
+            eprintln!("     ideal_words≤{}, wants_bullets={}, keywords={:?}",
+                tc.max_ideal_words, tc.wants_bullets, tc.required_keywords);
+
+            let keywords = tc.required_keywords.clone();
+            let max_ideal = tc.max_ideal_words;
+            let wants_bullets = tc.wants_bullets;
+
+            let result = adaptive.adaptive_probe(
+                tc.query,
+                move |_q, result| {
+                    let result_lower = result.to_lowercase();
+                    let word_count = result.split_whitespace().count();
+
+                    // 1. Recall (30%): what fraction of keywords found?
+                    let found = keywords.iter().filter(|kw| result_lower.contains(*kw)).count();
+                    let recall = found as f64 / keywords.len().max(1) as f64;
+
+                    // 2. Precision (30%): penalize overly verbose answers
+                    // Score 1.0 if ≤ ideal, decays as answer gets longer
+                    let precision = if word_count <= max_ideal {
+                        1.0
+                    } else {
+                        (max_ideal as f64 / word_count as f64).min(1.0)
+                    };
+
+                    // 3. Conciseness (20%): hard penalty for > 200 words
+                    let conciseness = if word_count <= 200 {
+                        1.0
+                    } else if word_count <= 500 {
+                        0.5
+                    } else {
+                        0.2
+                    };
+
+                    // 4. Format (20%): reward bullet points if wanted
+                    let format_score = if wants_bullets {
+                        let bullet_lines = result.lines()
+                            .filter(|l| {
+                                let trimmed = l.trim();
+                                trimmed.starts_with('-') || trimmed.starts_with('•') ||
+                                trimmed.starts_with('*') || trimmed.starts_with("–")
+                            })
+                            .count();
+                        if bullet_lines >= 2 { 1.0 }
+                        else if bullet_lines == 1 { 0.5 }
+                        else { 0.1 }  // no bullets when expected → low score
+                    } else {
+                        // For non-bullet queries, reward shortness
+                        if word_count <= max_ideal { 1.0 } else { 0.5 }
+                    };
+
+                    let score = recall * 0.30
+                        + precision * 0.30
+                        + conciseness * 0.20
+                        + format_score * 0.20;
+
+                    eprintln!("     📊 recall={:.2} precision={:.2} concise={:.2} format={:.2} → {:.3}",
+                        recall, precision, conciseness, format_score, score);
+                    eprintln!("        words={}, bullets={}", word_count,
+                        result.lines().filter(|l| l.trim().starts_with('-') || l.trim().starts_with('•')).count());
+
+                    score
+                },
+            ).await;
+
+            match &result {
+                Ok((answer, score)) => {
+                    eprintln!("  ✅ Final score: {:.3}", score);
+                    for line in answer.lines().take(5) {
+                        eprintln!("  │ {}", &line[..line.len().min(100)]);
+                    }
+                    if answer.lines().count() > 5 {
+                        eprintln!("  │ ... ({} more lines)", answer.lines().count() - 5);
+                    }
+                }
+                Err(e) => eprintln!("  ⚠️ Error: {e}"),
+            }
+        }
+
+        let elapsed = timer.elapsed();
+
+        // Print trajectory summary
+        {
+            let store = adaptive.trajectories.lock().unwrap();
+            let pop = adaptive.morphisms.lock().unwrap();
+
+            eprintln!("\n{sep}");
+            eprintln!("📊 SELF-LEARNING SUMMARY ({:.1}s total)", elapsed.as_secs_f64());
+            eprintln!("{sep}");
+            eprintln!("  Total trajectories: {}", store.all().len());
+            eprintln!("  Mean score: {:.3}", store.mean_score());
+            eprintln!("  Improvement rate: {:.3}", store.improvement_rate(2));
+            eprintln!("\n  Morphism Population (lower=worse, higher=better):");
+            eprintln!("{}", pop.summary());
+            eprintln!("\n  Trajectory Details:");
+            for t in store.all() {
+                eprintln!("    gen={} morph={:20} score={:.3} words={}",
+                    t.generation,
+                    t.morphism_name.as_deref().unwrap_or("?"),
+                    t.score,
+                    t.result.split_whitespace().count(),
+                );
+            }
+        }
+
+        eprintln!("\n{sep}\n");
+    }
 }
