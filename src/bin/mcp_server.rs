@@ -51,7 +51,8 @@ struct Cli {
     host: String,
 
     /// Disable session tracking (each POST is independent).
-    #[arg(long, default_value = "true")]
+    /// Default: stateful (sessions persist across requests).
+    #[arg(long)]
     stateless: bool,
 }
 

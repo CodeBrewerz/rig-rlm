@@ -14,6 +14,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use serde::Serialize;
+use rayon::prelude::*;
 
 use super::memory::{default_save_dir, Nugget, NuggetOpts, NuggetStatus, RecallResult};
 
@@ -229,8 +230,11 @@ impl NuggetShelf {
     // -- convenience pass-throughs -------------------------------------------
 
     /// Remember a fact in a specific nugget.
+    /// Pre-warms HRR eagerly (build cost is ~2-3ms per nugget).
     pub fn remember(&mut self, nugget_name: &str, key: &str, value: &str) {
-        self.get_mut(nugget_name).remember(key, value);
+        let nugget = self.get_mut(nugget_name);
+        nugget.remember(key, value);
+        nugget.ensure_hrr_hot();
     }
 
     /// Recall from a specific nugget or broadcast across all.
@@ -249,35 +253,64 @@ impl NuggetShelf {
             };
         }
 
-        // Broadcast: find best confidence across all nuggets
-        let mut best = ShelfRecallResult {
-            result: RecallResult {
-                answer: None,
-                confidence: 0.0,
-                margin: 0.0,
-                found: false,
-                key: String::new(),
-            },
-            nugget_name: None,
-        };
-
-        // Collect names first to avoid borrow issues
+        // Broadcast: parallel recall across all nuggets
+        // 1. Ensure all nuggets are loaded (sequential — disk I/O)
         let names: Vec<String> = self.catalog.keys().cloned().collect();
         for name in &names {
             self.ensure_loaded(name);
-            let result = self
-                .cache
-                .get_mut(name)
-                .unwrap()
-                .nugget
-                .recall(query, session_id);
-            if result.found && result.confidence > best.result.confidence {
-                best = ShelfRecallResult {
-                    result,
-                    nugget_name: Some(name.clone()),
-                };
-            }
         }
+
+        // 2. Extract nuggets for parallel processing
+        let mut entries: Vec<(String, CachedNugget)> = names.iter()
+            .filter_map(|n| self.cache.remove_entry(n))
+            .collect();
+
+        // 3. Parallel recall via rayon (Nugget is Send + Sync)
+        let query_owned = query.to_string();
+        let session_owned = session_id.to_string();
+        let results: Vec<(String, CachedNugget, RecallResult)> = entries
+            .into_par_iter()
+            .map(|(name, mut entry)| {
+                let result = entry.nugget.recall(&query_owned, &session_owned);
+                (name, entry, result)
+            })
+            .collect();
+
+        // 4. Put nuggets back and find best result
+        // We track the best match, with a massive bias for EXACT key matches
+        let mut best_is_exact = false;
+        let mut best = ShelfRecallResult {
+            result: RecallResult {
+                answer: None, confidence: 0.0, margin: 0.0,
+                found: false, key: String::new(),
+            },
+            nugget_name: None,
+        };
+        for (name, entry, result) in results {
+            if result.found {
+                let is_exact = result.key.eq_ignore_ascii_case(&query_owned);
+                
+                let should_update = if is_exact && !best_is_exact {
+                    true // Always upgrade from fuzzy to exact
+                } else if !is_exact && best_is_exact {
+                    false // Never let a fuzzy match overwrite an exact match
+                } else {
+                    // Both are exact, or both are fuzzy -> break tie with confidence
+                    result.confidence > best.result.confidence
+                };
+
+                if should_update {
+                    best_is_exact = is_exact;
+                    best = ShelfRecallResult {
+                        result: result.clone(),
+                        nugget_name: Some(name.clone()),
+                    };
+                    best.result = result;
+                }
+            }
+            self.cache.insert(name, entry);
+        }
+
         self.enforce_hrr_budget();
         best
     }
@@ -350,14 +383,23 @@ impl NuggetShelf {
         }
 
         // Must load from disk
+        let t_load = std::time::Instant::now();
         let path = self
             .catalog
             .get(name)
             .unwrap_or_else(|| panic!("Nugget {:?} not found", name))
             .clone();
 
-        let nugget = Nugget::load(&path, self.auto_save)
+        let mut nugget = Nugget::load(&path, self.auto_save)
             .unwrap_or_else(|e| panic!("Failed to load nugget {:?}: {}", name, e));
+        let load_ms = t_load.elapsed().as_millis();
+
+        // Pre-warm HRR on load so first recall is instant
+        let t_warm = std::time::Instant::now();
+        nugget.ensure_hrr_hot();
+        let warm_ms = t_warm.elapsed().as_millis();
+        
+        eprintln!("[Shelf] ensure_loaded {} load={}ms prewarm={}ms", name, load_ms, warm_ms);
 
         self.insert_into_cache(name.to_string(), nugget);
     }

@@ -96,6 +96,7 @@ fn default_orth_iters() -> usize { 1 }
 
 /// Pre-built HRR data for fast recall.
 struct HrrData {
+    // ── Value bank (existing) ──────────────────────────────────
     /// Per-bank memory vectors (facts distributed round-robin), quantized to 4-bits.
     memories: Vec<Vec<u8>>,
     /// Seed for deterministic codebook regeneration.
@@ -117,6 +118,18 @@ struct HrrData {
     num_banks: usize,
     /// Estimated RAM in bytes.
     pub byte_size: usize,
+
+    // ── Key bank (NEW: enables HRR-based key lookup) ──────────
+    /// Per-bank memory vectors encoding fact KEYS (same sharding as values).
+    key_memories: Vec<Vec<u8>>,
+    /// QJL cleanup network for key lookup.
+    key_cleanup: QjlCleanupNetwork,
+    /// Unique key strings in codebook order.
+    key_words: Vec<String>,
+    /// key string → codebook index.
+    key_idx: HashMap<String, usize>,
+    /// Separate sentence key for key encoding (independent PRNG stream).
+    key_sent_key: ComplexVector,
 }
 
 impl HrrData {
@@ -231,6 +244,12 @@ pub struct Nugget {
     key_index: KeyIndex,
 }
 
+// Compile-time assertion: Nugget must be Send + Sync for parallel broadcast.
+const _: () = {
+    fn assert_send_sync<T: Send + Sync>() {}
+    fn check() { assert_send_sync::<Nugget>(); }
+};
+
 impl Nugget {
     pub fn new(opts: NuggetOpts) -> Self {
         Self {
@@ -304,7 +323,7 @@ impl Nugget {
             self.dirty = false;
         }
 
-        let tag = match self.resolve_tag(query) {
+        let (tag, match_quality) = match self.resolve_tag(query) {
             Some(t) => t,
             None => return RecallResult::empty(),
         };
@@ -336,6 +355,10 @@ impl Nugget {
             }
         };
 
+        // Weight confidence by key match quality  
+        // Exact match (1.0) preserves full confidence; fuzzy (0.8) reduces it
+        let weighted_confidence = confidence * match_quality;
+
         // Hit tracking
         if !session_id.is_empty() {
             if let Some(fact) = self.facts.get_mut(pos) {
@@ -347,7 +370,7 @@ impl Nugget {
             }
         }
 
-        RecallResult { answer: Some(word), confidence, margin, found: true, key: tag }
+        RecallResult { answer: Some(word), confidence: weighted_confidence, margin, found: true, key: tag }
     }
 
     pub fn forget(&mut self, key: &str) -> bool {
@@ -430,7 +453,7 @@ impl Nugget {
             max_facts: self.max_facts, facts: self.facts.clone(),
             config: NuggetConfig::default(),
         };
-        let json = serde_json::to_string(&data)
+        let json = simd_json::to_string(&data)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         let tmp = path.with_extension("json.tmp");
         fs::write(&tmp, &json)?;
@@ -439,16 +462,19 @@ impl Nugget {
     }
 
     pub fn load(path: &Path, auto_save: bool) -> Result<Self, std::io::Error> {
-        let raw = fs::read_to_string(path)?;
-        let data: NuggetFile = serde_json::from_str(&raw)
+        let mut raw = fs::read(path)?;
+        let t_json = std::time::Instant::now();
+        let data: NuggetFile = simd_json::from_slice(&mut raw)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let json_ms = t_json.elapsed().as_millis();
+        
         let save_dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(default_save_dir);
 
         let hrr_path = save_dir.join(format!("{}.hrr.bin", data.name));
         let hrr_state = if hrr_path.exists() { HrrState::Cold } else { HrrState::NotBuilt };
 
         let mut n = Self {
-            name: data.name, d: data.d, banks: data.banks, ensembles: data.ensembles,
+            name: data.name.clone(), d: data.d, banks: data.banks, ensembles: data.ensembles,
             auto_save, save_dir, max_facts: data.max_facts,
             fuzzy_threshold: 0.55,
             facts: data.facts, tag_to_pos: HashMap::new(), dirty: false,
@@ -456,6 +482,7 @@ impl Nugget {
             hrr_state,
             key_index: KeyIndex::new(),
         };
+        let t_idx = std::time::Instant::now();
         if !n.facts.is_empty() {
             n.refresh_index();
             // Initialize hot_indices: most recent max_facts (or all)
@@ -465,12 +492,16 @@ impl Nugget {
             } else { 0 };
             n.hot_indices = (start..total).collect();
         }
+        let idx_ms = t_idx.elapsed().as_millis();
+        if json_ms + idx_ms > 10 {
+            eprintln!("[Nugget::load] {} json={}ms index={}ms", data.name, json_ms, idx_ms);
+        }
         Ok(n)
     }
 
     pub fn peek_metadata(path: &Path) -> Result<(String, usize), std::io::Error> {
-        let raw = fs::read_to_string(path)?;
-        let data: NuggetFile = serde_json::from_str(&raw)
+        let mut raw = fs::read(path)?;
+        let data: NuggetFile = simd_json::from_slice(&mut raw)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         Ok((data.name, data.facts.len()))
     }
@@ -488,7 +519,7 @@ impl Nugget {
     }
 
     /// Ensure HRR vectors are in RAM (Hot).
-    fn ensure_hrr_hot(&mut self) {
+    pub fn ensure_hrr_hot(&mut self) {
         match &self.hrr_state {
             HrrState::Hot(_) => return,
             HrrState::Cold => {
@@ -507,8 +538,21 @@ impl Nugget {
     }
 
     fn build_and_cache_hrr(&mut self) {
+        let t0 = std::time::Instant::now();
         let hrr = self.build_hrr();
-        if self.auto_save { let _ = self.save_hrr(&hrr); }
+        let build_ms = t0.elapsed().as_millis();
+        if self.auto_save {
+            let t1 = std::time::Instant::now();
+            let _ = self.save_hrr(&hrr);
+            let save_ms = t1.elapsed().as_millis();
+            eprintln!("[HRR] {} build={}ms save={}ms facts={} d={} banks={}",
+                     self.name, build_ms, save_ms,
+                     self.hot_indices.len(), hrr.effective_d, hrr.num_banks);
+        } else {
+            eprintln!("[HRR] {} build={}ms facts={} d={} banks={}",
+                     self.name, build_ms,
+                     self.hot_indices.len(), hrr.effective_d, hrr.num_banks);
+        }
         self.hrr_state = HrrState::Hot(Box::new(hrr));
     }
 
@@ -637,8 +681,12 @@ impl Nugget {
         // Bounded dimension: cap at 2048, ensure power-of-two, min 256
         let effective_d = self.d.max(v.saturating_mul(8).max(256)).min(2048).next_power_of_two();
 
-        // Auto-scale banks: max 20 facts per bank for high accuracy
-        let max_per_bank = 20usize;
+        // Auto-scale banks: facts/bank ratio derived from dimension.
+        // SNR ≈ sqrt(D / N_bank), need SNR > 4 for reliable QJL cleanup.
+        // Use sqrt(D)/2 as a practical sweet spot (conservative for key discrimination).
+        // D=256→8/bank, D=512→11/bank, D=1024→16/bank, D=2048→22/bank.
+        let max_per_bank = ((effective_d as f64).sqrt() / 2.0).ceil() as usize;
+        let max_per_bank = max_per_bank.max(4);
         let num_banks = if num_facts == 0 { 1 } else {
             self.banks.max((num_facts + max_per_bank - 1) / max_per_bank)
         };
@@ -648,10 +696,12 @@ impl Nugget {
         let mut rng = Mulberry32::new(seed);
 
         // Generate vocab keys temporarily for encoding + cleanup network build
+        let t_vocab = std::time::Instant::now();
         let mut vocab_keys = make_vocab_keys(v, effective_d, &mut rng);
         if v <= 100 {
             vocab_keys = orthogonalize(&vocab_keys, 1, 0.4);
         }
+        let vocab_ms = t_vocab.elapsed().as_millis();
 
         // Sent key is the (V+1)th key in the PRNG stream
         let sent_keys = make_vocab_keys(1, effective_d, &mut rng);
@@ -690,20 +740,79 @@ impl Nugget {
         }).collect();
 
         // Apply TurboQuant MSE
+        let t_mem = std::time::Instant::now();
         let memories: Vec<Vec<u8>> = memories_raw
             .par_iter()
             .map(|m| super::turboquant::quantize_mse_4bit(m))
             .collect();
+        let mem_ms = t_mem.elapsed().as_millis();
 
-        // 100 is the sweet spot for 100% accuracy at 5k facts without dropping 
-        // to O(V*d) exact search.
+        let t_qjl = std::time::Instant::now();
         let cleanup = QjlCleanupNetwork::new(&vocab_keys, 100);
+        let qjl_ms = t_qjl.elapsed().as_millis();
+
         let byte_size = estimate_hrr_bytes(effective_d, v, num_facts, num_banks);
         // vocab_keys dropped here — no longer stored in HrrData
+
+        // ── Build KEY bank (parallel to value bank) ─────────────────
+        let t_key = std::time::Instant::now();
+        let mut key_seen = HashSet::new();
+        let mut key_words_vec = Vec::new();
+        for f in &self.facts {
+            if key_seen.insert(f.key.clone()) { key_words_vec.push(f.key.clone()); }
+        }
+        let kv = key_words_vec.len();
+        let mut key_idx_map: HashMap<String, usize> = HashMap::with_capacity(kv);
+        for (i, k) in key_words_vec.iter().enumerate() { key_idx_map.insert(k.clone(), i); }
+
+        let key_seed = seed.wrapping_add(0xCAFE_1337);
+        let mut key_rng = Mulberry32::new(key_seed);
+        let mut key_vocab_keys = make_vocab_keys(kv, effective_d, &mut key_rng);
+        if kv <= 100 {
+            key_vocab_keys = orthogonalize(&key_vocab_keys, 1, 0.4);
+        }
+        let key_sent_keys = make_vocab_keys(1, effective_d, &mut key_rng);
+        let key_sent_key = key_sent_keys[0].clone();
+
+        let key_memories_raw: Vec<ComplexVector> = (0..num_banks).into_par_iter().map(|bank| {
+            let mut mem = ComplexVector::zeros(effective_d);
+            let mut bank_count = 0usize;
+            for (i, f) in hot_facts.iter().enumerate() {
+                if i % num_banks == bank {
+                    let k_idx = key_idx_map[&f.key];
+                    let k_key = &key_vocab_keys[k_idx];
+                    let bound_sent = bind(&key_sent_key, k_key);
+                    let binding = bind_role_lut(&bound_sent, i, &rope_lut);
+                    for d in 0..effective_d {
+                        mem.re[d] += binding.re[d];
+                        mem.im[d] += binding.im[d];
+                    }
+                    bank_count += 1;
+                }
+            }
+            if bank_count > 0 {
+                let scale = 1.0 / (bank_count as f64).sqrt();
+                for d in 0..effective_d { mem.re[d] *= scale; mem.im[d] *= scale; }
+            }
+            mem
+        }).collect();
+
+        let key_memories: Vec<Vec<u8>> = key_memories_raw
+            .par_iter()
+            .map(|m| super::turboquant::quantize_mse_4bit(m))
+            .collect();
+
+        let key_cleanup = QjlCleanupNetwork::new(&key_vocab_keys, 100);
+        let key_ms = t_key.elapsed().as_millis();
+        
+        eprintln!("  [HRR detailed] {} vocab={}ms mem={}ms qjl={}ms keybank={}ms", 
+                   self.name, vocab_ms, mem_ms, qjl_ms, key_ms);
 
         HrrData {
             memories, seed, vocab_size: v, cached_sent_key: sent_key, rope_lut, cleanup,
             vocab_words, vocab_idx: idx_w, effective_d, num_banks, byte_size,
+            key_memories, key_cleanup, key_words: key_words_vec, key_idx: key_idx_map,
+            key_sent_key,
         }
     }
 
@@ -731,6 +840,36 @@ impl Nugget {
         (hrr.vocab_words[best_idx].clone(), cleanup_sim, 1.0)
     }
 
+    /// Resolve a query key via HRR key bank.
+    /// Tries every position in the hot set; returns the best-matching key
+    /// (the one with highest QJL cleanup similarity).
+    fn resolve_key_hrr(hrr: &HrrData, hot_indices: &[usize]) -> Option<(String, f64)> {
+        let kv = hrr.key_words.len();
+        if kv == 0 { return None; }
+
+        let d = hrr.effective_d;
+        let mut best_key: Option<String> = None;
+        let mut best_sim: f64 = 0.0;
+
+        for (hot_idx, &_fact_pos) in hot_indices.iter().enumerate() {
+            let bank = hot_idx % hrr.num_banks;
+            let bank_mem = super::turboquant::dequantize_mse_4bit(&hrr.key_memories[bank]);
+
+            let sent_key = &hrr.key_sent_key;
+            let mut tmp = ComplexVector::zeros(d);
+            super::core::unbind_into(&bank_mem, sent_key, &mut tmp);
+            let recovered = unbind_role_inline(&tmp, hot_idx);
+
+            let (best_idx, sim, _) = hrr.key_cleanup.cleanup(&recovered);
+            if sim > best_sim {
+                best_sim = sim;
+                best_key = Some(hrr.key_words[best_idx].clone());
+            }
+        }
+
+        best_key.map(|k| (k, best_sim))
+    }
+
     // -- HRR binary serialization --------------------------------------------
     // Format: "HRR2" | D:u32 | V:u32 | N:u32 | B:u32 | memories[B×2D] | vocab_json
 
@@ -752,7 +891,7 @@ impl Nugget {
             buf.extend_from_slice(mem);
         }
 
-        let vocab_json = serde_json::to_string(&hrr.vocab_words)
+        let vocab_json = simd_json::to_string(&hrr.vocab_words)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         buf.extend_from_slice(vocab_json.as_bytes());
 
@@ -785,9 +924,8 @@ impl Nugget {
             memories.push(buf[bank_off..bank_off + d].to_vec());
         }
 
-        let vocab_json = std::str::from_utf8(&buf[expected..])
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        let vocab_words: Vec<String> = serde_json::from_str(vocab_json)
+        let mut vocab_json_vec = buf[expected..].to_vec();
+        let vocab_words: Vec<String> = simd_json::from_slice(&mut vocab_json_vec)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         if vocab_words.len() != v {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "vocab mismatch"));
@@ -807,9 +945,58 @@ impl Nugget {
         let mut vocab_idx: HashMap<String, usize> = HashMap::with_capacity(v);
         for (i, w) in vocab_words.iter().enumerate() { vocab_idx.insert(w.clone(), i); }
 
+        // Rebuild key bank (not serialized — always fresh from current facts)
+        let mut key_seen = HashSet::new();
+        let mut key_words_vec = Vec::new();
+        for f in &self.facts {
+            if key_seen.insert(f.key.clone()) { key_words_vec.push(f.key.clone()); }
+        }
+        let kv = key_words_vec.len();
+        let mut key_idx_map: HashMap<String, usize> = HashMap::with_capacity(kv);
+        for (i, k) in key_words_vec.iter().enumerate() { key_idx_map.insert(k.clone(), i); }
+
+        let key_seed = seed.wrapping_add(0xCAFE_1337);
+        let mut key_rng = Mulberry32::new(key_seed);
+        let mut key_vocab_keys = make_vocab_keys(kv, d, &mut key_rng);
+        if kv <= 100 { key_vocab_keys = orthogonalize(&key_vocab_keys, 1, 0.4); }
+        let key_sent_keys = make_vocab_keys(1, d, &mut key_rng);
+        let key_sent_key = key_sent_keys[0].clone();
+        let key_cleanup = QjlCleanupNetwork::new(&key_vocab_keys, 100);
+
+        // Build key memories from hot facts
+        let hot_facts: Vec<&Fact> = self.hot_indices.iter()
+            .filter_map(|&i| self.facts.get(i)).collect();
+        let key_memories_raw: Vec<ComplexVector> = (0..num_banks).map(|bank| {
+            let mut mem = ComplexVector::zeros(d);
+            let mut bank_count = 0usize;
+            for (i, f) in hot_facts.iter().enumerate() {
+                if i % num_banks == bank {
+                    if let Some(&k_idx) = key_idx_map.get(&f.key) {
+                        let k_key = &key_vocab_keys[k_idx];
+                        let bound_sent = bind(&key_sent_key, k_key);
+                        let binding = bind_role_lut(&bound_sent, i, &rope_lut);
+                        for dd in 0..d {
+                            mem.re[dd] += binding.re[dd];
+                            mem.im[dd] += binding.im[dd];
+                        }
+                        bank_count += 1;
+                    }
+                }
+            }
+            if bank_count > 0 {
+                let scale = 1.0 / (bank_count as f64).sqrt();
+                for dd in 0..d { mem.re[dd] *= scale; mem.im[dd] *= scale; }
+            }
+            mem
+        }).collect();
+        let key_memories: Vec<Vec<u8>> = key_memories_raw.iter()
+            .map(|m| super::turboquant::quantize_mse_4bit(m)).collect();
+
         Ok(HrrData {
             memories, seed, vocab_size: v, cached_sent_key, rope_lut, cleanup,
             vocab_words, vocab_idx, effective_d: d, num_banks, byte_size,
+            key_memories, key_cleanup, key_words: key_words_vec, key_idx: key_idx_map,
+            key_sent_key,
         })
     }
 
@@ -827,33 +1014,51 @@ impl Nugget {
         self.key_index.rebuild(&pairs);
     }
 
-    fn resolve_tag(&self, query: &str) -> Option<String> {
+    /// Resolve a query to a stored fact key. Returns (key, match_quality)
+    /// where match_quality ∈ [0, 1] indicates how well the query matched.
+    /// 1.0 = exact match, 0.99 = case-insensitive, <1.0 = fuzzy.
+    fn resolve_tag(&self, query: &str) -> Option<(String, f64)> {
         if self.tag_to_pos.is_empty() { return None; }
 
-        // 1. Fast path: inverted keyword index (O(1) exact, O(K) token overlap)
+        // 0. Exact match — O(1) HashMap lookup on original key
+        if self.tag_to_pos.contains_key(query) {
+            return Some((query.to_string(), 1.0));
+        }
+
+        // 0b. Case-insensitive exact match — O(N) but fast for small N
+        let lower_query = query.to_lowercase();
+        let lower_query = lower_query.trim();
+        for tag in self.tag_to_pos.keys() {
+            if tag.to_lowercase() == lower_query {
+                return Some((tag.clone(), 0.99));
+            }
+        }
+
+        // 1. Inverted keyword index (O(K) token overlap)
         let fact_keys: Vec<String> = self.facts.iter().map(|f| f.key.clone()).collect();
         if let Some(key) = self.key_index.resolve(query, &fact_keys) {
-            return Some(key);
+            // Verify the key actually exists in tag_to_pos (sanity check)
+            if self.tag_to_pos.contains_key(&key) {
+                // Compute match quality from sequence ratio
+                let qual = sequence_match_ratio(lower_query, &key.to_lowercase());
+                return Some((key, qual.max(0.5)));
+            }
         }
 
-        // 2. Fallback: fuzzy string matching (O(N) linear scan)
-        let text = query.to_lowercase();
-        let text = text.trim();
+        // 2. Fuzzy string matching — rank by overlap quality, not first-match
         let tags: Vec<&String> = self.tag_to_pos.keys().collect();
 
-        // Substring
-        for t in &tags {
-            let lower = t.to_lowercase();
-            if lower.contains(text) || text.contains(lower.as_str()) { return Some((*t).clone()); }
-        }
-        // Fuzzy
+        // Rank all candidates by sequence match ratio
         let mut best: Option<&String> = None;
         let mut best_score = 0.0;
         for t in &tags {
-            let s = sequence_match_ratio(text, &t.to_lowercase());
+            let s = sequence_match_ratio(lower_query, &t.to_lowercase());
             if s > best_score { best = Some(t); best_score = s; }
         }
-        if best_score >= self.fuzzy_threshold { best.map(|t| (*t).clone()) } else { None }
+        // Require high confidence: 0.80 minimum
+        if best_score >= 0.80 { return best.map(|t| ((*t).clone(), best_score)); }
+
+        None
     }
 
     /// Get related facts for a query via the link graph.

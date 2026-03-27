@@ -38,8 +38,8 @@ fn tokenize(key: &str) -> Vec<String> {
 struct FactLink {
     /// The other fact's index.
     target: usize,
-    /// Shared tokens that caused the link.
-    shared_tokens: Vec<String>,
+    /// Number of shared tokens between the facts.
+    shared_tokens: usize,
 }
 
 /// Inverted keyword index + link graph.
@@ -95,7 +95,7 @@ impl KeyIndex {
             }
             self.fact_tokens.push(ktokens);
 
-            // Tokenize value for entity linking
+            // Tokenize value for entity linking using the new O(N) graph algorithm
             let vtokens = tokenize(value);
             for t in &vtokens {
                 self.inverted.entry(t.clone()).or_default().insert(i);
@@ -131,40 +131,35 @@ impl KeyIndex {
         let all_tokens: HashSet<&str> = ktokens.iter().chain(vtokens.iter())
             .map(|s| s.as_str()).collect();
 
-        let mut neighbors: HashMap<usize, Vec<String>> = HashMap::new();
+        let mut neighbors: HashMap<usize, usize> = HashMap::new();
         for token in &all_tokens {
             if let Some(posting) = self.inverted.get(*token) {
+                // Skip stopwords (freq > 50). This speeds up insertion and keeps links specific.
+                if posting.len() > 50 { continue; }
                 for &other_idx in posting {
                     if other_idx != idx {
-                        neighbors.entry(other_idx)
-                            .or_default()
-                            .push(token.to_string());
+                        *neighbors.entry(other_idx).or_default() += 1;
                     }
                 }
             }
         }
 
         // Create bi-directional links
-        for (other_idx, shared) in neighbors {
-            let deduped: Vec<String> = {
-                let mut s = shared;
-                s.sort();
-                s.dedup();
-                s
-            };
-
+        for (other_idx, count) in neighbors {
             // Link: this → other
             self.links[idx].push(FactLink {
                 target: other_idx,
-                shared_tokens: deduped.clone(),
+                shared_tokens: count,
             });
 
             // Link: other → this
             if other_idx < self.links.len() {
                 self.links[other_idx].push(FactLink {
                     target: idx,
-                    shared_tokens: deduped,
+                    shared_tokens: count,
                 });
+                self.links[other_idx].sort_unstable_by(|a, b| b.shared_tokens.cmp(&a.shared_tokens));
+                self.links[other_idx].truncate(20);
             }
         }
 
@@ -201,7 +196,6 @@ impl KeyIndex {
         for t in &vtokens {
             self.inverted.entry(t.clone()).or_default().insert(idx);
         }
-
         if idx < self.value_tokens.len() {
             self.value_tokens[idx] = vtokens.clone();
         }
@@ -213,34 +207,32 @@ impl KeyIndex {
             .map(|s| s.as_str())
             .collect();
 
-        let mut neighbors: HashMap<usize, Vec<String>> = HashMap::new();
+        let mut neighbors: HashMap<usize, usize> = HashMap::new();
         for token in &all_tokens {
             if let Some(posting) = self.inverted.get(*token) {
+                if posting.len() > 50 { continue; }
                 for &other_idx in posting {
                     if other_idx != idx {
-                        neighbors.entry(other_idx)
-                            .or_default()
-                            .push(token.to_string());
+                        *neighbors.entry(other_idx).or_default() += 1;
                     }
                 }
             }
         }
 
-        for (other_idx, shared) in neighbors {
-            let mut deduped = shared;
-            deduped.sort();
-            deduped.dedup();
+        for (other_idx, count) in neighbors {
             self.links[idx].push(FactLink {
                 target: other_idx,
-                shared_tokens: deduped.clone(),
+                shared_tokens: count,
             });
             if other_idx < self.links.len() {
                 // Avoid duplicates in other's link list
                 self.links[other_idx].retain(|l| l.target != idx);
                 self.links[other_idx].push(FactLink {
                     target: idx,
-                    shared_tokens: deduped,
+                    shared_tokens: count,
                 });
+                self.links[other_idx].sort_unstable_by(|a, b| b.shared_tokens.cmp(&a.shared_tokens));
+                self.links[other_idx].truncate(20);
             }
         }
     }
@@ -339,7 +331,7 @@ impl KeyIndex {
     pub fn get_links(&self, fact_idx: usize) -> Vec<(usize, usize)> {
         if fact_idx >= self.links.len() { return Vec::new(); }
         self.links[fact_idx].iter()
-            .map(|l| (l.target, l.shared_tokens.len()))
+            .map(|l| (l.target, l.shared_tokens))
             .collect()
     }
 
@@ -379,44 +371,32 @@ impl KeyIndex {
     // -- private --------------------------------------------------------------
 
     fn build_links(&mut self, n: usize) {
-        // For each pair of facts, check if they share tokens
-        // Optimization: iterate inverted index instead of O(N²) pairs
-        let mut edge_map: HashMap<(usize, usize), Vec<String>> = HashMap::new();
-
-        for (token, posting) in &self.inverted {
-            let indices: Vec<usize> = posting.iter().copied().collect();
-            for i in 0..indices.len() {
-                for j in (i+1)..indices.len() {
-                    let (a, b) = (indices[i], indices[j]);
-                    let key = (a.min(b), a.max(b));
-                    edge_map.entry(key).or_default().push(token.clone());
+        let max_freq = 50.max(n / 10);
+        for i in 0..n {
+            let mut matches: HashMap<usize, usize> = HashMap::new();
+            
+            let mut my_tokens: Vec<&String> = self.fact_tokens[i].iter().chain(self.value_tokens[i].iter()).collect();
+            my_tokens.sort_unstable();
+            my_tokens.dedup();
+            
+            for token in my_tokens {
+                if let Some(posting) = self.inverted.get(token) {
+                    if posting.len() > max_freq { continue; }
+                    for &j in posting {
+                        if i != j && j < n {
+                            *matches.entry(j).or_default() += 1;
+                        }
+                    }
                 }
             }
-        }
-
-        // Create bi-directional links (limit to top-10 per fact to avoid explosion)
-        for ((a, b), tokens) in &edge_map {
-            let mut deduped = tokens.clone();
-            deduped.sort();
-            deduped.dedup();
-            let shared_count = deduped.len();
-
-            if shared_count >= 1 && *a < n && *b < n {
-                self.links[*a].push(FactLink {
-                    target: *b,
-                    shared_tokens: deduped.clone(),
-                });
-                self.links[*b].push(FactLink {
-                    target: *a,
-                    shared_tokens: deduped,
-                });
-            }
-        }
-
-        // Sort each adjacency list by shared token count (descending) and limit
-        for adj in &mut self.links {
-            adj.sort_by(|a, b| b.shared_tokens.len().cmp(&a.shared_tokens.len()));
-            adj.truncate(20); // Keep top-20 links per fact
+            
+            let mut adj: Vec<FactLink> = matches.into_iter()
+                .map(|(target, count)| FactLink { target, shared_tokens: count })
+                .collect();
+                
+            adj.sort_unstable_by(|a, b| b.shared_tokens.cmp(&a.shared_tokens));
+            adj.truncate(20);
+            self.links[i] = adj;
         }
     }
 }

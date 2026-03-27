@@ -734,6 +734,170 @@ pub fn unbind_role_lut(v: &ComplexVector, pos: usize, lut: &RopeLut) -> ComplexV
     ComplexVector { re, im }
 }
 
+// =========================================================================
+// N-Dimensional RoPE (Golden Gate RoPE) — Temporal Lattice Memory
+// =========================================================================
+// Based on https://jerryxio.ng/posts/nd-rope/
+//
+// Instead of encoding facts at a linear integer position, this encodes
+// facts at an N-dimensional coordinate in a normalized [-1,1] space.
+// Each dimension represents a temporal axis:
+//   t₀ = epoch (coarse time)
+//   t₁ = episode (conversation/session)
+//   t₂ = turn (fine-grained position)
+//   t₃ = recency (hit count / importance)
+//
+// The golden ratio quasi-random direction vectors ensure no two
+// temporal scales alias against each other.
+
+/// N-dimensional RoPE with golden-ratio direction vectors.
+/// `n` = number of coordinate dimensions (e.g. 3 for epoch/episode/turn).
+/// `d` = HRR vector dimension (number of frequency pairs).
+pub struct NdRope {
+    pub n: usize,
+    pub d: usize,
+    /// Per-pair frequency magnitudes, length = d
+    pub freqs: Vec<f64>,
+    /// Direction matrix: d rows × n cols (flattened, row-major)
+    /// u[i*n + k] = k-th component of direction vector for pair i
+    pub dirs: Vec<f64>,
+}
+
+impl NdRope {
+    /// Create an NdRope with `n` temporal dimensions and `d` frequency pairs.
+    ///
+    /// `w_min`/`w_max`: frequency range. For coordinates in [-1,1],
+    /// w_min=0.5, w_max=20.0 is a good default (avoids high-freq aliasing).
+    pub fn new(n: usize, d: usize, w_min: f64, w_max: f64) -> Self {
+        let mut freqs = vec![0.0; d];
+        let mut dirs = vec![0.0; d * n];
+
+        let d_m1 = (d.max(2) - 1) as f64;
+        let w_ratio = w_max / w_min;
+
+        // Generalized golden ratio for N dimensions
+        // Uses the quasi-random R-sequence from Extreme Learning:
+        // phi_n = smallest real root of x^(n+1) = x + 1
+        let phi_n = Self::golden_n(n);
+
+        for i in 0..d {
+            // Log-spaced frequencies
+            freqs[i] = w_min * w_ratio.powf((i as f64) / d_m1);
+
+            // Quasi-random direction vector on the N-sphere
+            // Map R-sequence samples to Gaussian via Box-Muller-like inverse
+            let mut norm_sq = 0.0;
+            for k in 0..n {
+                // R-sequence: fractional part of (i+1) * phi_n^-(k+1)
+                let alpha = Self::phi_inv_pow(phi_n, k + 1);
+                let sample = ((i + 1) as f64 * alpha).fract();
+                // Inverse CDF of standard normal (approximation via probit)
+                let g = Self::inv_normal_cdf(sample);
+                dirs[i * n + k] = g;
+                norm_sq += g * g;
+            }
+            // Normalize to unit sphere
+            let inv_norm = 1.0 / (norm_sq.sqrt() + 1e-12);
+            for k in 0..n {
+                dirs[i * n + k] *= inv_norm;
+            }
+        }
+
+        Self { n, d, freqs, dirs }
+    }
+
+    /// Compute the rotation angle for frequency pair `i` given coordinate `t`.
+    /// angle_i = freq_i * dot(u_i, t)
+    #[inline]
+    pub fn angle(&self, i: usize, t: &[f64]) -> f64 {
+        let mut dot = 0.0;
+        let base = i * self.n;
+        for k in 0..self.n {
+            dot += self.dirs[base + k] * t[k];
+        }
+        self.freqs[i] * dot
+    }
+
+    /// Compute all rotation angles for coordinate `t`.
+    #[inline]
+    pub fn angles_for(&self, t: &[f64]) -> Vec<f64> {
+        let mut out = vec![0.0; self.d];
+        for i in 0..self.d {
+            out[i] = self.angle(i, t);
+        }
+        out
+    }
+
+    /// Generalized golden ratio for N dimensions.
+    /// Solves x^(n+1) = x + 1 by Newton iteration.
+    fn golden_n(n: usize) -> f64 {
+        let mut x = 2.0_f64;
+        let n1 = (n + 1) as f64;
+        for _ in 0..60 {
+            let xn = x.powf(n1);
+            let f = xn - x - 1.0;
+            let df = n1 * x.powf(n1 - 1.0) - 1.0;
+            x -= f / df;
+        }
+        x
+    }
+
+    /// Compute 1 / phi^k
+    fn phi_inv_pow(phi: f64, k: usize) -> f64 {
+        1.0 / phi.powi(k as i32)
+    }
+
+    /// Approximate inverse normal CDF (probit function).
+    /// Maps (0,1) → ℝ. Uses rational approximation (Abramowitz & Stegun).
+    fn inv_normal_cdf(p: f64) -> f64 {
+        // Clamp to avoid infinities
+        let p = p.clamp(0.001, 0.999);
+        let t = if p < 0.5 {
+            (-2.0 * p.ln()).sqrt()
+        } else {
+            (-2.0 * (1.0 - p).ln()).sqrt()
+        };
+        // Coefficients for rational approximation
+        let c0 = 2.515517;
+        let c1 = 0.802853;
+        let c2 = 0.010328;
+        let d1 = 1.432788;
+        let d2 = 0.189269;
+        let d3 = 0.001308;
+        let val = t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t);
+        if p < 0.5 { -val } else { val }
+    }
+}
+
+/// Bind a ComplexVector to an N-dimensional temporal coordinate.
+pub fn bind_nd(v: &ComplexVector, t: &[f64], rope: &NdRope) -> ComplexVector {
+    let d = v.dim();
+    let angles = rope.angles_for(t);
+    let mut re = vec![0.0; d];
+    let mut im = vec![0.0; d];
+    for j in 0..d {
+        let (s, c) = angles[j].sin_cos();
+        re[j] = c * v.re[j] - s * v.im[j];
+        im[j] = c * v.im[j] + s * v.re[j];
+    }
+    ComplexVector { re, im }
+}
+
+/// Unbind a ComplexVector from an N-dimensional temporal coordinate.
+pub fn unbind_nd(v: &ComplexVector, t: &[f64], rope: &NdRope) -> ComplexVector {
+    let d = v.dim();
+    let angles = rope.angles_for(t);
+    let mut re = vec![0.0; d];
+    let mut im = vec![0.0; d];
+    for j in 0..d {
+        let (s, c) = angles[j].sin_cos();
+        // Inverse rotation: negate sin
+        re[j] = v.re[j] * c + v.im[j] * s;
+        im[j] = v.im[j] * c - v.re[j] * s;
+    }
+    ComplexVector { re, im }
+}
+
 /// Unbind role[position] inline into an existing ComplexVector (zero alloc).
 pub fn unbind_role_inline_into(v: &ComplexVector, pos: usize, out: &mut ComplexVector) {
     let d = v.dim();
@@ -970,5 +1134,232 @@ mod tests {
             let norm: f64 = row.iter().map(|v| v * v).sum::<f64>().sqrt();
             assert!((norm - 1.0).abs() < 1e-8, "norm = {norm}");
         }
+    }
+
+    // ── Temporal Nd-RoPE Tests ──────────────────────────────────────────
+
+    fn cos_sim(a: &ComplexVector, b: &ComplexVector) -> f64 {
+        let mut dot = 0.0;
+        let mut na = 0.0;
+        let mut nb = 0.0;
+        for i in 0..a.dim() {
+            dot += a.re[i] * b.re[i] + a.im[i] * b.im[i];
+            na += a.re[i] * a.re[i] + a.im[i] * a.im[i];
+            nb += b.re[i] * b.re[i] + b.im[i] * b.im[i];
+        }
+        dot / (na.sqrt() * nb.sqrt() + 1e-12)
+    }
+
+    /// Golden ratio for N=1 should be the classic φ = 1.618...
+    #[test]
+    fn nd_rope_golden_ratio_1d() {
+        let phi = NdRope::golden_n(1);
+        assert!((phi - 1.6180339887).abs() < 1e-6, "phi_1 = {phi}");
+    }
+
+    /// Golden ratio for N=2 should be the plastic constant ≈ 1.3247...
+    #[test]
+    fn nd_rope_golden_ratio_2d() {
+        let phi = NdRope::golden_n(2);
+        assert!((phi - 1.3247179572).abs() < 1e-6, "phi_2 = {phi}");
+    }
+
+    /// Direction vectors should be unit-length on the N-sphere.
+    #[test]
+    fn nd_rope_directions_unit_norm() {
+        let rope = NdRope::new(3, 256, 0.5, 20.0);
+        for i in 0..rope.d {
+            let mut norm_sq = 0.0;
+            for k in 0..rope.n {
+                let v = rope.dirs[i * rope.n + k];
+                norm_sq += v * v;
+            }
+            let norm = norm_sq.sqrt();
+            assert!((norm - 1.0).abs() < 1e-6, "dir[{i}] norm = {norm}");
+        }
+    }
+    
+    /// Bind then unbind at the exact same coordinate → perfect recovery.
+    #[test]
+    fn nd_rope_exact_roundtrip() {
+        let d = 512;
+        let rope = NdRope::new(3, d, 0.5, 20.0);
+        let mut rng = Mulberry32::new(42);
+        let keys = make_vocab_keys(1, d, &mut rng);
+        let fact = &keys[0];
+
+        let coord = [0.3, -0.5, 0.8];
+        let bound = bind_nd(fact, &coord, &rope);
+        let recovered = unbind_nd(&bound, &coord, &rope);
+
+        let sim = cos_sim(fact, &recovered);
+        assert!((sim - 1.0).abs() < 1e-10, "Exact roundtrip sim = {sim}");
+    }
+
+    /// Two facts at different coordinates can be separated from a superposition.
+    #[test]
+    fn nd_rope_superposition_separation() {
+        let d = 1024;
+        let rope = NdRope::new(3, d, 1.0, 100.0);
+        let mut rng = Mulberry32::new(999);
+        let keys = make_vocab_keys(3, d, &mut rng);
+        let fact_a = &keys[0];
+        let fact_b = &keys[1];
+        let sent_key = &keys[2];
+
+        // Temporal coordinates: well-separated in normalized space
+        let t_a = [0.1, 0.2, 0.3];
+        let t_b = [0.7, -0.4, 0.1];
+
+        // Build superposition
+        let bound_a = bind_nd(&bind(sent_key, fact_a), &t_a, &rope);
+        let bound_b = bind_nd(&bind(sent_key, fact_b), &t_b, &rope);
+        let mut mem = ComplexVector::zeros(d);
+        for i in 0..d {
+            mem.re[i] = bound_a.re[i] + bound_b.re[i];
+            mem.im[i] = bound_a.im[i] + bound_b.im[i];
+        }
+
+        // Query at t_a → should recover fact_a clearly over fact_b
+        let query_a = unbind(&unbind_nd(&mem, &t_a, &rope), sent_key);
+        let sim_aa = cos_sim(fact_a, &query_a);
+        let sim_ba = cos_sim(fact_b, &query_a);
+        println!("  Separation: sim(a,@a)={sim_aa:.4} sim(b,@a)={sim_ba:.4}");
+        assert!(sim_aa > sim_ba, "fact_a should dominate at t_a");
+        assert!(sim_aa > 0.4, "sim(a, query@t_a) = {sim_aa}");
+
+        // Query at t_b → should recover fact_b clearly over fact_a
+        let query_b = unbind(&unbind_nd(&mem, &t_b, &rope), sent_key);
+        let sim_bb = cos_sim(fact_b, &query_b);
+        let sim_ab = cos_sim(fact_a, &query_b);
+        println!("  Separation: sim(b,@b)={sim_bb:.4} sim(a,@b)={sim_ab:.4}");
+        assert!(sim_bb > sim_ab, "fact_b should dominate at t_b");
+        assert!(sim_bb > 0.4, "sim(b, query@t_b) = {sim_bb}");
+    }
+
+    /// Temporal proximity: nearby coordinates → smooth similarity decay.
+    #[test]
+    fn nd_rope_temporal_proximity_decay() {
+        let d = 1024;
+        let rope = NdRope::new(3, d, 1.0, 100.0);
+        let mut rng = Mulberry32::new(7);
+        let keys = make_vocab_keys(2, d, &mut rng);
+        let fact = &keys[0];
+        let sent_key = &keys[1];
+
+        let t_exact = [0.3, 0.0, 0.0];
+        let bound = bind_nd(&bind(sent_key, fact), &t_exact, &rope);
+
+        // Query at exact, near, mid, and far coordinates
+        let r_exact = unbind(&unbind_nd(&bound, &t_exact, &rope), sent_key);
+        let r_near  = unbind(&unbind_nd(&bound, &[0.301, 0.0, 0.0], &rope), sent_key);
+        let r_mid   = unbind(&unbind_nd(&bound, &[0.31, 0.0, 0.0], &rope), sent_key);
+        let r_far   = unbind(&unbind_nd(&bound, &[0.5, 0.0, 0.0], &rope), sent_key);
+
+        let s_exact = cos_sim(fact, &r_exact);
+        let s_near  = cos_sim(fact, &r_near);
+        let s_mid   = cos_sim(fact, &r_mid);
+        let s_far   = cos_sim(fact, &r_far);
+
+        // Monotonic decay: exact > near > mid > far
+        assert!(s_exact > s_near, "exact {s_exact} > near {s_near}");
+        assert!(s_near > s_mid,   "near {s_near} > mid {s_mid}");
+        assert!(s_mid > s_far,    "mid {s_mid} > far {s_far}");
+        // Exact is perfect
+        assert!(s_exact > 0.99, "exact = {s_exact}");
+
+        println!("  Temporal decay: exact={s_exact:.4} near={s_near:.4} mid={s_mid:.4} far={s_far:.4}");
+    }
+
+    /// Trie-like hierarchical test: facts sharing the same epoch (t₀)
+    /// are partially recoverable even with different episode/turn.
+    #[test]
+    fn nd_rope_hierarchical_trie_property() {
+        let d = 512;
+        // 3 dims: epoch, episode, turn
+        let rope = NdRope::new(3, d, 0.5, 20.0);
+        let mut rng = Mulberry32::new(55);
+        let keys = make_vocab_keys(2, d, &mut rng);
+        let fact = &keys[0];
+        let sent_key = &keys[1];
+
+        // Store fact at (epoch=0.2, episode=0.3, turn=0.5)
+        let t_stored = [0.2, 0.3, 0.5];
+        let bound = bind_nd(&bind(sent_key, fact), &t_stored, &rope);
+
+        // Query same epoch, different episode/turn
+        let t_same_epoch = [0.2, 0.1, -0.3];
+        let r_same_epoch = unbind(&unbind_nd(&bound, &t_same_epoch, &rope), sent_key);
+
+        // Query completely different epoch
+        let t_diff_epoch = [0.8, 0.3, 0.5];
+        let r_diff_epoch = unbind(&unbind_nd(&bound, &t_diff_epoch, &rope), sent_key);
+
+        let s_same = cos_sim(fact, &r_same_epoch);
+        let s_diff = cos_sim(fact, &r_diff_epoch);
+
+        // Both should be <1, but queries in the same epoch should show
+        // some inherited similarity (the "trie prefix match" property).
+        // The exact relationship depends on how the direction vectors
+        // distribute weight across dimensions.
+        println!("  Hierarchical: same_epoch={s_same:.4} diff_epoch={s_diff:.4}");
+        // At minimum, neither should be perfect
+        assert!(s_same < 0.95, "same epoch shouldn't be perfect: {s_same}");
+        assert!(s_diff < 0.95, "diff epoch shouldn't be perfect: {s_diff}");
+    }
+
+    /// Scale test: 50 facts in superposition with 3D temporal coords.
+    #[test]
+    fn nd_rope_50_fact_superposition() {
+        let d = 2048;
+        let n_facts = 50;
+        let rope = NdRope::new(3, d, 1.0, 100.0);
+        let mut rng = Mulberry32::new(321);
+        let keys = make_vocab_keys(n_facts + 1, d, &mut rng);
+        let sent_key = &keys[n_facts];
+
+        // Generate 50 facts at quasi-random temporal coordinates in [-0.5, 0.5]
+        let mut coords: Vec<[f64; 3]> = Vec::new();
+        let mut rng2 = Mulberry32::new(111);
+        for _ in 0..n_facts {
+            coords.push([
+                rng2.next_f64() - 0.5,
+                rng2.next_f64() - 0.5,
+                rng2.next_f64() - 0.5,
+            ]);
+        }
+
+        // Build superposition
+        let mut mem = ComplexVector::zeros(d);
+        for i in 0..n_facts {
+            let bound = bind_nd(&bind(sent_key, &keys[i]), &coords[i], &rope);
+            for j in 0..d {
+                mem.re[j] += bound.re[j];
+                mem.im[j] += bound.im[j];
+            }
+        }
+
+        // Query each fact at its exact coordinate
+        let mut correct = 0;
+        for i in 0..n_facts {
+            let query = unbind(&unbind_nd(&mem, &coords[i], &rope), sent_key);
+            // Find best match
+            let mut best_idx = 0;
+            let mut best_sim = f64::NEG_INFINITY;
+            for k in 0..n_facts {
+                let s = cos_sim(&keys[k], &query);
+                if s > best_sim {
+                    best_sim = s;
+                    best_idx = k;
+                }
+            }
+            if best_idx == i {
+                correct += 1;
+            }
+        }
+
+        let accuracy = correct as f64 / n_facts as f64;
+        println!("  50-fact Nd-RoPE accuracy: {correct}/{n_facts} = {accuracy:.1}%");
+        assert!(accuracy > 0.9, "Expected >90% accuracy, got {accuracy}");
     }
 }

@@ -40,6 +40,10 @@ mod bench_turboquant;
 mod stress_5k;
 #[cfg(test)]
 mod test_knowledge_graph;
+#[cfg(test)]
+mod test_temporal_lattice;
+#[cfg(test)]
+mod test_temporal_e2e;
 pub mod core;
 pub mod turboquant;
 pub mod keyindex;
