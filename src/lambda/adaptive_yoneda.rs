@@ -44,6 +44,7 @@ use crate::lambda::{
     lambda_rlm, LambdaConfig,
     yoneda::{YonedaContext, QueryMorphism},
     combinators,
+    rubric::{self, RubricBuffer, RubricItem},
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -459,6 +460,10 @@ pub struct AdaptiveYoneda {
     pub morphisms: Arc<std::sync::Mutex<MorphismPopulation>>,
     /// Current generation in the GEPA evolution.
     pub generation: usize,
+    /// Evolving rubric buffer — LLM-as-judge scoring criteria.
+    pub rubric_buffer: Option<RubricBuffer>,
+    /// How often to generate new adaptive rubrics (every N probes).
+    pub rubric_gen_interval: usize,
 }
 
 impl AdaptiveYoneda {
@@ -469,6 +474,40 @@ impl AdaptiveYoneda {
             trajectories: Arc::new(std::sync::Mutex::new(TrajectoryStore::new())),
             morphisms: Arc::new(std::sync::Mutex::new(MorphismPopulation::seed())),
             generation: 0,
+            rubric_buffer: None,
+            rubric_gen_interval: 5,
+        }
+    }
+
+    /// Create with the evolving rubric system enabled.
+    ///
+    /// Uses `RubricBuffer::for_document_qa()` as the default persistent rubric set,
+    /// then evolves adaptive rubrics via LLM-as-judge scoring.
+    pub fn with_rubrics(document: impl Into<String>, provider: Arc<LlmProvider>, config: LambdaConfig) -> Self {
+        Self {
+            yoneda: YonedaContext::lift(document, provider, config),
+            trajectories: Arc::new(std::sync::Mutex::new(TrajectoryStore::new())),
+            morphisms: Arc::new(std::sync::Mutex::new(MorphismPopulation::seed())),
+            generation: 0,
+            rubric_buffer: Some(RubricBuffer::for_document_qa()),
+            rubric_gen_interval: 5,
+        }
+    }
+
+    /// Create with a custom rubric buffer.
+    pub fn with_custom_rubrics(
+        document: impl Into<String>,
+        provider: Arc<LlmProvider>,
+        config: LambdaConfig,
+        rubric_buffer: RubricBuffer,
+    ) -> Self {
+        Self {
+            yoneda: YonedaContext::lift(document, provider, config),
+            trajectories: Arc::new(std::sync::Mutex::new(TrajectoryStore::new())),
+            morphisms: Arc::new(std::sync::Mutex::new(MorphismPopulation::seed())),
+            generation: 0,
+            rubric_buffer: Some(rubric_buffer),
+            rubric_gen_interval: 5,
         }
     }
 
@@ -545,6 +584,144 @@ impl AdaptiveYoneda {
         self.generation += 1;
 
         Ok((result, score))
+    }
+
+    /// Probe with **evolving rubric scoring** (DR-Tulu inspired).
+    ///
+    /// Instead of a user-provided scorer callback, this uses:
+    /// 1. LLM-as-Judge to score against all active rubrics
+    /// 2. Periodic adaptive rubric generation (every `rubric_gen_interval` probes)
+    /// 3. Automatic retirement of non-discriminative rubrics (std ≈ 0)
+    ///
+    /// Requires rubric_buffer to be initialized (use `with_rubrics()` constructor).
+    ///
+    /// Returns `(result_text, overall_score, per_rubric_scores)`.
+    pub async fn adaptive_probe_with_rubrics(
+        &mut self,
+        query: &str,
+    ) -> crate::monad::error::Result<(String, f64, HashMap<String, f64>)> {
+        let buffer = self.rubric_buffer.as_mut().ok_or_else(|| {
+            crate::monad::error::AgentError::Inference(
+                "RubricBuffer not initialized. Use AdaptiveYoneda::with_rubrics()".into()
+            )
+        })?;
+
+        // 1. Select morphism (epsilon-greedy)
+        let (morphism_name, morphism) = {
+            let pop = self.morphisms.lock().unwrap();
+            let selected = pop.select_epsilon_greedy(self.generation);
+            (selected.name.clone(), selected.to_query_morphism())
+        };
+
+        // 2. Apply morphism to query
+        let effective_query = morphism.apply(query);
+
+        eprintln!(
+            "🧬 [AdaptiveRubric] gen={} morphism={:?} rubrics={} query={:?}",
+            self.generation,
+            morphism_name,
+            buffer.all_active().len(),
+            &effective_query[..effective_query.len().min(60)]
+        );
+
+        // 3. Probe via Yoneda / λ-RLM
+        let timer = Instant::now();
+        let result = self.yoneda.probe(&effective_query).await?;
+        let latency = timer.elapsed().as_secs_f64();
+
+        // 4. Score with LLM judge against ALL active rubrics
+        let provider = self.yoneda.provider();
+        let (overall_score, per_rubric_scores) = rubric::score_all_rubrics(
+            &provider, query, &result, buffer,
+        ).await;
+
+        eprintln!(
+            "🧬 [AdaptiveRubric] score={:.3} latency={:.1}s rubric_scores={:?}",
+            overall_score, latency, per_rubric_scores
+        );
+
+        // 5. Record per-rubric scores for std tracking
+        buffer.record_scores(&per_rubric_scores);
+
+        // 6. Record trajectory
+        {
+            let mut store = self.trajectories.lock().unwrap();
+            store.record(Trajectory {
+                query: query.to_string(),
+                morphism_name: Some(morphism_name.clone()),
+                effective_query,
+                result: result.chars().take(500).collect(),
+                score: overall_score,
+                latency_secs: latency,
+                k_star: 0,
+                tau_star: 0,
+                depth: 0,
+                timestamp: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                generation: self.generation,
+            });
+        }
+
+        // 7. Update morphism scores
+        {
+            let mut pop = self.morphisms.lock().unwrap();
+            pop.record_score(&morphism_name, overall_score);
+        }
+
+        // 8. Periodically generate new adaptive rubrics
+        if self.generation > 0
+            && self.generation % self.rubric_gen_interval == 0
+        {
+            let recent_results: Vec<String> = {
+                let store = self.trajectories.lock().unwrap();
+                store.recent(self.rubric_gen_interval)
+                    .iter()
+                    .map(|t| t.result.clone())
+                    .collect()
+            };
+
+            if recent_results.len() >= 2 {
+                eprintln!(
+                    "🧬 [AdaptiveRubric] Generating new rubrics from {} recent responses...",
+                    recent_results.len()
+                );
+
+                // Collect existing rubrics for the generation call
+                let existing_refs: Vec<&RubricItem> = buffer.persistent.iter()
+                    .chain(buffer.active.iter())
+                    .collect();
+
+                let new_rubrics = rubric::generate_adaptive_rubrics(
+                    &provider, query, &recent_results, &existing_refs,
+                ).await;
+
+                if !new_rubrics.is_empty() {
+                    buffer.add_adaptive(new_rubrics);
+                }
+            }
+        }
+
+        // 9. Filter and retire non-discriminative rubrics
+        if self.generation > 0 && self.generation % 3 == 0 {
+            let report = buffer.filter_and_retire();
+            if report.retired_zero_std > 0 || report.retired_cap > 0 {
+                eprintln!("🧬 [AdaptiveRubric] {}", report);
+            }
+        }
+
+        self.generation += 1;
+
+        Ok((result, overall_score, per_rubric_scores))
+    }
+
+    /// Get the rubric buffer summary (for diagnostics).
+    pub fn rubric_summary(&self) -> String {
+        match &self.rubric_buffer {
+            Some(buf) => format!("📊 Rubric Buffer:\n{}", buf.summary()),
+            None => "📊 Rubric Buffer: not initialized".to_string(),
+        }
     }
 
     /// Run a full GEPA evolution loop over the document.

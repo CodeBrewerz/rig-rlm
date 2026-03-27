@@ -29,6 +29,7 @@ pub mod effects;
 pub mod gepa_rlm;
 pub mod profunctor;
 pub mod adaptive_yoneda;
+pub mod rubric;
 
 #[cfg(test)]
 
@@ -43,6 +44,7 @@ pub use planner::{CostParams, ExecutionPlan, TaskType};
 pub use yoneda::{YonedaContext, QueryMorphism, YonedaEquivalence, yoneda_equivalence, check_naturality};
 pub use profunctor::{TypedPipeline, AsyncProfunctor, Profunctor};
 pub use adaptive_yoneda::{AdaptiveYoneda, TrajectoryStore, MorphismPopulation, EvolutionResult};
+pub use rubric::{RubricItem, RubricType, RubricBuffer, RetirementReport};
 
 // ─── Configuration ──────────────────────────────────────────────────
 

@@ -94,6 +94,7 @@ cargo test --lib lambda::planner           # Analytical k*, accuracy loop
 cargo test --lib lambda::profunctor        # Profunctor dimap
 cargo test --lib lambda::yoneda            # QueryMorphism category laws
 cargo test --lib lambda::adaptive_yoneda   # Trajectory store, morphism population
+cargo test --lib lambda::rubric            # Rubric buffer lifecycle, LLM judge parsing
 cargo test --lib lambda::executor          # Relevance checker
 ```
 
@@ -131,6 +132,9 @@ cargo test live_open_coding_with_hitl_iteration -- --ignored --nocapture
 
 # 8. Full loop — read → analyze → code → "make it dynamic" → iterate
 cargo test live_read_analyze_code_then_iterate -- --ignored --nocapture
+
+# 9. Evolving rubric reward — LLM-as-judge scoring with adaptive criteria
+cargo test live_evolving_rubric_reward -- --ignored --nocapture
 ```
 
 ### GEPA Optimization Daemon
@@ -154,6 +158,7 @@ cargo run --bin optimize_rlm
 | `yoneda.rs` | Yoneda Lemma: `YonedaContext`, `QueryMorphism`, `yoneda_equivalence()`, `check_naturality()` |
 | `profunctor.rs` | Profunctor optics: `TypedPipeline<C, D>`, `AsyncProfunctor`, `dimap_async` |
 | `adaptive_yoneda.rs` | Self-learning loop: `AdaptiveYoneda`, `TrajectoryStore`, `MorphismPopulation`, GEPA co-evolution |
+| `rubric.rs` | Evolving rubric reward: `RubricItem`, `RubricBuffer`, LLM-as-judge scoring, adaptive rubric generation (DR-Tulu inspired) |
 | `gepa_rlm.rs` | GEPA evaluator: `LambdaExecutorEvaluator` — uses `planner::plan()` for dynamic depth |
 | `effects.rs` | Algebraic effects prototype for LLM interaction |
 | `live_tests.rs` | All integration tests (pure + live LLM) |
@@ -179,6 +184,11 @@ let report: Report = pipeline.execute(&request).await?;
 // Self-learning adaptive probe
 let mut adaptive = AdaptiveYoneda::new(document, provider, config);
 let (result, score) = adaptive.adaptive_probe("query", scorer).await?;
+
+// Self-learning with evolving rubric scoring (DR-Tulu style)
+let mut adaptive = AdaptiveYoneda::with_rubrics(document, provider, config);
+let (result, score, per_rubric) = adaptive.adaptive_probe_with_rubrics("query").await?;
+// per_rubric: {"Factual Recall" => 0.85, "Answer Relevance" => 0.90, ...}
 ```
 
 ## Category Theory Guide
@@ -243,6 +253,74 @@ The `AdaptiveYoneda` implements a Left Kan Extension:
 
 Where `F(q) = best_trajectory_result(q)` on observed queries, and
 `Lan_J F(q') ≈ F(nearest(q'))` for unseen queries.
+
+### Evolving Rubric Reward — LLM-as-Judge (DR-Tulu)
+
+Inspired by DR-Tulu (arXiv:2511.19399), the rubric system replaces hardcoded
+scoring with an **evolving, LLM-judged evaluation** that discovers task-specific
+quality dimensions automatically.
+
+```
+┌──────────────────── Rubric Buffer ────────────────────┐
+│                                                        │
+│  Persistent Rubrics ─── always scored ──→  Weighted    │
+│  (Factual Recall,                          Reward      │
+│   Answer Relevance,                           │        │
+│   Completeness)                               │        │
+│                                               │        │
+│  Active Adaptive  ──── scored + filtered ──→  ↑        │
+│  (LLM-generated)                                       │
+│                     filter_and_retire()                 │
+│  Inactive Adaptive ── zero-std retired ──→  ∅          │
+│                                                        │
+└────────────────────────────────────────────────────────┘
+         │                              │
+         ▼                              ▼
+   LLM-as-Judge                  Rubric Generator
+   score 0–2 per criterion       compare N responses
+   → normalize to [0,1]          → find discriminative criteria
+```
+
+**3-layer lifecycle** (mirrors DR-Tulu's `rubric_buffer`):
+
+| Layer | Description | Action |
+|-------|-------------|--------|
+| **Persistent** | Ground truth (always scored) | Never retired |
+| **Active** | LLM-discovered criteria | Scored, tracked for std |
+| **Inactive** | Non-discriminative (std ≈ 0) | Retired, no longer scored |
+
+**Usage:**
+
+```rust
+// Create with evolving rubrics (3 default persistent rubrics)
+let mut adaptive = AdaptiveYoneda::with_rubrics(document, provider, config);
+adaptive.rubric_gen_interval = 3;  // generate new rubrics every 3 probes
+
+// Probe — scores via LLM judge, returns per-rubric breakdown
+let (result, score, per_rubric) = adaptive.adaptive_probe_with_rubrics("query").await?;
+// per_rubric: {"Factual Recall" => 0.5, "Answer Relevance" => 0.75, ...}
+
+// Custom rubric buffer
+let mut buf = RubricBuffer::default();
+buf.persistent.push(RubricItem::persistent("Code Quality", "Output compiles and follows idioms"));
+buf.persistent.push(RubricItem::persistent("Correctness", "Logic is sound and handles edge cases"));
+let mut adaptive = AdaptiveYoneda::with_custom_rubrics(doc, provider, config, buf);
+```
+
+**Automatic evolution loop** (runs inside `adaptive_probe_with_rubrics`):
+
+1. **Score**: LLM judge evaluates response against ALL active rubrics → `{"score": 0-2}` per criterion
+2. **Record**: Per-rubric scores tracked for std computation
+3. **Generate** (every `rubric_gen_interval` probes): LLM compares recent responses → generates positive/negative adaptive rubrics
+4. **Retire** (every 3 probes): Zero-std rubrics → inactive (non-discriminative = useless)
+5. **Cap**: Active adaptive rubrics capped at `max_active` (default 5)
+
+**Category theory framing:**
+
+- **Criterion Category** `Crit` — objects are rubric items
+- **Judge Functor** `J: Crit → [0,1]` — LLM scores each criterion
+- **Natural Transformation** `η_t → η_{t+1}` — each generation refines scoring criteria
+- **Quotient** `r₁ ~ r₂ iff std(J(r)) = 0` — non-discriminative rubrics identified to zero object
 
 ## Execution Parameters
 

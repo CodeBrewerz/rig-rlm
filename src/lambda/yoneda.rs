@@ -269,6 +269,11 @@ impl YonedaContext {
     pub fn document(&self) -> &str {
         &self.document
     }
+
+    /// Get a clone of the LLM provider (for rubric scoring, etc.)
+    pub fn provider(&self) -> Arc<LlmProvider> {
+        Arc::clone(&self.provider)
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

@@ -414,6 +414,7 @@ mcp_authentication:
 | **Yoneda context** | `lambda/yoneda.rs` | Lazy representable functor for massive documents |
 | **Profunctor optics** | `lambda/profunctor.rs` | Type-safe `C → D` pipeline via `dimap` |
 | **Adaptive GEPA** | `lambda/adaptive_yoneda.rs` | Self-learning morphism evolution from trajectories |
+| **Evolving rubrics** | `lambda/rubric.rs` | DR-Tulu-style LLM-as-judge with adaptive criteria discovery |
 
 ### λ-RLM Engine — Recursive Long-Context Processing
 
@@ -424,6 +425,7 @@ The `lambda/` module implements the λ-RLM framework from [arXiv:2603.20105](htt
 - **Parallel execution** — `MAP` branches run concurrently via `join_all`
 - **Category theory** — Yoneda representable functors, Profunctor optics, query morphisms with verified laws
 - **Self-learning** — GEPA co-evolves execution parameters + query morphisms from past trajectories
+- **Evolving rubrics** — DR-Tulu-inspired LLM-as-judge scoring with adaptive rubric generation and zero-std retirement
 
 ```bash
 # Quick test (no LLM required)
@@ -431,6 +433,9 @@ cargo test --lib lambda:: -- --nocapture
 
 # Live test with Trinity model (requires OPENAI_API_KEY)
 cargo test live_yoneda_representable_functor -- --ignored --nocapture
+
+# Full DR-Tulu evolving rubric lifecycle test
+cargo test live_evolving_rubric_reward -- --ignored --nocapture
 ```
 
 **Full developer guide**: [`LAMBDA_RLM.md`](LAMBDA_RLM.md)

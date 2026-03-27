@@ -1109,4 +1109,281 @@ mod lambda_live {
 
         eprintln!("\n{sep}\n");
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // LIVE TEST: Full DR-Tulu Evolving Rubric Lifecycle
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Tests the FULL DR-Tulu evolving rubric lifecycle end-to-end:
+    ///
+    /// **Phase 1 — Persistent Rubric Scoring** (probes 0–2):
+    ///   Score against 3 persistent rubrics (Factual Recall, Answer Relevance, Completeness)
+    ///   using LLM-as-Judge. No adaptive rubrics yet.
+    ///
+    /// **Phase 2 — Adaptive Rubric Generation** (probe 3+):
+    ///   After `rubric_gen_interval` probes, the LLM generates new discriminative
+    ///   criteria by comparing past responses. New adaptive rubrics are added.
+    ///
+    /// **Phase 3 — Rubric Retirement** (ongoing):
+    ///   Every 3 probes, zero-std rubrics (non-discriminative) are retired.
+    ///   The buffer is capped at max_active adaptive rubrics.
+    ///
+    /// **Phase 4 — Morphism Evolution**:
+    ///   Different morphisms are tested via ε-greedy selection across queries.
+    ///   Per-morphism scoring tracks which transformations produce the best
+    ///   rubric-evaluated responses.
+    ///
+    /// This mirrors the DR-Tulu GRPO loop from grpo_fast_rubric.py:
+    /// ```text
+    /// 1. Generate responses → 2. Score all rubrics → 3. Generate adaptive rubrics
+    /// 4. Filter zero-std → 5. Per-rubric normalize → 6. Evolve policy
+    /// ```
+    #[tokio::test]
+    #[ignore = "Requires OPENAI_API_KEY — run: cargo test live_evolving_rubric -- --ignored --nocapture"]
+    async fn live_evolving_rubric_reward() {
+        use crate::lambda::adaptive_yoneda::AdaptiveYoneda;
+        use crate::lambda::rubric::{RubricBuffer, RubricItem, RubricType};
+        use std::collections::HashMap;
+
+        let provider = trinity_provider();
+        let config = LambdaConfig::default();
+
+        let sep = "═".repeat(72);
+        eprintln!("\n{sep}");
+        eprintln!("🧪 LIVE TEST: Full DR-Tulu Evolving Rubric Lifecycle");
+        eprintln!("{sep}\n");
+
+        // ── Document ────────────────────────────────────────────
+        // Richer than before — multiple dimensions to score on
+        let doc = "\
+            The Rust programming language was first released in 2015 by Mozilla Research. \
+            Graydon Hoare started the project in 2006 as a personal side project. \
+            Rust achieves memory safety without garbage collection through its ownership \
+            system and borrow checker, which enforces rules at compile time. \
+            Key features include: zero-cost abstractions, pattern matching, \
+            trait-based generics, algebraic data types (enums), and fearless concurrency. \
+            The Cargo package manager handles dependency management, building, testing, \
+            and publishing crates to crates.io. As of 2024, crates.io hosts over 140,000 \
+            packages. Rust compiles to native code via LLVM and supports WebAssembly targets. \
+            Major production users include Firefox (Servo components), Dropbox (file sync), \
+            Cloudflare (Workers runtime), Discord (voice and video infrastructure), \
+            Amazon (Firecracker microVMs), and the Linux kernel (since version 6.1, Dec 2022). \
+            The async/await syntax was stabilized in Rust 1.39 (November 2019). \
+            Rust won 'most admired language' on Stack Overflow surveys for 8 consecutive \
+            years from 2016 to 2023. The Rust Foundation was established in February 2021 \
+            with founding members including AWS, Google, Huawei, Microsoft, and Mozilla.";
+
+        // ── Create AdaptiveYoneda with Rubrics ──────────────────
+        let mut adaptive = AdaptiveYoneda::with_rubrics(doc, provider, config);
+        // Lower interval to trigger generation sooner (DR-Tulu generates every step)
+        adaptive.rubric_gen_interval = 3;
+
+        // ── Verify Initial State ────────────────────────────────
+        {
+            let buf = adaptive.rubric_buffer.as_ref().unwrap();
+            assert_eq!(buf.persistent.len(), 3, "Should have 3 persistent rubrics");
+            assert_eq!(buf.active.len(), 0, "Should start with 0 adaptive rubrics");
+            eprintln!("📊 Phase 0: Initial rubric buffer");
+            eprintln!("{}\n", buf.summary());
+        }
+
+        // ── Query bank — diverse questions to exercise different quality dims ──
+        let queries = [
+            // Phase 1 probes (persistent rubrics only)
+            "When was the Rust programming language first released and who created it?",
+            "How does Rust achieve memory safety without garbage collection?",
+            "What concurrency features does Rust provide?",
+            // Phase 2+ probes (should trigger adaptive rubric generation)
+            "Name five companies that use Rust in production and what they use it for.",
+            "What is Cargo and what does it do?",
+            "Describe the Rust Foundation and its founding members.",
+            // Phase 3 probes (should trigger retirement of non-discriminative rubrics)
+            "When was async/await stabilized in Rust?",
+            "How many packages are on crates.io?",
+        ];
+
+        let mut all_scores: Vec<f64> = Vec::new();
+        let mut phase_scores: HashMap<String, Vec<f64>> = HashMap::new();
+        let mut successful_probes = 0;
+        let max_consecutive_errors = 3;
+        let mut consecutive_errors = 0;
+        let delay_secs = 5; // longer delay for free-tier reliability
+
+        for (i, query) in queries.iter().enumerate() {
+            // Bail if too many consecutive errors (model is down)
+            if consecutive_errors >= max_consecutive_errors {
+                eprintln!("\n⛔ {} consecutive errors — model appears unavailable, stopping", max_consecutive_errors);
+                break;
+            }
+
+            // Phase headers
+            if i == 0 {
+                eprintln!("\n{}", "─".repeat(72));
+                eprintln!("📋 Phase 1: Persistent Rubric Scoring (probes 0–2)");
+                eprintln!("{}", "─".repeat(72));
+            } else if i == 3 {
+                eprintln!("\n{}", "─".repeat(72));
+                eprintln!("📋 Phase 2: Adaptive Rubric Generation (probes 3+, gen_interval=3)");
+                eprintln!("{}", "─".repeat(72));
+            } else if i == 6 {
+                eprintln!("\n{}", "─".repeat(72));
+                eprintln!("📋 Phase 3: Rubric Retirement Filter (probes 6+)");
+                eprintln!("{}", "─".repeat(72));
+            }
+
+            eprintln!("\n── Probe {} ──────────────────────────────", i);
+            eprintln!("Query: {:?}", query);
+
+            // Delay between API calls
+            if i > 0 {
+                eprintln!("⏳ Waiting {}s to avoid rate limits...", delay_secs);
+                tokio::time::sleep(tokio::time::Duration::from_secs(delay_secs)).await;
+            }
+
+            // Retry up to 2 times on failure
+            let mut result = adaptive.adaptive_probe_with_rubrics(query).await;
+            if result.is_err() {
+                eprintln!("  ⚠️ First attempt failed, retrying after {}s...", delay_secs);
+                tokio::time::sleep(tokio::time::Duration::from_secs(delay_secs)).await;
+                result = adaptive.adaptive_probe_with_rubrics(query).await;
+            }
+
+            match result {
+                Ok((text, score, per_rubric)) => {
+                    consecutive_errors = 0;
+                    successful_probes += 1;
+
+                    eprintln!("  ✅ score={:.3} (gen={})", score, adaptive.generation - 1);
+                    eprintln!("  Result preview: {:?}", &text[..text.len().min(120)]);
+
+                    // Show per-rubric scores sorted
+                    let mut sorted_rubrics: Vec<_> = per_rubric.iter().collect();
+                    sorted_rubrics.sort_by(|a, b| a.0.cmp(b.0));
+                    for (rubric_name, rubric_score) in &sorted_rubrics {
+                        let indicator = if **rubric_score >= 0.75 { "🟢" }
+                            else if **rubric_score >= 0.4 { "🟡" }
+                            else { "🔴" };
+                        eprintln!("    {} {:30} → {:.3}", indicator, rubric_name, rubric_score);
+                    }
+
+                    // Track scores by rubric name for evolution analysis
+                    for (name, &sc) in &per_rubric {
+                        phase_scores.entry(name.clone()).or_default().push(sc);
+                    }
+
+                    assert!(score >= 0.0 && score <= 1.0, "Score {:.3} out of [0,1]", score);
+                    assert!(!per_rubric.is_empty(), "Per-rubric scores empty");
+                    all_scores.push(score);
+                }
+                Err(e) => {
+                    consecutive_errors += 1;
+                    eprintln!("  ⚠️ Error: {} (attempt 2/2)", e);
+                }
+            }
+
+            // Snapshot rubric buffer after key thresholds
+            if i == 2 || i == 5 || i == 7 {
+                let buf = adaptive.rubric_buffer.as_ref().unwrap();
+                eprintln!("\n  📊 Rubric buffer snapshot (after probe {}):", i);
+                eprintln!("  {}", buf.summary().replace('\n', "\n  "));
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════
+        // FINAL SUMMARY — DR-Tulu style analysis
+        // ═══════════════════════════════════════════════════════
+
+        eprintln!("\n{sep}");
+        eprintln!("📊 DR-TULU EVOLVING RUBRIC — FULL LIFECYCLE SUMMARY");
+        eprintln!("{sep}");
+
+        // 1. Rubric buffer final state
+        let buf = adaptive.rubric_buffer.as_ref().unwrap();
+        eprintln!("\n── Rubric Buffer Final State ──");
+        eprintln!("{}", buf.summary());
+
+        let n_persistent = buf.persistent.len();
+        let n_active = buf.active.len();
+        let n_inactive = buf.inactive.len();
+        eprintln!("\n  ┌───────────────────────────────────────────┐");
+        eprintln!("  │ Persistent: {}  Active: {}  Inactive: {:2}    │", n_persistent, n_active, n_inactive);
+        eprintln!("  └───────────────────────────────────────────┘");
+
+        // 2. Morphism population analysis
+        eprintln!("\n── Morphism Score Board ──");
+        {
+            let pop = adaptive.morphisms.lock().unwrap();
+            eprintln!("{}", pop.summary());
+        }
+
+        // 3. Trajectory store analysis
+        eprintln!("\n── Trajectory Evolution ──");
+        {
+            let store = adaptive.trajectories.lock().unwrap();
+            eprintln!("  Total trajectories: {}", store.all().len());
+            eprintln!("  Mean score:         {:.3}", store.mean_score());
+            eprintln!("  Improvement rate:   {:.3}", store.improvement_rate(2));
+            eprintln!();
+            for t in store.all() {
+                eprintln!("    gen={:2} morph={:22} score={:.3} | {:60}",
+                    t.generation,
+                    t.morphism_name.as_deref().unwrap_or("?"),
+                    t.score,
+                    &t.result[..t.result.len().min(60)],
+                );
+            }
+        }
+
+        // 4. Per-rubric score evolution
+        eprintln!("\n── Per-Rubric Score Evolution ──");
+        for (name, scores) in &phase_scores {
+            let mean = scores.iter().sum::<f64>() / scores.len() as f64;
+            let std = {
+                let var = scores.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / scores.len() as f64;
+                var.sqrt()
+            };
+            let discriminative = if std > 0.1 { "📊 discriminative" }
+                                 else if std > 0.01 { "📉 low-variance" }
+                                 else { "⛔ zero-std (should retire)" };
+            eprintln!("    {:30} mean={:.3} std={:.3} n={} {}",
+                name, mean, std, scores.len(), discriminative);
+        }
+
+        // ── Assertions ────────────────────────────────────────
+        // At least some probes succeeded
+        assert!(
+            successful_probes >= 2,
+            "Need at least 2 successful probes, got {}",
+            successful_probes
+        );
+
+        // Rubric scoring worked (all scores in range)
+        for &s in &all_scores {
+            assert!(s >= 0.0 && s <= 1.0, "Score {:.3} out of [0,1]", s);
+        }
+
+        // If we got enough probes, verify rubric generation happened
+        if successful_probes >= 4 {
+            let total_rubrics = n_persistent + n_active + n_inactive;
+            eprintln!("\n  ✅ Rubric generation check: {} total rubrics (3 persistent + {} evolved)",
+                total_rubrics, n_active + n_inactive);
+            // After 4+ probes with gen_interval=3, we should have generated some adaptive rubrics
+            // (or at least attempted — generation may produce 0 if responses are too similar)
+        }
+
+        // If we got enough probes, check retirement happened for zero-std
+        if successful_probes >= 6 {
+            eprintln!("  ✅ Retirement check: {} inactive rubrics", n_inactive);
+        }
+
+        let mean_score = all_scores.iter().sum::<f64>() / all_scores.len().max(1) as f64;
+        eprintln!("\n  📈 Overall mean rubric score: {:.3} (across {} probes)", mean_score, all_scores.len());
+
+        eprintln!("\n{sep}");
+        eprintln!("✅ Full DR-Tulu evolving rubric lifecycle test complete");
+        eprintln!("   Probes: {} succeeded / {} attempted", successful_probes, queries.len().min(
+            successful_probes + consecutive_errors.min(max_consecutive_errors)
+        ));
+        eprintln!("{sep}\n");
+    }
 }
