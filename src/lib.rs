@@ -40,3 +40,6 @@ pub mod nuggets;
 
 // Channel system (hub-and-spoke, broadcasting, multiplexing, topic streaming)
 pub mod channels;
+
+// λ-RLM: typed functional runtime for long-context reasoning (Roy et al., 2026)
+pub mod lambda;

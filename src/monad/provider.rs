@@ -26,6 +26,8 @@ pub struct ProviderConfig {
     pub fallback_model: Option<String>,
     /// Max retry attempts for transient errors (429, 500, 502, 503). Default: 3.
     pub max_retries: usize,
+    /// Max tokens to generate in a single completion. Default: 4096.
+    pub max_tokens: usize,
 }
 
 impl ProviderConfig {
@@ -39,6 +41,7 @@ impl ProviderConfig {
             preamble: None,
             fallback_model: None,
             max_retries: 3,
+            max_tokens: 4096,
         }
     }
 
@@ -52,6 +55,7 @@ impl ProviderConfig {
             preamble: None,
             fallback_model: None,
             max_retries: 3,
+            max_tokens: 4096,
         }
     }
 
@@ -70,6 +74,7 @@ impl ProviderConfig {
             preamble: None,
             fallback_model: None,
             max_retries: 3,
+            max_tokens: 4096,
         }
     }
 
@@ -104,10 +109,12 @@ pub struct LlmProvider {
 
 impl LlmProvider {
     pub fn new(config: ProviderConfig) -> Self {
-        Self {
-            config,
-            http: reqwest::Client::new(),
-        }
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        Self { config, http }
     }
 
     /// Send a chat completion request.
@@ -159,11 +166,22 @@ impl LlmProvider {
                 // Build request fresh each attempt
                 let mut req_builder = model
                     .completion_request(prompt.clone())
-                    .messages(chat_history.clone());
+                    .messages(chat_history.clone())
+                    .additional_params(serde_json::json!({
+                        "max_tokens": self.config.max_tokens as u64,
+                        "include_reasoning": true
+                    }));
                 if let Some(ref preamble) = self.config.preamble {
                     req_builder = req_builder.preamble(preamble.clone());
                 }
                 let request = req_builder.build();
+
+                eprintln!(
+                    "🔗 [provider] chat() ⏳ attempt {}/{max_attempts}, model={model_id}, max_tokens={}, elapsed={:.1}s",
+                    attempt + 1,
+                    self.config.max_tokens,
+                    start.elapsed().as_secs_f64(),
+                );
 
                 match model.completion(request).await {
                     Ok(resp) => {
@@ -206,6 +224,17 @@ impl LlmProvider {
                     }
                     Err(e) => {
                         let err_str = e.to_string();
+
+                        // Workaround for models (like Gemini 3.1) that return ONLY reasoning
+                        // and no text content. rig-core returns an empty message error.
+                        if err_str.contains("empty") && err_str.contains("no message") {
+                            let duration = start.elapsed();
+                            eprintln!("🔗 [provider] chat() ← {:.1}s, success=true, empty response (likely reasoning only)", duration.as_secs_f64());
+                            // We don't have usage stats because rig-core threw an error
+                            let usage = super::otel::TokenUsage { input_tokens: None, output_tokens: None };
+                            return Ok((String::new(), usage));
+                        }
+
                         let is_retryable = err_str.contains("429")
                             || err_str.contains("500")
                             || err_str.contains("502")

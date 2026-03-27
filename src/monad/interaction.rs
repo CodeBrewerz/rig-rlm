@@ -156,24 +156,38 @@ fn interaction_loop() -> AgentMonad {
         let generation = Generation::parse(&response);
 
         // ── Thinking trace: emit the LLM's reasoning text ──
-        // This is the Codex-style "• I've dispatched two independent audits..."
-        // pattern. The LLM's text outside code blocks is its thinking trace.
         emit_thinking_trace(&generation);
+
+        // ── Verbose turn logging ──
+        eprintln!("🔄 [loop] Parsed response — code={} final={} shell={} patch={} orch={}",
+            generation.code.is_some(),
+            generation.final_answer.is_some(),
+            generation.shell_command.is_some(),
+            generation.patch.is_some(),
+            generation.orchestrate.is_some(),
+        );
 
         // Case 1: Final answer — we're done
         if let Some(answer) = generation.final_answer {
+            eprintln!("✅ [loop] FINAL ANSWER ({} chars): {}",
+                answer.len(), &answer[..answer.len().min(120)]);
             return AgentMonad::pure(answer);
         }
 
         // Case 2: Code to execute
-        if let Some(code) = generation.code {
-            return AgentMonad::execute_code(code).bind(|output| {
+        if let Some(ref code) = generation.code {
+            eprintln!("🐍 [loop] EXECUTING CODE ({} chars): {}",
+                code.len(), code.lines().next().unwrap_or(""));
+            return AgentMonad::execute_code(code.clone()).bind(|output| {
+                eprintln!("📤 [loop] EXEC OUTPUT ({} chars): {}",
+                    output.len(), &output[..output.len().min(200)]);
                 // Case 2a: ELICIT() was called — pause for user input (HITL)
                 // Check ELICIT *before* SUBMIT: if the code called ELICIT(),
                 // it means the agent needs user input. Any SUBMIT in the same
                 // block was premature (agent used ELICIT's return value as data
                 // instead of actually pausing).
                 if output.contains("[elicit]") || output.contains("__ELICIT__") {
+                    eprintln!("❓ [loop] ELICIT detected in exec output");
                     let question = if output.contains("[elicit] ") {
                         output
                             .lines()
@@ -209,6 +223,7 @@ fn interaction_loop() -> AgentMonad {
                         .strip_prefix("[submitted] ")
                         .unwrap_or(&output)
                         .to_string();
+                    eprintln!("🏁 [loop] SUBMIT detected ({} chars)", result.len());
                     return AgentMonad::pure(result);
                 }
 
@@ -224,6 +239,7 @@ fn interaction_loop() -> AgentMonad {
                 }
 
                 // Case 2c: Continue the loop — feed output back
+                eprintln!("🔁 [loop] No ELICIT/SUBMIT — continuing loop");
                 AgentMonad::insert(
                     Role::Execution,
                     format!("Execution result:\n{output}"),
@@ -235,6 +251,7 @@ fn interaction_loop() -> AgentMonad {
 
         // Case 3: Shell command
         if let Some(cmd) = generation.shell_command {
+            eprintln!("🐚 [loop] SHELL CMD: {}", &cmd[..cmd.len().min(100)]);
             return AgentMonad::execute_code(format!(
                 "import subprocess; result = subprocess.run({cmd:?}, shell=True, capture_output=True, text=True); print(result.stdout); print(result.stderr)"
             ))
@@ -250,6 +267,7 @@ fn interaction_loop() -> AgentMonad {
 
         // Case 3b: Orchestrate — spawn parallel sub-agents
         if let Some(agents) = generation.orchestrate {
+            eprintln!("🎭 [loop] ORCHESTRATE: {} agents", agents.len());
             return AgentMonad::orchestrate_agents(agents).bind(|output| {
                 AgentMonad::insert(
                     Role::Execution,
@@ -262,6 +280,7 @@ fn interaction_loop() -> AgentMonad {
 
         // Case 4: Unified diff patch — apply to files
         if let Some(patch) = generation.patch {
+            eprintln!("🩹 [loop] PATCH ({} chars)", patch.len());
             return AgentMonad::apply_patch(patch).bind(|output| {
                 AgentMonad::insert(
                     Role::Execution,
@@ -273,6 +292,7 @@ fn interaction_loop() -> AgentMonad {
         }
 
         // Case 5: No code, no final — prompt the LLM to provide code
+        eprintln!("⚠️  [loop] No code/final/shell/patch/orch — nudging LLM");
         if response.trim().is_empty() {
             AgentMonad::insert(Role::Execution, ErrorGuidance::EMPTY_RESPONSE.to_string())
                 .then(AgentMonad::compact_context())

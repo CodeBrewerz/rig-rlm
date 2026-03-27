@@ -12,6 +12,8 @@ use pyo3::{
 };
 
 use crate::llm::RigRlm;
+use crate::lambda;
+use tokio::sync::oneshot;
 
 pub trait ExecutionEnvironment {
     type Error: std::error::Error + Send + Sync + 'static;
@@ -33,6 +35,9 @@ impl ExecutionEnvironment for Pyo3Executor {
             let globals = py.import("__main__")?.dict();
             let func = wrap_pyfunction!(query_llm, py)?;
             globals.set_item("query_llm", func)?;
+
+            let lambda_func = wrap_pyfunction!(lambda_rlm_analyze, py)?;
+            globals.set_item("lambda_rlm_analyze", lambda_func)?;
 
             let string_io = io.call_method0("StringIO")?;
             sys.setattr("stdout", &string_io)?;
@@ -69,11 +74,40 @@ impl ExecutionEnvironment for Pyo3Executor {
 fn query_llm(prompt: String) -> String {
     // SAFETY: This is a prototype, we can deal with fixing unwrap and making this impl less fragile later
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let (tx, rx) = oneshot::channel();
+    let (tx, mut rx) = oneshot::channel();
 
     rt.block_on(async {
         let rlm = RigRlm::new_local();
         let res = rlm.query(&prompt).await.unwrap();
+
+        tx.send(res).unwrap();
+    });
+
+    rx.try_recv().unwrap()
+}
+
+/// A function to analyze massive contexts via the recursive lambda RLM engine.
+#[pyo3::pyfunction]
+fn lambda_rlm_analyze(text: String, task_intent: String) -> String {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (tx, mut rx) = oneshot::channel();
+
+    rt.block_on(async {
+        let model = std::env::var("RIG_RLM_MODEL")
+            .unwrap_or_else(|_| "google/gemini-3.1-flash-lite-preview".to_string());
+        let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+        let config = crate::monad::provider::ProviderConfig::openai_compatible(
+            "openrouter",
+            &model,
+            "https://openrouter.ai/api/v1",
+            &api_key,
+        );
+        let provider = std::sync::Arc::new(crate::monad::provider::LlmProvider::new(config));
+            
+        let config = lambda::LambdaConfig::default().with_context_window(1500);
+        let res = lambda::lambda_rlm(&text, &task_intent, provider, config)
+            .await
+            .unwrap_or_else(|e| format!("Lambda RLM Error: {e}"));
 
         tx.send(res).unwrap();
     });

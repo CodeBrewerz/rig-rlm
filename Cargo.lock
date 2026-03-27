@@ -1909,6 +1909,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "corophage"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba9ee0a016fc3f1e3901c4cc9797f732345d60f39fcb157bf7b1602f1722e9ec"
+dependencies = [
+ "corophage-macros",
+ "fauxgen",
+ "frunk_core",
+]
+
+[[package]]
+name = "corophage-macros"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c5345728627150080d6b76f11079bda4aa84f3e0705419d3ec7518859af3955a"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.111",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3183,6 +3205,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
+name = "fauxgen"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e085db4e539f6325fa7e0d2d2e4e503c7c1a7d106adcd249b2d3984206cb141"
+dependencies = [
+ "futures-core",
+ "rustc_version",
+]
+
+[[package]]
 name = "fax"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3483,6 +3515,15 @@ dependencies = [
  "tracing",
  "twox-hash",
  "zstd 0.13.3",
+]
+
+[[package]]
+name = "frunk_core"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "476eeaa382e3462b84da5d6ba3da97b5786823c2d0d3a0d04ef088d073da225c"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -7231,9 +7272,11 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
+ "corophage",
  "dirs",
  "dotenvy",
  "dspy-rs",
+ "frunk_core",
  "futures-util",
  "hashbrown 0.16.1",
  "indexmap 2.12.1",
