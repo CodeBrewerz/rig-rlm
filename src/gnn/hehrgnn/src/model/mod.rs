@@ -20,6 +20,7 @@ pub mod rgcn;
 pub mod stable_decorrelation;
 pub mod temporal_selector;
 pub mod trainer;
+pub mod msa;
 pub mod vicreg;
 pub mod vision;
 pub mod weights;
