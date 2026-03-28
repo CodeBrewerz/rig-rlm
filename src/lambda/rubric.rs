@@ -28,6 +28,7 @@
 //! - **Retirement** = quotient by `r₁ ~ r₂ iff std(J(r)) = 0`
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -104,7 +105,7 @@ impl RubricItem {
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Tracks score history for a single rubric to compute variance.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct ScoreHistory {
     scores: Vec<f64>,
 }
@@ -143,7 +144,7 @@ impl ScoreHistory {
 /// - Persistent rubrics: always scored
 /// - Active adaptive: scored + participate in evolution
 /// - Inactive adaptive: retired (non-discriminative, std≈0)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RubricBuffer {
     /// Ground-truth criteria — always evaluated.
     pub persistent: Vec<RubricItem>,
@@ -324,6 +325,200 @@ impl RubricBuffer {
         }
 
         lines.join("\n")
+    }
+
+    // ─── Disk Persistence ───────────────────────────────────────────
+
+    /// Save rubric buffer to a JSON file (atomic write).
+    ///
+    /// Mirrors DR-Tulu's `save_adaptive_rubric_cache_safe()` — writes to
+    /// a temp file first, then renames for atomicity.
+    pub fn save(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        let path = path.as_ref();
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+        // Atomic write: write to tmp, then rename
+        let tmp_path = path.with_extension("tmp");
+        std::fs::write(&tmp_path, &json)?;
+        std::fs::rename(&tmp_path, path)?;
+
+        eprintln!(
+            "💾 [Rubric] Saved buffer to {:?} ({} persistent, {} active, {} inactive, {} bytes)",
+            path, self.persistent.len(), self.active.len(), self.inactive.len(), json.len()
+        );
+        Ok(())
+    }
+
+    /// Load rubric buffer from a JSON file.
+    ///
+    /// Returns `None` if the file doesn't exist (cold start).
+    pub fn load(path: impl AsRef<Path>) -> Option<Self> {
+        let path = path.as_ref();
+        if !path.exists() {
+            eprintln!("💾 [Rubric] No saved buffer at {:?}, starting fresh", path);
+            return None;
+        }
+
+        match std::fs::read_to_string(path) {
+            Ok(json) => match serde_json::from_str::<Self>(&json) {
+                Ok(buffer) => {
+                    eprintln!(
+                        "💾 [Rubric] Loaded buffer from {:?} ({} persistent, {} active, {} inactive)",
+                        path, buffer.persistent.len(), buffer.active.len(), buffer.inactive.len()
+                    );
+                    Some(buffer)
+                }
+                Err(e) => {
+                    eprintln!("⚠️ [Rubric] Failed to parse {:?}: {}", path, e);
+                    None
+                }
+            },
+            Err(e) => {
+                eprintln!("⚠️ [Rubric] Failed to read {:?}: {}", path, e);
+                None
+            }
+        }
+    }
+
+    /// Load from disk if available, otherwise create with defaults.
+    pub fn load_or_default(path: impl AsRef<Path>) -> Self {
+        Self::load(path).unwrap_or_else(Self::for_document_qa)
+    }
+
+    // ─── Structured Metrics ─────────────────────────────────────────
+
+    /// Compute structured metrics (DR-Tulu style).
+    ///
+    /// Mirrors `grpo_fast_rubric.py` metrics:
+    /// - `avg_mean`: average of per-rubric means
+    /// - `avg_std`: average of per-rubric stds (how discriminative overall)
+    /// - `zero_rubrics_ratio`: fraction of rubrics with mean=0 AND std=0
+    /// - `discriminative_ratio`: fraction with std > 0.01
+    /// - `total_observations`: total scored rubric×response pairs
+    pub fn metrics(&self) -> RubricMetrics {
+        let active_rubrics = self.all_active();
+        if active_rubrics.is_empty() {
+            return RubricMetrics::default();
+        }
+
+        let mut means = Vec::new();
+        let mut stds = Vec::new();
+        let mut zero_count = 0;
+        let mut discriminative_count = 0;
+        let mut total_obs = 0;
+
+        for rubric in &active_rubrics {
+            if let Some(history) = self.score_history.get(&rubric.title) {
+                let m = history.mean();
+                let s = history.std();
+                means.push(m);
+                stds.push(s);
+                total_obs += history.len();
+
+                if m == 0.0 && s == 0.0 { zero_count += 1; }
+                if s > 0.01 { discriminative_count += 1; }
+            }
+        }
+
+        let n = means.len().max(1) as f64;
+        RubricMetrics {
+            avg_mean: means.iter().sum::<f64>() / n,
+            avg_std: stds.iter().sum::<f64>() / n,
+            zero_rubrics_ratio: zero_count as f64 / n,
+            discriminative_ratio: discriminative_count as f64 / n,
+            total_observations: total_obs,
+            persistent_count: self.persistent.len(),
+            active_count: self.active.len(),
+            inactive_count: self.inactive.len(),
+        }
+    }
+
+    // ─── Per-Rubric Z-Score Normalization ────────────────────────────
+
+    /// Compute z-score normalized advantage (DR-Tulu's `normalize_rubric_scores`).
+    ///
+    /// For each rubric: `advantage = (score - mean) / std * weight`.
+    /// The final score is the weighted average of z-normalized per-rubric scores.
+    ///
+    /// This prevents high-variance rubrics from dominating and makes each
+    /// rubric equally influential in the final score.
+    ///
+    /// From `grpo_fast_rubric.py:2498-2514`:
+    /// ```python
+    /// if stats["std"] > 0:
+    ///     normalized_score = (score - stats["mean"]) / stats["std"]
+    /// else:
+    ///     normalized_score = 0.0
+    /// weighted_scores.append(normalized_score * weight)
+    /// final_advantage = sum(weighted_scores) / max(total_weight, 1.0)
+    /// ```
+    pub fn z_score_normalize(&self, per_rubric_scores: &HashMap<String, f64>) -> f64 {
+        let mut weighted_z_scores = Vec::new();
+        let mut total_positive_weight = 0.0;
+
+        for rubric in self.persistent.iter().chain(self.active.iter()) {
+            if let Some(&raw_score) = per_rubric_scores.get(&rubric.title) {
+                if let Some(history) = self.score_history.get(&rubric.title) {
+                    let std = history.std();
+                    let z = if std > 0.0 {
+                        (raw_score - history.mean()) / std
+                    } else {
+                        0.0
+                    };
+
+                    weighted_z_scores.push(z * rubric.weight);
+                    if rubric.weight > 0.0 {
+                        total_positive_weight += rubric.weight;
+                    }
+                }
+            }
+        }
+
+        if weighted_z_scores.is_empty() || total_positive_weight == 0.0 {
+            return 0.0;
+        }
+
+        weighted_z_scores.iter().sum::<f64>() / total_positive_weight
+    }
+}
+
+/// Structured metrics from a rubric evaluation cycle.
+///
+/// Mirrors DR-Tulu's per-step metrics logged to wandb:
+/// - `rubric_keys/avg_mean`
+/// - `rubric_keys/avg_std`
+/// - `rubric_keys/num_all_zero_rubrics_ratio`
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RubricMetrics {
+    /// Average of per-rubric mean scores.
+    pub avg_mean: f64,
+    /// Average of per-rubric std (higher = more discriminative overall).
+    pub avg_std: f64,
+    /// Fraction of rubrics with mean=0 AND std=0 (all-zero, likely useless).
+    pub zero_rubrics_ratio: f64,
+    /// Fraction of rubrics with std > 0.01 (actually discriminating).
+    pub discriminative_ratio: f64,
+    /// Total number of scored rubric×response pairs.
+    pub total_observations: usize,
+    /// Count of persistent rubrics.
+    pub persistent_count: usize,
+    /// Count of active adaptive rubrics.
+    pub active_count: usize,
+    /// Count of inactive (retired) rubrics.
+    pub inactive_count: usize,
+}
+
+impl std::fmt::Display for RubricMetrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "RubricMetrics {{ avg_mean={:.3}, avg_std={:.3}, zero_ratio={:.2}, \
+             discrim_ratio={:.2}, obs={}, P/A/I={}/{}/{} }}",
+            self.avg_mean, self.avg_std, self.zero_rubrics_ratio,
+            self.discriminative_ratio, self.total_observations,
+            self.persistent_count, self.active_count, self.inactive_count,
+        )
     }
 }
 
@@ -733,5 +928,114 @@ mod tests {
         let summary = buffer.summary();
         assert!(summary.contains("persistent: 3"));
         assert!(summary.contains("Factual Recall"));
+    }
+
+    #[test]
+    fn test_rubric_buffer_serialization_roundtrip() {
+        let mut buffer = RubricBuffer::for_document_qa();
+        buffer.add_adaptive(vec![
+            RubricItem::adaptive("Brevity", "Keeps response concise"),
+        ]);
+
+        // Record some scores
+        let mut scores = HashMap::new();
+        scores.insert("Factual Recall".to_string(), 0.8);
+        scores.insert("Brevity".to_string(), 0.6);
+        buffer.record_scores(&scores);
+
+        // Save
+        let tmp_path = std::env::temp_dir().join("rubric_test_save.json");
+        buffer.save(&tmp_path).expect("save failed");
+
+        // Load
+        let loaded = RubricBuffer::load(&tmp_path).expect("load failed");
+        assert_eq!(loaded.persistent.len(), 3);
+        assert_eq!(loaded.active.len(), 1);
+        assert_eq!(loaded.active[0].title, "Brevity");
+
+        // Score history should be preserved
+        let m = loaded.metrics();
+        assert!(m.total_observations > 0, "Score history should survive roundtrip");
+
+        // Cleanup
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+
+    #[test]
+    fn test_rubric_buffer_load_missing() {
+        let result = RubricBuffer::load("/tmp/nonexistent_rubric_buffer_xyz.json");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_rubric_buffer_load_or_default() {
+        let buf = RubricBuffer::load_or_default("/tmp/nonexistent_rubric_buffer_xyz.json");
+        assert_eq!(buf.persistent.len(), 3, "Should fall back to document QA defaults");
+    }
+
+    #[test]
+    fn test_rubric_metrics() {
+        let mut buffer = RubricBuffer::for_document_qa();
+
+        // No observations yet
+        let m = buffer.metrics();
+        assert_eq!(m.total_observations, 0);
+
+        // Record varied scores
+        let mut scores = HashMap::new();
+        scores.insert("Factual Recall".to_string(), 0.8);
+        scores.insert("Answer Relevance".to_string(), 0.5);
+        scores.insert("Completeness".to_string(), 0.0);
+        buffer.record_scores(&scores);
+
+        scores.insert("Factual Recall".to_string(), 0.2);
+        scores.insert("Answer Relevance".to_string(), 0.5);
+        scores.insert("Completeness".to_string(), 0.0);
+        buffer.record_scores(&scores);
+
+        let m = buffer.metrics();
+        assert_eq!(m.persistent_count, 3);
+        assert_eq!(m.active_count, 0);
+        assert_eq!(m.total_observations, 6); // 3 rubrics × 2 observations each
+        assert!(m.avg_mean > 0.0, "Some rubrics have non-zero scores");
+        // Answer Relevance has std=0 (both 0.5), Completeness has std=0 (both 0.0)
+        // Only Factual Recall has std > 0
+        assert!(m.discriminative_ratio > 0.0, "At least one rubric is discriminative");
+    }
+
+    #[test]
+    fn test_z_score_normalization() {
+        let mut buffer = RubricBuffer::for_document_qa();
+
+        // Build up score history (need 2+ observations for std)
+        let mut s1 = HashMap::new();
+        s1.insert("Factual Recall".to_string(), 0.8);
+        s1.insert("Answer Relevance".to_string(), 0.5);
+        s1.insert("Completeness".to_string(), 0.3);
+        buffer.record_scores(&s1);
+
+        let mut s2 = HashMap::new();
+        s2.insert("Factual Recall".to_string(), 0.2);
+        s2.insert("Answer Relevance".to_string(), 0.5);
+        s2.insert("Completeness".to_string(), 0.7);
+        buffer.record_scores(&s2);
+
+        // Now z-score a new result that's above average on everything
+        let mut new_scores = HashMap::new();
+        new_scores.insert("Factual Recall".to_string(), 0.9);    // well above mean=0.5
+        new_scores.insert("Answer Relevance".to_string(), 0.5);  // at mean (std=0, z=0)
+        new_scores.insert("Completeness".to_string(), 0.8);      // above mean=0.5
+
+        let z = buffer.z_score_normalize(&new_scores);
+        // Should be positive (above average on non-zero-std rubrics)
+        assert!(z > 0.0, "Above-average scores should give positive z-advantage, got {:.3}", z);
+
+        // Test below average
+        let mut low_scores = HashMap::new();
+        low_scores.insert("Factual Recall".to_string(), 0.1);
+        low_scores.insert("Answer Relevance".to_string(), 0.5);
+        low_scores.insert("Completeness".to_string(), 0.2);
+        let z_low = buffer.z_score_normalize(&low_scores);
+        assert!(z_low < 0.0, "Below-average scores should give negative z-advantage, got {:.3}", z_low);
     }
 }

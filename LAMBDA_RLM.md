@@ -311,9 +311,53 @@ let mut adaptive = AdaptiveYoneda::with_custom_rubrics(doc, provider, config, bu
 
 1. **Score**: LLM judge evaluates response against ALL active rubrics → `{"score": 0-2}` per criterion
 2. **Record**: Per-rubric scores tracked for std computation
-3. **Generate** (every `rubric_gen_interval` probes): LLM compares recent responses → generates positive/negative adaptive rubrics
-4. **Retire** (every 3 probes): Zero-std rubrics → inactive (non-discriminative = useless)
-5. **Cap**: Active adaptive rubrics capped at `max_active` (default 5)
+3. **Z-Score**: Compute normalized advantage `(score - mean) / std * weight` per rubric
+4. **Metrics**: Emit `RubricMetrics` (avg_mean, avg_std, zero_ratio, discriminative_ratio)
+5. **Generate** (every `rubric_gen_interval` probes): LLM compares recent responses → generates positive/negative adaptive rubrics
+6. **Retire** (every 3 probes): Zero-std rubrics → inactive (non-discriminative = useless)
+7. **Save**: Auto-save rubric buffer to disk after retirement (if `rubric_save_path` set)
+8. **Cap**: Active adaptive rubrics capped at `max_active` (default 5)
+
+**Disk persistence** — rubric knowledge survives restarts:
+
+```rust
+// Save (atomic write: tmp file + rename)
+buffer.save("rubrics.json")?;
+
+// Load (returns None if file missing)
+let buffer = RubricBuffer::load("rubrics.json");
+
+// Load or fall back to defaults
+let buffer = RubricBuffer::load_or_default("rubrics.json");
+
+// Auto-save after each retirement cycle
+adaptive.rubric_save_path = Some("rubrics.json".into());
+```
+
+**Structured metrics** (mirrors DR-Tulu's wandb logging):
+
+```rust
+let m = buffer.metrics();
+// RubricMetrics { avg_mean=0.167, avg_std=0.226, zero_ratio=0.00,
+//                 discrim_ratio=1.00, obs=21, P/A/I=3/2/1 }
+```
+
+| Metric | Description |
+|--------|-------------|
+| `avg_mean` | Average of per-rubric mean scores |
+| `avg_std` | Average of per-rubric stds (higher = more discriminative) |
+| `zero_rubrics_ratio` | Fraction with mean=0 AND std=0 (useless) |
+| `discriminative_ratio` | Fraction with std > 0.01 (actually useful) |
+
+**Z-score normalization** (per-rubric advantage):
+
+```rust
+// Raw: high-mean rubrics dominate
+let raw_score = 0.167;
+// Z-normalized: each rubric equally influential
+let z_advantage = buffer.z_score_normalize(&per_rubric_scores);
+// z_advantage > 0 means above-average, < 0 means below-average
+```
 
 **Category theory framing:**
 

@@ -464,6 +464,8 @@ pub struct AdaptiveYoneda {
     pub rubric_buffer: Option<RubricBuffer>,
     /// How often to generate new adaptive rubrics (every N probes).
     pub rubric_gen_interval: usize,
+    /// Optional path for auto-saving rubric buffer to disk.
+    pub rubric_save_path: Option<String>,
 }
 
 impl AdaptiveYoneda {
@@ -476,6 +478,7 @@ impl AdaptiveYoneda {
             generation: 0,
             rubric_buffer: None,
             rubric_gen_interval: 5,
+            rubric_save_path: None,
         }
     }
 
@@ -491,6 +494,7 @@ impl AdaptiveYoneda {
             generation: 0,
             rubric_buffer: Some(RubricBuffer::for_document_qa()),
             rubric_gen_interval: 5,
+            rubric_save_path: None,
         }
     }
 
@@ -508,6 +512,7 @@ impl AdaptiveYoneda {
             generation: 0,
             rubric_buffer: Some(rubric_buffer),
             rubric_gen_interval: 5,
+            rubric_save_path: None,
         }
     }
 
@@ -635,13 +640,20 @@ impl AdaptiveYoneda {
             &provider, query, &result, buffer,
         ).await;
 
+        // Also compute z-score normalized advantage (DR-Tulu style)
+        let z_score_advantage = buffer.z_score_normalize(&per_rubric_scores);
+
         eprintln!(
-            "🧬 [AdaptiveRubric] score={:.3} latency={:.1}s rubric_scores={:?}",
-            overall_score, latency, per_rubric_scores
+            "🧬 [AdaptiveRubric] score={:.3} z_adv={:+.3} latency={:.1}s rubric_scores={:?}",
+            overall_score, z_score_advantage, latency, per_rubric_scores
         );
 
         // 5. Record per-rubric scores for std tracking
         buffer.record_scores(&per_rubric_scores);
+
+        // 5b. Emit structured metrics (DR-Tulu wandb-style logging)
+        let metrics = buffer.metrics();
+        eprintln!("📊 [RubricMetrics] {}", metrics);
 
         // 6. Record trajectory
         {
@@ -708,6 +720,13 @@ impl AdaptiveYoneda {
             let report = buffer.filter_and_retire();
             if report.retired_zero_std > 0 || report.retired_cap > 0 {
                 eprintln!("🧬 [AdaptiveRubric] {}", report);
+            }
+
+            // Auto-save rubric buffer after retirement cycle
+            if let Some(ref save_path) = self.rubric_save_path {
+                if let Err(e) = buffer.save(save_path) {
+                    eprintln!("⚠️ [Rubric] Auto-save failed: {}", e);
+                }
             }
         }
 

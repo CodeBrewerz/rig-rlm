@@ -44,7 +44,7 @@ pub use planner::{CostParams, ExecutionPlan, TaskType};
 pub use yoneda::{YonedaContext, QueryMorphism, YonedaEquivalence, yoneda_equivalence, check_naturality};
 pub use profunctor::{TypedPipeline, AsyncProfunctor, Profunctor};
 pub use adaptive_yoneda::{AdaptiveYoneda, TrajectoryStore, MorphismPopulation, EvolutionResult};
-pub use rubric::{RubricItem, RubricType, RubricBuffer, RetirementReport};
+pub use rubric::{RubricItem, RubricType, RubricBuffer, RubricMetrics, RetirementReport};
 
 // ─── Configuration ──────────────────────────────────────────────────
 
