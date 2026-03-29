@@ -1445,3 +1445,312 @@ mod tests {
         assert!((a - 0.7).abs() < 1e-6, "median(0.1,0.7,0.9) should be 0.7");
     }
 }
+
+// ═══════════════════════════════════════════════════════════════
+// HyperFiduciaryAxes — Metacognitive parameter co-evolution
+// ═══════════════════════════════════════════════════════════════
+
+/// Per-action-type performance tracking for metacognitive weight evolution.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ActionPerformance {
+    /// Times this action was recommended.
+    pub recommended: u32,
+    /// Times the recommendation was considered correct by feedback.
+    pub correct: u32,
+    /// Times it was a false positive (recommended but harmful/wrong).
+    pub false_positive: u32,
+    /// Times it was a false negative (should have been recommended but wasn't).
+    pub false_negative: u32,
+}
+
+impl ActionPerformance {
+    /// Precision: correct / (correct + false_positive).
+    pub fn precision(&self) -> f64 {
+        let denom = self.correct + self.false_positive;
+        if denom == 0 { 1.0 } else { self.correct as f64 / denom as f64 }
+    }
+
+    /// Recall: correct / (correct + false_negative).
+    pub fn recall(&self) -> f64 {
+        let denom = self.correct + self.false_negative;
+        if denom == 0 { 1.0 } else { self.correct as f64 / denom as f64 }
+    }
+
+    /// F1 score.
+    pub fn f1(&self) -> f64 {
+        let p = self.precision();
+        let r = self.recall();
+        if p + r <= 0.0 { 0.0 } else { 2.0 * p * r / (p + r) }
+    }
+
+    /// Total observations.
+    pub fn total_observations(&self) -> u32 {
+        self.correct + self.false_positive + self.false_negative
+    }
+}
+
+/// Recommended weight adjustment from HyperFiduciaryAxes analysis.
+#[derive(Debug, Clone)]
+pub struct AxesAdjustment {
+    /// Action type that triggered the adjustment.
+    pub action_name: String,
+    /// Current priority weight.
+    pub current_weight: f32,
+    /// Suggested new priority weight.
+    pub suggested_weight: f32,
+    /// Reason for the adjustment.
+    pub reason: String,
+}
+
+/// HyperFiduciaryAxes: metacognitive parameter co-evolution for fiduciary scoring.
+///
+/// Tracks per-action-type precision@K and, when certain actions consistently
+/// misprioritize, recommends weight adjustments that feed back into GEPA.
+///
+/// ## Architecture
+/// ```text
+/// recommend() → FiduciaryResponse
+///    ↓ (feedback from ground truth or user)
+/// ActionPerformance (per action type)
+///    ↓ when precision < threshold
+/// AxesAdjustment recommendation
+///    ↓ fed into GEPA seed candidate as weight hints
+/// Next GEPA cycle incorporates the hint
+/// ```
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HyperFiduciaryAxes {
+    /// Per-action-type performance metrics.
+    pub action_performance: HashMap<String, ActionPerformance>,
+    /// Minimum observations before adjustment triggers.
+    pub min_observations: u32,
+    /// Precision threshold below which we recommend adjustment.
+    pub precision_threshold: f64,
+    /// Number of adjustments made so far.
+    pub adjustment_count: u32,
+    /// History of adjustments.
+    pub adjustment_history: Vec<String>,
+}
+
+impl HyperFiduciaryAxes {
+    pub fn new() -> Self {
+        Self {
+            action_performance: HashMap::new(),
+            min_observations: 5,
+            precision_threshold: 0.60,
+            adjustment_count: 0,
+            adjustment_history: Vec::new(),
+        }
+    }
+
+    /// Record feedback for a recommendation.
+    pub fn record_feedback(
+        &mut self,
+        action_name: &str,
+        was_correct: bool,
+        was_false_negative: bool,
+    ) {
+        let entry = self.action_performance
+            .entry(action_name.to_string())
+            .or_insert_with(ActionPerformance::default);
+
+        if was_correct {
+            entry.correct += 1;
+            entry.recommended += 1;
+        } else if was_false_negative {
+            entry.false_negative += 1;
+        } else {
+            // False positive: recommended but wrong
+            entry.false_positive += 1;
+            entry.recommended += 1;
+        }
+    }
+
+    /// Analyze all action types and return adjustment recommendations.
+    pub fn analyze(&self) -> Vec<AxesAdjustment> {
+        let mut adjustments = Vec::new();
+
+        for (name, perf) in &self.action_performance {
+            if perf.total_observations() < self.min_observations {
+                continue;
+            }
+
+            let precision = perf.precision();
+            if precision < self.precision_threshold {
+                // Action is producing too many false positives → reduce its weight
+                let current_weight = FiduciaryActionType::try_from_name(name)
+                    .map(|a| a.priority_weight())
+                    .unwrap_or(0.50);
+                let reduction = (1.0 - precision as f32) * 0.3; // up to 30% reduction
+                let suggested = (current_weight - reduction).max(0.10);
+
+                adjustments.push(AxesAdjustment {
+                    action_name: name.clone(),
+                    current_weight,
+                    suggested_weight: suggested,
+                    reason: format!(
+                        "precision={:.1}% < {:.1}% threshold ({} correct, {} false_pos)",
+                        precision * 100.0,
+                        self.precision_threshold * 100.0,
+                        perf.correct,
+                        perf.false_positive,
+                    ),
+                });
+            }
+
+            // Also check for high false negative rate (should boost weight)
+            let recall = perf.recall();
+            if recall < 0.50 && perf.false_negative >= 3 {
+                let current_weight = FiduciaryActionType::try_from_name(name)
+                    .map(|a| a.priority_weight())
+                    .unwrap_or(0.50);
+                let boost = (1.0 - recall as f32) * 0.2; // up to 20% boost
+                let suggested = (current_weight + boost).min(1.0);
+
+                adjustments.push(AxesAdjustment {
+                    action_name: name.clone(),
+                    current_weight,
+                    suggested_weight: suggested,
+                    reason: format!(
+                        "recall={:.1}% — too many false negatives ({} missed)",
+                        recall * 100.0,
+                        perf.false_negative,
+                    ),
+                });
+            }
+        }
+
+        adjustments
+    }
+
+    /// Apply adjustments to an OptimizedWeights' priority_overrides.
+    pub fn apply_to_priority_weights(
+        &mut self,
+        priority_weights: &mut HashMap<String, f32>,
+    ) -> usize {
+        let adjustments = self.analyze();
+        let count = adjustments.len();
+        for adj in &adjustments {
+            priority_weights.insert(adj.action_name.clone(), adj.suggested_weight);
+            self.adjustment_history.push(format!(
+                "{}: {:.2} → {:.2} ({})",
+                adj.action_name, adj.current_weight, adj.suggested_weight, adj.reason,
+            ));
+        }
+        self.adjustment_count += count as u32;
+        count
+    }
+
+    /// Summary for diagnostics.
+    pub fn summary(&self) -> String {
+        let mut s = format!(
+            "HyperFiduciaryAxes: {} action types tracked, {} adjustments made\n",
+            self.action_performance.len(),
+            self.adjustment_count,
+        );
+        for (name, perf) in &self.action_performance {
+            s.push_str(&format!(
+                "  {}: prec={:.1}% recall={:.1}% f1={:.1}% (obs={})\n",
+                name,
+                perf.precision() * 100.0,
+                perf.recall() * 100.0,
+                perf.f1() * 100.0,
+                perf.total_observations(),
+            ));
+        }
+        s
+    }
+}
+
+impl Default for HyperFiduciaryAxes {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod hyper_fiduciary_tests {
+    use super::*;
+
+    #[test]
+    fn test_action_performance_precision() {
+        let mut perf = ActionPerformance::default();
+        perf.correct = 7;
+        perf.false_positive = 3;
+        assert!((perf.precision() - 0.70).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_action_performance_recall() {
+        let mut perf = ActionPerformance::default();
+        perf.correct = 4;
+        perf.false_negative = 6;
+        assert!((perf.recall() - 0.40).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_hyper_axes_detects_low_precision() {
+        let mut hyper = HyperFiduciaryAxes::new();
+        hyper.min_observations = 3;
+
+        // should_investigate has 2 correct, 5 false positives
+        for _ in 0..2 {
+            hyper.record_feedback("should_investigate", true, false);
+        }
+        for _ in 0..5 {
+            hyper.record_feedback("should_investigate", false, false);
+        }
+
+        let adjustments = hyper.analyze();
+        assert!(!adjustments.is_empty(), "Should recommend adjustments");
+
+        let adj = adjustments.iter()
+            .find(|a| a.action_name == "should_investigate")
+            .unwrap();
+        assert!(adj.suggested_weight < adj.current_weight,
+            "Should reduce weight for low-precision action");
+    }
+
+    #[test]
+    fn test_hyper_axes_detects_high_false_negatives() {
+        let mut hyper = HyperFiduciaryAxes::new();
+        hyper.min_observations = 3;
+
+        // should_pay: 1 correct, 4 false negatives
+        hyper.record_feedback("should_pay", true, false);
+        for _ in 0..4 {
+            hyper.record_feedback("should_pay", false, true);
+        }
+
+        let adjustments = hyper.analyze();
+        let adj = adjustments.iter()
+            .find(|a| a.action_name == "should_pay" && a.reason.contains("recall"))
+            .unwrap();
+        assert!(adj.suggested_weight > adj.current_weight,
+            "Should boost weight for high-miss action");
+    }
+
+    #[test]
+    fn test_hyper_axes_no_trigger_with_insufficient_data() {
+        let mut hyper = HyperFiduciaryAxes::new();
+        hyper.record_feedback("should_cancel", false, false);
+        // Only 1 observation, need 5
+        let adjustments = hyper.analyze();
+        assert!(adjustments.is_empty());
+    }
+
+    #[test]
+    fn test_apply_to_weights() {
+        let mut hyper = HyperFiduciaryAxes::new();
+        hyper.min_observations = 3;
+
+        // Create low-precision scenario
+        for _ in 0..5 {
+            hyper.record_feedback("should_cancel", false, false);
+        }
+
+        let mut weights = HashMap::new();
+        let applied = hyper.apply_to_priority_weights(&mut weights);
+        assert!(applied > 0);
+        assert!(weights.contains_key("should_cancel"));
+    }
+}

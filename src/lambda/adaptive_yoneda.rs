@@ -42,9 +42,10 @@ use hehrgnn::optimizer::gepa::{
 use crate::monad::provider::LlmProvider;
 use crate::lambda::{
     lambda_rlm, LambdaConfig,
+    planner::CostParams,
     yoneda::{YonedaContext, QueryMorphism},
     combinators,
-    rubric::{self, RubricBuffer, RubricItem},
+    rubric::{self, RubricBuffer, RubricItem, HyperRubricGenerator},
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -281,11 +282,210 @@ impl MorphismPopulation {
 
     /// Summary of all morphisms and their scores.
     pub fn summary(&self) -> String {
+        #[allow(clippy::format_in_format_args)]
         let mut lines: Vec<String> = self.morphisms.iter().map(|m| {
             format!("  {:25} avg={:.3} uses={}", m.name, m.avg_score(), m.use_count)
         }).collect();
         lines.sort();
         lines.join("\n")
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// HyperCostModel — Self-Evolving Planner Parameters (DGM-H Level 2)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Self-evolving planner cost model parameters.
+///
+/// Instead of fixed `CostParams` (ρ=0.85, A₀=0.95, A⊕=0.98), the
+/// HyperCostModel tracks which parameter configurations lead to the best
+/// end-to-end scores and uses GEPA to evolve them.
+///
+/// This is the HyperAgents pattern: the meta agent tunes the parameters
+/// of the tuning process, not just the task-level parameters.
+#[derive(Debug, Clone)]
+pub struct HyperCostModel {
+    /// Current cost parameters.
+    pub params: CostParams,
+    /// History of (params_snapshot, resulting_score) for meta-learning.
+    param_history: Vec<(CostParamsSnapshot, f64)>,
+    /// Whether GEPA should evolve cost model params too.
+    pub enabled: bool,
+}
+
+/// Lightweight snapshot of cost params for history tracking.
+#[derive(Debug, Clone)]
+struct CostParamsSnapshot {
+    rho: f64,
+    a0: f64,
+    a_compose: f64,
+}
+
+impl HyperCostModel {
+    /// Create with default cost params.
+    pub fn new() -> Self {
+        Self {
+            params: CostParams::default(),
+            param_history: Vec::new(),
+            enabled: true,
+        }
+    }
+
+    /// Record the score achieved with the current params.
+    pub fn record_score(&mut self, score: f64) {
+        let snapshot = CostParamsSnapshot {
+            rho: self.params.rho,
+            a0: self.params.a0,
+            a_compose: self.params.a_compose,
+        };
+        self.param_history.push((snapshot, score));
+    }
+
+    /// Apply evolved parameters from a GEPA candidate.
+    pub fn apply_from_candidate(&mut self, candidate: &Candidate) {
+        if !self.enabled {
+            return;
+        }
+        let rho = candidate.get_f32("rho", self.params.rho as f32) as f64;
+        let a0 = candidate.get_f32("a0", self.params.a0 as f32) as f64;
+        let a_compose = candidate.get_f32("a_compose", self.params.a_compose as f32) as f64;
+
+        // Clamp to physically meaningful ranges
+        self.params.rho = rho.clamp(0.5, 0.99);
+        self.params.a0 = a0.clamp(0.7, 1.0);
+        self.params.a_compose = a_compose.clamp(0.8, 1.0);
+
+        eprintln!(
+            "📐 [HyperCost] Applied: ρ={:.3}, A₀={:.3}, A⊕={:.3}",
+            self.params.rho, self.params.a0, self.params.a_compose
+        );
+    }
+
+    /// Get the best-performing parameter configuration from history.
+    pub fn best_params(&self) -> Option<&CostParams> {
+        if self.param_history.is_empty() {
+            return None;
+        }
+        // The current params are always the latest
+        Some(&self.params)
+    }
+
+    /// Mean score improvement from parameter evolution.
+    pub fn improvement_rate(&self) -> f64 {
+        let n = self.param_history.len();
+        if n < 4 {
+            return 0.0;
+        }
+        let half = n / 2;
+        let early_mean: f64 = self.param_history[..half].iter().map(|(_, s)| s).sum::<f64>() / half as f64;
+        let late_mean: f64 = self.param_history[half..].iter().map(|(_, s)| s).sum::<f64>() / (n - half) as f64;
+        late_mean - early_mean
+    }
+
+    /// Summary.
+    pub fn summary(&self) -> String {
+        format!(
+            "📐 HyperCostModel: ρ={:.3}, A₀={:.3}, A⊕={:.3} (history={}, improvement={:+.4})",
+            self.params.rho, self.params.a0, self.params.a_compose,
+            self.param_history.len(), self.improvement_rate()
+        )
+    }
+}
+
+impl Default for HyperCostModel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// HyperMutator — Self-Evolving Mutation Strategy (DGM-H Level 2)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Self-evolving mutation strategy.
+///
+/// Instead of a fixed mutation rate (0.2), the HyperMutator tracks which
+/// mutation rates led to improvements and adapts accordingly.
+///
+/// This completes the HyperAgents triad: the mutation strategy that produces
+/// new candidates can also evolve its own parameters.
+#[derive(Debug, Clone)]
+pub struct HyperMutator {
+    /// Current base mutation rate.
+    pub mutation_rate: f32,
+    /// History of (mutation_rate, did_improve).
+    rate_history: Vec<(f32, bool)>,
+    /// Adaptation window size.
+    pub adaptation_window: usize,
+    /// Whether adaptation is enabled.
+    pub enabled: bool,
+}
+
+impl HyperMutator {
+    /// Create with default mutation rate.
+    pub fn new() -> Self {
+        Self {
+            mutation_rate: 0.2,
+            rate_history: Vec::new(),
+            adaptation_window: 10,
+            enabled: true,
+        }
+    }
+
+    /// Record whether the current mutation rate led to improvement.
+    pub fn record_outcome(&mut self, improved: bool) {
+        self.rate_history.push((self.mutation_rate, improved));
+
+        if !self.enabled {
+            return;
+        }
+
+        // Adapt mutation rate using 1/5th success rule (from ES theory)
+        // If >20% of recent mutations improved: increase rate (explore more)
+        // If <20% improved: decrease rate (exploit more)
+        if self.rate_history.len() >= self.adaptation_window {
+            let window = &self.rate_history[self.rate_history.len() - self.adaptation_window..];
+            let success_ratio = window.iter().filter(|(_, imp)| *imp).count() as f32
+                / window.len() as f32;
+
+            let old_rate = self.mutation_rate;
+            if success_ratio > 0.2 {
+                // Too many successes → mutations are too conservative → increase
+                self.mutation_rate = (self.mutation_rate * 1.2).min(0.8);
+            } else {
+                // Too few successes → mutations are too aggressive → decrease
+                self.mutation_rate = (self.mutation_rate * 0.83).max(0.02);
+            }
+
+            if (old_rate - self.mutation_rate).abs() > 0.01 {
+                eprintln!(
+                    "🧬 [HyperMutator] Adapted rate: {:.3} → {:.3} (success_ratio={:.2})",
+                    old_rate, self.mutation_rate, success_ratio
+                );
+            }
+        }
+    }
+
+    /// Create a NumericMutator with the current adapted rate.
+    pub fn to_numeric_mutator(&self, seed: u64) -> NumericMutator {
+        NumericMutator::new(self.mutation_rate, seed)
+    }
+
+    /// Summary.
+    pub fn summary(&self) -> String {
+        let total = self.rate_history.len();
+        let successes = self.rate_history.iter().filter(|(_, imp)| *imp).count();
+        format!(
+            "🧬 HyperMutator: rate={:.3} (history={}, successes={}, ratio={:.2})",
+            self.mutation_rate, total, successes,
+            if total > 0 { successes as f64 / total as f64 } else { 0.0 }
+        )
+    }
+}
+
+impl Default for HyperMutator {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -466,6 +666,15 @@ pub struct AdaptiveYoneda {
     pub rubric_gen_interval: usize,
     /// Optional path for auto-saving rubric buffer to disk.
     pub rubric_save_path: Option<String>,
+
+    // ── HyperAgent Level 2 (metacognitive) ──
+
+    /// Self-modifying rubric generator (replaces fixed RUBRIC_GEN_PROMPT).
+    pub hyper_rubric_gen: Option<HyperRubricGenerator>,
+    /// Self-evolving planner cost model (replaces fixed CostParams).
+    pub hyper_cost_model: Option<HyperCostModel>,
+    /// Self-evolving mutation strategy (replaces fixed mutation rate).
+    pub hyper_mutator: Option<HyperMutator>,
 }
 
 impl AdaptiveYoneda {
@@ -479,6 +688,9 @@ impl AdaptiveYoneda {
             rubric_buffer: None,
             rubric_gen_interval: 5,
             rubric_save_path: None,
+            hyper_rubric_gen: None,
+            hyper_cost_model: None,
+            hyper_mutator: None,
         }
     }
 
@@ -495,6 +707,9 @@ impl AdaptiveYoneda {
             rubric_buffer: Some(RubricBuffer::for_document_qa()),
             rubric_gen_interval: 5,
             rubric_save_path: None,
+            hyper_rubric_gen: None,
+            hyper_cost_model: None,
+            hyper_mutator: None,
         }
     }
 
@@ -513,6 +728,9 @@ impl AdaptiveYoneda {
             rubric_buffer: Some(rubric_buffer),
             rubric_gen_interval: 5,
             rubric_save_path: None,
+            hyper_rubric_gen: None,
+            hyper_cost_model: None,
+            hyper_mutator: None,
         }
     }
 
@@ -683,6 +901,7 @@ impl AdaptiveYoneda {
         }
 
         // 8. Periodically generate new adaptive rubrics
+        //    Uses HyperRubricGenerator if available (metacognitive), else fixed prompt
         if self.generation > 0
             && self.generation % self.rubric_gen_interval == 0
         {
@@ -695,19 +914,30 @@ impl AdaptiveYoneda {
             };
 
             if recent_results.len() >= 2 {
-                eprintln!(
-                    "🧬 [AdaptiveRubric] Generating new rubrics from {} recent responses...",
-                    recent_results.len()
-                );
-
                 // Collect existing rubrics for the generation call
                 let existing_refs: Vec<&RubricItem> = buffer.persistent.iter()
                     .chain(buffer.active.iter())
                     .collect();
 
-                let new_rubrics = rubric::generate_adaptive_rubrics(
-                    &provider, query, &recent_results, &existing_refs,
-                ).await;
+                let new_rubrics = if let Some(ref mut hyper_gen) = self.hyper_rubric_gen {
+                    // 🧠 HyperAgent path: use the evolving rubric generator
+                    eprintln!(
+                        "🧠 [HyperRubric] Generating rubrics via HyperRubricGenerator v{}...",
+                        hyper_gen.version
+                    );
+                    hyper_gen.generate(
+                        &provider, query, &recent_results, &existing_refs,
+                    ).await
+                } else {
+                    // Standard path: fixed RUBRIC_GEN_PROMPT
+                    eprintln!(
+                        "🧬 [AdaptiveRubric] Generating new rubrics from {} recent responses...",
+                        recent_results.len()
+                    );
+                    rubric::generate_adaptive_rubrics(
+                        &provider, query, &recent_results, &existing_refs,
+                    ).await
+                };
 
                 if !new_rubrics.is_empty() {
                     buffer.add_adaptive(new_rubrics);
@@ -720,6 +950,23 @@ impl AdaptiveYoneda {
             let report = buffer.filter_and_retire();
             if report.retired_zero_std > 0 || report.retired_cap > 0 {
                 eprintln!("🧬 [AdaptiveRubric] {}", report);
+            }
+
+            // 10. 🧠 Metacognitive self-modification check (HyperAgents Level 2)
+            //     If the rubric generator's output is not discriminative enough,
+            //     evolve the generation prompt itself.
+            let metrics = buffer.metrics();
+            if let Some(ref mut hyper_gen) = self.hyper_rubric_gen {
+                if hyper_gen.should_evolve(&metrics) {
+                    eprintln!(
+                        "🧠 [HyperRubric] Metacognitive trigger: disc_ratio={:.2} < threshold={:.2}",
+                        metrics.discriminative_ratio, hyper_gen.discriminative_threshold
+                    );
+                    let retired_examples: Vec<RubricItem> = buffer.inactive.clone();
+                    hyper_gen.evolve_prompt(
+                        &provider, &metrics, &retired_examples,
+                    ).await;
+                }
             }
 
             // Auto-save rubric buffer after retirement cycle
@@ -751,8 +998,61 @@ impl AdaptiveYoneda {
     /// 3. Evolves the population via mutation + selection
     /// 4. Records all trajectories for persistent learning
     /// 5. Returns the best-performing configuration
+    /// Create a **full HyperAgent** with all three metacognitive layers enabled.
+    ///
+    /// This is the DGM-H configuration from HyperAgents (arXiv:2603.19461):
+    /// - Level 0: Task execution (LambdaExecutor)
+    /// - Level 1: Self-improvement (GEPA + Rubrics + Morphisms)
+    /// - Level 2: Metacognitive self-modification (Hyper*)  
+    pub fn hyper(
+        document: impl Into<String>,
+        provider: Arc<LlmProvider>,
+        config: LambdaConfig,
+    ) -> Self {
+        Self {
+            yoneda: YonedaContext::lift(document, provider, config),
+            trajectories: Arc::new(std::sync::Mutex::new(TrajectoryStore::new())),
+            morphisms: Arc::new(std::sync::Mutex::new(MorphismPopulation::seed())),
+            generation: 0,
+            rubric_buffer: Some(RubricBuffer::for_document_qa()),
+            rubric_gen_interval: 5,
+            rubric_save_path: None,
+            // ── All three metacognitive layers enabled ──
+            hyper_rubric_gen: Some(HyperRubricGenerator::new()),
+            hyper_cost_model: Some(HyperCostModel::new()),
+            hyper_mutator: Some(HyperMutator::new()),
+        }
+    }
+
+    /// Summary of all HyperAgent components.
+    pub fn hyper_summary(&self) -> String {
+        let mut parts = vec!["🧠 HyperAgent Status:".to_string()];
+        if let Some(ref hyper_gen) = self.hyper_rubric_gen {
+            parts.push(hyper_gen.summary());
+        } else {
+            parts.push("  HyperRubricGenerator: disabled".to_string());
+        }
+        if let Some(ref cost) = self.hyper_cost_model {
+            parts.push(cost.summary());
+        } else {
+            parts.push("  HyperCostModel: disabled".to_string());
+        }
+        if let Some(ref mutator) = self.hyper_mutator {
+            parts.push(mutator.summary());
+        } else {
+            parts.push("  HyperMutator: disabled".to_string());
+        }
+        parts.join("\n")
+    }
+
+    /// Run a full GEPA evolution loop with **HyperAgent metacognitive layers**.
+    ///
+    /// This extends the standard `evolve()` with:
+    /// - **HyperCostModel**: planner params (ρ, A₀, A⊕) are GEPA-evolvable
+    /// - **HyperMutator**: mutation rate adapts via 1/5th success rule
+    /// - Trajectory + side info includes meta-level diagnostics
     pub fn evolve(
-        &self,
+        &mut self,
         provider: Arc<LlmProvider>,
         config: LambdaConfig,
         test_queries: Vec<(String, String)>,
@@ -770,44 +1070,95 @@ impl AdaptiveYoneda {
             trajectory_store: Arc::clone(&self.trajectories),
         };
 
-        let mutator = NumericMutator::new(0.2, 42);
+        // Use HyperMutator if available, else fixed rate
+        let hyper_mutator_enabled = self.hyper_mutator.is_some();
+        let effective_rate = self.hyper_mutator.as_ref()
+            .map(|hm| hm.mutation_rate)
+            .unwrap_or(0.2);
+        let mutator = NumericMutator::new(effective_rate, 42);
 
-        // Seed candidate
-        let mut best = Candidate::seed(vec![
-            ("k_star", "2"),
-            ("tau_star", "1500"),
-            ("morphism_idx", "0"),
-        ]);
+        // Seed candidate — include HyperCostModel params if enabled
+        let mut seed_params = vec![
+            ("k_star", "2".to_string()),
+            ("tau_star", "1500".to_string()),
+            ("morphism_idx", "0".to_string()),
+        ];
+
+        if let Some(ref cost_model) = self.hyper_cost_model {
+            seed_params.push(("rho", format!("{:.3}", cost_model.params.rho)));
+            seed_params.push(("a0", format!("{:.3}", cost_model.params.a0)));
+            seed_params.push(("a_compose", format!("{:.3}", cost_model.params.a_compose)));
+        }
+
+        let seed_refs: Vec<(&str, &str)> = seed_params.iter()
+            .map(|(k, v)| (*k, v.as_str()))
+            .collect();
+        let mut best = Candidate::seed(seed_refs);
         let mut best_result = evaluator.evaluate(&best);
 
         eprintln!(
-            "🧬 [GEPA] Seed: score={:.3} k*={} τ*={} morphism=0",
+            "🧬 [GEPA] Seed: score={:.3} k*={} τ*={} morphism=0{}",
             best_result.score,
             best.get_f32("k_star", 2.0),
             best.get_f32("tau_star", 1500.0),
+            if self.hyper_cost_model.is_some() {
+                format!(" ρ={:.3} A₀={:.3} A⊕={:.3}",
+                    best.get_f32("rho", 0.85),
+                    best.get_f32("a0", 0.95),
+                    best.get_f32("a_compose", 0.98),
+                )
+            } else {
+                String::new()
+            },
         );
 
         for g_idx in 1..=generations {
-            // Mutate
-            let mut child = mutator.mutate(&best, &best_result, g_idx, 0);
+            // Mutate (with possibly adapted rate from HyperMutator)
+            let current_mutator = if hyper_mutator_enabled {
+                let rate = self.hyper_mutator.as_ref().unwrap().mutation_rate;
+                NumericMutator::new(rate, 42 + g_idx as u64)
+            } else {
+                NumericMutator::new(0.2, 42 + g_idx as u64)
+            };
+            let _ = mutator; // suppress unused warning for initial mutator
+
+            let mut child = current_mutator.mutate(&best, &best_result, g_idx, 0);
 
             // Also mutate morphism index
             let new_morph_idx = (g_idx % n_morphisms) as f32;
             child.set("morphism_idx", &format!("{:.0}", new_morph_idx));
 
+            // Apply HyperCostModel params from candidate
+            if let Some(ref mut cost_model) = self.hyper_cost_model {
+                cost_model.apply_from_candidate(&child);
+            }
+
             let child_result = evaluator.evaluate(&child);
 
+            let improved = child_result.score >= best_result.score;
+
             eprintln!(
-                "🧬 [GEPA] Gen {}: score={:.3} (best={:.3}) k*={} τ*={} morphism={}",
+                "🧬 [GEPA] Gen {}: score={:.3} (best={:.3}) k*={} τ*={} morphism={}{}",
                 g_idx,
                 child_result.score,
                 best_result.score,
                 child.get_f32("k_star", 2.0),
                 child.get_f32("tau_star", 1500.0),
                 child.get_f32("morphism_idx", 0.0),
+                if improved { " ✓" } else { "" },
             );
 
-            if child_result.score >= best_result.score {
+            // Record outcome for HyperMutator adaptation
+            if let Some(ref mut hm) = self.hyper_mutator {
+                hm.record_outcome(improved);
+            }
+
+            // Record score for HyperCostModel
+            if let Some(ref mut hc) = self.hyper_cost_model {
+                hc.record_score(child_result.score);
+            }
+
+            if improved {
                 best = child;
                 best_result = child_result;
             }

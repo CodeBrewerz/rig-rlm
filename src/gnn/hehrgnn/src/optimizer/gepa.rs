@@ -1052,6 +1052,176 @@ pub async fn optimize_async(
     }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// HyperLlmMutator — Metacognitive self-modifying LLM reflection
+// ═══════════════════════════════════════════════════════════════
+
+/// HyperLlmMutator: wraps LlmMutator with metacognitive self-modification.
+///
+/// Tracks LLM vs NumericMutator success rates. When LLM suggestions
+/// consistently underperform random numeric mutations, the system
+/// rewrites the LLM's reflection prompt via Meta-Prompt Evolution.
+///
+/// ## Trigger
+/// When `llm_win_rate < 0.30` after `min_comparisons` rounds.
+///
+/// ## Evolution
+/// Calls the LLM with a meta-prompt showing:
+/// - The current reflection prompt
+/// - Examples of what the LLM suggested vs what worked
+/// - Instructions to rewrite the prompt for better suggestions
+pub struct HyperLlmMutator {
+    /// The underlying LLM mutator whose prompt we evolve.
+    pub llm: LlmMutator,
+    /// Numeric fallback for comparison.
+    pub numeric: NumericMutator,
+    /// Whether last LLM mutation beat the numeric one (pairs).
+    pub comparison_results: Vec<bool>,
+    /// Custom reflection prompt override (None = use default).
+    pub evolved_prompt_prefix: Option<String>,
+    /// How many comparisons before evolution can trigger.
+    pub min_comparisons: usize,
+    /// LLM win rate threshold below which we evolve.
+    pub win_rate_threshold: f64,
+    /// How many times we've evolved the prompt.
+    pub evolution_count: u32,
+    /// History of evolved prompts.
+    pub prompt_history: Vec<String>,
+}
+
+impl HyperLlmMutator {
+    /// Create from an existing LlmMutator.
+    pub fn new(llm: LlmMutator) -> Self {
+        Self {
+            llm,
+            numeric: NumericMutator::new(0.15, 42),
+            comparison_results: Vec::new(),
+            evolved_prompt_prefix: None,
+            min_comparisons: 5,
+            win_rate_threshold: 0.30,
+            evolution_count: 0,
+            prompt_history: Vec::new(),
+        }
+    }
+
+    /// Current LLM win rate.
+    pub fn llm_win_rate(&self) -> f64 {
+        if self.comparison_results.is_empty() {
+            return 0.5; // No data
+        }
+        let wins = self.comparison_results.iter().filter(|&&w| w).count();
+        wins as f64 / self.comparison_results.len() as f64
+    }
+
+    /// Whether the prompt needs evolution.
+    pub fn needs_evolution(&self) -> bool {
+        self.comparison_results.len() >= self.min_comparisons
+            && self.llm_win_rate() < self.win_rate_threshold
+    }
+
+    /// Race LLM vs Numeric: produces two children, evaluates both,
+    /// returns the winner and records the comparison.
+    pub async fn mutate_with_tracking(
+        &mut self,
+        parent: &Candidate,
+        eval_result: &EvalResult,
+        evaluator: &dyn Evaluator,
+        generation: usize,
+        parent_idx: usize,
+    ) -> Candidate {
+        // LLM mutation
+        let llm_child = self.llm
+            .mutate_async(parent, eval_result, generation, parent_idx)
+            .await;
+        let llm_eval = evaluator.evaluate(&llm_child);
+
+        // Numeric mutation
+        let num_child = self.numeric
+            .mutate(parent, eval_result, generation, parent_idx);
+        let num_eval = evaluator.evaluate(&num_child);
+
+        // Compare
+        let llm_wins = llm_eval.score >= num_eval.score;
+        self.comparison_results.push(llm_wins);
+        // Keep last 20 comparisons (sliding window)
+        if self.comparison_results.len() > 20 {
+            self.comparison_results.remove(0);
+        }
+
+        println!(
+            "  GEPA-H │ LLM={:.4} vs NUM={:.4} → {} │ win_rate={:.1}% ({}/{})",
+            llm_eval.score,
+            num_eval.score,
+            if llm_wins { "LLM ✅" } else { "NUM ✅" },
+            self.llm_win_rate() * 100.0,
+            self.comparison_results.iter().filter(|&&w| w).count(),
+            self.comparison_results.len(),
+        );
+
+        // Return the better child
+        if llm_wins { llm_child } else { num_child }
+    }
+
+    /// Build meta-evolution prompt to rewrite the LLM's reflection prompt.
+    pub fn build_meta_prompt(&self) -> String {
+        let current = self.evolved_prompt_prefix.as_deref()
+            .unwrap_or("(default: 'You are an expert optimization assistant for a fiduciary finance system.')");
+        let win_rate = self.llm_win_rate();
+        let total = self.comparison_results.len();
+
+        format!(
+            r#"You are a metacognitive optimizer architect.
+
+The LLM-guided GEPA mutator is underperforming:
+- LLM win rate vs random numeric: {:.1}% (threshold: {:.1}%)
+- Total comparisons: {}
+
+Current LLM reflection prompt prefix:
+"{}"
+
+Objective being optimized: "{}"
+
+Rewrite the reflection prompt prefix to make the LLM produce BETTER parameter suggestions.
+The prompt should:
+1. Be more specific about the optimization domain
+2. Include concrete reasoning strategies
+3. Emphasize which parameters interact and how
+4. Focus on incremental improvements rather than large jumps
+
+Output ONLY the new prompt prefix (1-3 sentences), no explanation:"#,
+            win_rate * 100.0,
+            self.win_rate_threshold * 100.0,
+            total,
+            current,
+            self.llm.objective,
+        )
+    }
+
+    /// Install a new evolved prompt prefix.
+    pub fn install_evolution(&mut self, new_prefix: String) {
+        self.evolution_count += 1;
+        self.prompt_history.push(new_prefix.clone());
+        self.evolved_prompt_prefix = Some(new_prefix);
+        // Reset comparison window
+        self.comparison_results.clear();
+        println!(
+            "  GEPA-H │ 🧬 Evolved LLM reflection prompt (v{}) — reset win tracking",
+            self.evolution_count
+        );
+    }
+
+    /// Summary for diagnostics.
+    pub fn summary(&self) -> String {
+        format!(
+            "HyperLlmMutator: win_rate={:.1}%, comparisons={}, evolutions={}, needs_evolve={}",
+            self.llm_win_rate() * 100.0,
+            self.comparison_results.len(),
+            self.evolution_count,
+            self.needs_evolution(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

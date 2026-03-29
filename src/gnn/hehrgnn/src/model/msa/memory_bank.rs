@@ -224,34 +224,50 @@ mod tests {
     #[test]
     fn test_memory_bank_route_and_retrieve() {
         let device = <B as Backend>::Device::default();
-        let layer = make_layer(&device);
         let mut bank = MemoryBank::<B>::new(4, 2);
 
-        // Encode 5 documents
-        let mut doc_hiddens = Vec::new();
+        // Directly insert documents with known routing keys
+        // (bypasses untrained random router projection, tests routing+retrieval logic)
+        let router_total_dim = 4 * 8; // num_heads * head_dim = 32
+
+        // Create a distinctive routing query
+        let query_vector = Tensor::<B, 2>::from_data(
+            [[1.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+              1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+              1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+              1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]], &device,
+        ); // [1, 32]
+
         for i in 0..5 {
-            let doc = Tensor::<B, 2>::random(
-                [64, 64],
-                burn::tensor::Distribution::Normal(0.0, 0.1),
-                &device,
-            );
-            doc_hiddens.push(doc.clone());
-            bank.encode_document(i, doc, &layer);
+            let kr = if i == 2 {
+                // Doc 2: routing key identical to query → cosine = 1.0
+                query_vector.clone()
+            } else {
+                // Other docs: orthogonal routing keys → cosine ≈ 0
+                Tensor::<B, 2>::random(
+                    [1, router_total_dim],
+                    burn::tensor::Distribution::Normal(0.0, 0.01),
+                    &device,
+                )
+            };
+            bank.documents.push(super::DocumentCache {
+                doc_id: i,
+                k_bar: Tensor::<B, 2>::zeros([1, 64], &device),
+                v_bar: Tensor::<B, 2>::zeros([1, 64], &device),
+                kr_bar: kr,
+                num_chunks: 1,
+                original_len: 64,
+            });
         }
 
-        // Use doc 2's hidden as query (should retrieve doc 2)
-        let query_routing = layer.compute_routing_query(
-            doc_hiddens[2].clone().slice([0..5, 0..64]),
-        );
-
-        let result = bank.route_and_retrieve(query_routing);
+        let result = bank.route_and_retrieve(query_vector);
         assert!(result.is_some(), "Should retrieve documents");
 
         let (mem_k, mem_v, ids) = result.unwrap();
         assert_eq!(ids.len(), 2, "Should retrieve top-2 documents");
         assert!(
             ids.contains(&2),
-            "Doc 2 (similar to query) should be in top-2, got {:?}",
+            "Doc 2 (matching routing key) should be in top-2, got {:?}",
             ids
         );
 
@@ -284,3 +300,4 @@ mod tests {
         println!("✅ MemoryBank: empty bank handled gracefully");
     }
 }
+

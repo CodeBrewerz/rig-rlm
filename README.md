@@ -1,8 +1,8 @@
 # rig-rlm
 
-Monadic AI agent with durable execution, MCP server, A2A protocol support, sandboxed Python, and DSPy-rs prompt optimization.
+Monadic AI agent with durable execution, MCP server, A2A protocol support, sandboxed Python, DSPy-rs prompt optimization, and self-learning via Category Theory + HyperAgents.
 
-**Stack:** [Rig](https://rig.rs) (LLM) · [Restate](https://restate.dev) (durable execution) · [rmcp](https://crates.io/crates/rmcp) (MCP server) · [A2A](https://a2aproject.github.io/A2A/) (agent-to-agent) · [agentgateway](https://github.com/agentgateway/agentgateway) (proxy) · [PyO3](https://pyo3.rs) (Python sandbox) · [DSPy-rs](https://crates.io/crates/dspy) (optimization) · [Turso](https://turso.tech) (persistence)
+**Stack:** [Rig](https://rig.rs) (LLM) · [Restate](https://restate.dev) (durable execution) · [rmcp](https://crates.io/crates/rmcp) (MCP server) · [A2A](https://a2aproject.github.io/A2A/) (agent-to-agent) · [agentgateway](https://github.com/agentgateway/agentgateway) (proxy) · [PyO3](https://pyo3.rs) (Python sandbox) · [DSPy-rs](https://crates.io/crates/dspy) (optimization) · [Turso](https://turso.tech) (persistence) · [Burn](https://burn.dev) (GNN)
 
 ## Architecture
 
@@ -32,6 +32,88 @@ Monadic AI agent with durable execution, MCP server, A2A protocol support, sandb
 │  Action::Log             → Evidence + OTEL           │
 └──────────────────────────────────────────────────────┘
 ```
+
+## Module Map
+
+The codebase is organized into several major subsystems. Each subsystem has its own detailed documentation.
+
+```
+rig-rlm/
+├── src/
+│   ├── monad/              # Free monad agent core
+│   │   ├── context.rs      #   AgentContext interpreter
+│   │   ├── monad.rs        #   Free monad definition
+│   │   ├── provider.rs     #   LLM provider (OpenRouter, OpenAI)
+│   │   ├── interaction.rs  #   agent_task_full() entry point
+│   │   └── ...             #   hooks, evidence, cost, normalize, otel
+│   │
+│   ├── lambda/             # λ-RLM + Yoneda + HyperAgent (→ LAMBDA_RLM.md)
+│   │   ├── executor.rs     #   Recursive Φ(P) = SPLIT → MAP → REDUCE
+│   │   ├── planner.rs      #   Analytical k* via Theorem 4
+│   │   ├── yoneda.rs       #   YonedaContext — lazy representable functor
+│   │   ├── profunctor.rs   #   TypedPipeline — type-safe C → D via dimap
+│   │   ├── adaptive_yoneda.rs # Self-learning + HyperCostModel + HyperMutator
+│   │   ├── rubric.rs       #   DR-Tulu rubrics + HyperRubricGenerator
+│   │   └── live_tests.rs   #   End-to-end tests with Trinity LLM
+│   │
+│   ├── gnn/hehrgnn/        # GNN platform + MSA (→ src/gnn/hehrgnn/README.md)
+│   │   ├── model/          #   GraphSAGE, RGCN/mHC, GAT, GPS Transformer
+│   │   ├── model/msa/      #   Memory Sparse Attention (MSA)
+│   │   ├── eval/           #   Fiduciary engine, probabilistic circuits
+│   │   └── optimizer/      #   GEPA self-improvement
+│   │
+│   ├── nuggets/            # Holographic memory (HRR vectors + disk-backed facts)
+│   │   ├── core.rs         #   AVX2-optimized HRR vector operations
+│   │   ├── shelf.rs        #   Nugget persistence and shelf management
+│   │   └── memory.rs       #   Nugget memory engine
+│   │
+│   ├── channels/           # Event channels (broadcast, WebSocket, Iggy)
+│   ├── sandbox/            # PyO3 Python sandbox
+│   └── ...                 # exec_policy, apply_patch, safety, etc.
+│
+├── LAMBDA_RLM.md           # Full developer guide for λ-RLM + HyperAgent
+└── README.md               # This file
+```
+
+## Self-Learning Stack — The Three Levels
+
+The system implements a **3-level self-improvement hierarchy** inspired by the [HyperAgents](https://arxiv.org/abs/2502.xxxxx) framework:
+
+```
+┌─────────────────── Level 2: Metacognitive (HyperAgent) ──────────┐
+│  HyperRubricGenerator: evolves its own rubric generation prompt   │
+│  HyperCostModel:       evolves planner params (ρ, A₀, A⊕) via GEPA│
+│  HyperMutator:         adapts mutation rate via 1/5th success rule│
+├──────────────────────────────────────────────────────────────────┤
+│  Level 1: Self-Improvement (DR-Tulu + GEPA)                      │
+│  RubricBuffer: persistent + adaptive + retired rubric lifecycle   │
+│  MorphismPopulation: ε-greedy selection of query morphisms        │
+│  TrajectoryStore: past (query, morphism, score) for co-evolution  │
+├──────────────────────────────────────────────────────────────────┤
+│  Level 0: Task Execution (λ-RLM)                                 │
+│  LambdaExecutor: recursive SPLIT → MAP → REDUCE                  │
+│  YonedaContext: lazy representable functor for massive documents   │
+│  TypedPipeline: Profunctor optics for type-safe C → D             │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**How it works:**
+
+| Level | What Improves | Signal |
+|-------|--------------|--------|
+| **0** | Task execution quality | LLM response to query |
+| **1** | How we evaluate + guide the task agent | Rubric scores, morphism fitness |
+| **2** | How we generate rubrics + tune mutation/planner | Discriminative ratio, success rate |
+
+```bash
+# Standard agent (Level 0 + 1):
+AdaptiveYoneda::with_rubrics(doc, provider, config)
+
+# Full HyperAgent (Level 0 + 1 + 2):
+AdaptiveYoneda::hyper(doc, provider, config)
+```
+
+See [`LAMBDA_RLM.md`](LAMBDA_RLM.md) for the complete developer guide.
 
 ## Quick Start
 
@@ -185,11 +267,6 @@ curl -s -m 30 -X POST http://localhost:9999/ \
   }'
 ```
 
-**Expected:**
-```json
-{"jsonrpc":"2.0","id":1,"result":{"status":{"state":"completed","message":{"role":"agent","parts":[{"kind":"text","text":"4"}]}}}}
-```
-
 #### Test: `message/send` — Coding Task (Python execution via PyO3)
 
 ```bash
@@ -209,191 +286,22 @@ curl -s -m 120 -X POST http://localhost:9999/ \
   }'
 ```
 
-**Expected:** `"text":"The sorted result is [3, 9, 10, 27, 38, 43, 82]"`
-
 > **Note:** Complex coding tasks may take 30–70s depending on the LLM. Use `-m 120` for generous timeouts.
-
-#### Test: `message/stream` — SSE Streaming
-
-```bash
-curl -s -m 120 -N -X POST http://localhost:9999/ \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 3,
-    "method": "message/stream",
-    "params": {
-      "message": {
-        "role": "user",
-        "parts": [{"kind": "text", "text": "Write a Python class for a binary search tree with insert and in-order traversal. Insert [50,30,70,20,40,60,80] and print the traversal."}]
-      },
-      "metadata": {}
-    }
-  }'
-```
-
-**Expected:** Two SSE events — `working` then `completed`:
-```
-data: {"jsonrpc":"2.0","id":3,"result":{"status":{"state":"working",...}}}
-
-data: {"jsonrpc":"2.0","id":3,"result":{"status":{"state":"completed","message":{"role":"agent","parts":[{"kind":"text","text":"In-order traversal: [20, 30, 40, 50, 60, 70, 80]"}]}}}}
-```
-
-#### Test: Error Handling — Unknown Method
-
-```bash
-curl -s -X POST http://localhost:9999/ \
-  -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":99,"method":"unknown/method","params":{}}'
-```
-
-**Expected:** JSON-RPC error `-32601 Method not found`:
-```json
-{"jsonrpc":"2.0","id":99,"error":{"code":-32601,"message":"Method not found: unknown/method"}}
-```
 
 ### 5. Agent Gateway — Proxied A2A & MCP
 
 [agentgateway](https://github.com/agentgateway/agentgateway) is a Linux Foundation data plane that proxies A2A and MCP traffic with security, observability, and governance.
 
-#### Prerequisites
-
-1. **Clone agentgateway** (if not already done):
-   ```bash
-   cd ~/dev-stuff
-   git clone https://github.com/agentgateway/agentgateway.git
-   ```
-
-2. **Build agentgateway** (requires protobuf — included in the Nix flake):
-   ```bash
-   cd ~/dev-stuff/agentgateway
-   cargo build --release
-   ```
-
-3. **Set up `.env`** in the rig-rlm directory:
-   ```bash
-   # .env (rig-rlm root)
-   OPENAI_API_KEY=sk-or-v1-...   # OpenRouter key (auto-detected by sk-or-* prefix)
-   ```
-
-#### A2A Proxying — Gateway fronts the A2A server
+Config files: [`agentgateway-a2a.yaml`](agentgateway-a2a.yaml) · [`agentgateway-mcp.yaml`](agentgateway-mcp.yaml) · [`agentgateway-mcp-multiplex.yaml`](agentgateway-mcp-multiplex.yaml)
 
 ```bash
-# Terminal 1: Start rig-rlm A2A server on port 9999
+# A2A proxying (direct → port 9999, gateway → port 3001)
 cargo run --bin a2a-server -- --port 9999
+cd ~/dev-stuff/agentgateway && cargo run -- -f ~/dev-stuff/rig-rlm/agentgateway-a2a.yaml
 
-# Terminal 2: Start agentgateway (proxies :9999 → :3001)
-cd ~/dev-stuff/agentgateway
-cargo run -- -f ~/dev-stuff/rig-rlm/agentgateway-a2a.yaml
+# MCP proxying (gateway spawns mcp-server automatically)
+cd ~/dev-stuff/agentgateway && cargo run -- -f ~/dev-stuff/rig-rlm/agentgateway-mcp.yaml
 ```
-
-**Test through the gateway (port 3001):**
-
-```bash
-# Agent card via gateway
-curl -s http://localhost:3001/.well-known/agent.json | python3 -m json.tool
-
-# message/send via gateway
-curl -s -m 120 -X POST http://localhost:3001/ \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "message/send",
-    "params": {
-      "message": {
-        "role": "user",
-        "parts": [{"kind": "text", "text": "What is 2+2?"}]
-      },
-      "metadata": {}
-    }
-  }'
-
-# message/stream SSE via gateway
-curl -s -m 120 -N -X POST http://localhost:3001/ \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 2,
-    "method": "message/stream",
-    "params": {
-      "message": {
-        "role": "user",
-        "parts": [{"kind": "text", "text": "What is 5+3?"}]
-      },
-      "metadata": {}
-    }
-  }'
-```
-
-#### MCP Proxying — Gateway spawns the MCP server via stdio
-
-```bash
-# Terminal 1: Start agentgateway (spawns mcp-server automatically)
-cd ~/dev-stuff/agentgateway
-cargo run -- -f ~/dev-stuff/rig-rlm/agentgateway-mcp.yaml
-
-# Terminal 2: Connect MCP Inspector
-npx @modelcontextprotocol/inspector
-# → URL: http://localhost:3001/mcp
-```
-
-> **Note:** If not using the Nix flake, set `LD_LIBRARY_PATH` for PyO3 before starting either server:
-> ```bash
-> export LD_LIBRARY_PATH="/path/to/python3.14/lib:$LD_LIBRARY_PATH"
-> ```
-
-Config files: [`agentgateway-a2a.yaml`](agentgateway-a2a.yaml) · [`agentgateway-mcp.yaml`](agentgateway-mcp.yaml)
-
-#### MCP Multiplexing — Multiple servers, one endpoint
-
-Federate multiple MCP servers behind a single agentgateway endpoint. Tools from all servers are automatically namespaced and accessible at one URL.
-
-A multiplexing config is included that combines:
-- **rig-rlm** — `run_task`, `execute_python`, `apply_patch`, `check_policy`
-- **@modelcontextprotocol/server-everything** — `echo`, `add`, `longRunningOperation`, etc.
-
-```bash
-# Terminal 1: Start agentgateway with multiplexed config
-cd ~/dev-stuff/agentgateway
-cargo run --release -- -f ~/dev-stuff/rig-rlm/agentgateway-mcp-multiplex.yaml
-
-# Terminal 2: Connect MCP Inspector
-npx @modelcontextprotocol/inspector
-# → Transport: Streamable HTTP
-# → URL: http://localhost:3001/mcp
-# → Click "Connect", then "List Tools"
-```
-
-You should see tools from **both** servers in a single tool list, automatically prefixed with the server name to avoid naming conflicts.
-
-Config file: [`agentgateway-mcp-multiplex.yaml`](agentgateway-mcp-multiplex.yaml)
-
-#### Gateway Policies
-
-All agentgateway configs include enterprise-grade policies:
-
-| Policy | A2A | MCP | What it does |
-|--------|-----|-----|-------------|
-| **Timeouts** | 120s | 60s | Request + backend timeout for agent/tool calls |
-| **Rate Limiting** | 10 req/min | 20 req/min | In-memory token-bucket rate limiter |
-| **Header Modification** | ✅ | ✅ | Adds `x-gateway`, `x-powered-by` headers |
-| **CORS** | ✅ | ✅ | Cross-origin access for Inspector/IDE |
-| **A2A Telemetry** | ✅ | — | Agent card URL rewriting + A2A metrics |
-| **MCP OAuth Auth** | — | 🔧 | OAuth token validation (commented out, ready to enable) |
-
-**To enable MCP OAuth authentication**, uncomment the `mcp_authentication` block in `agentgateway-mcp-multiplex.yaml` and configure your OAuth provider (Auth0, Keycloak, etc.):
-
-```yaml
-mcp_authentication:
-  issuer: https://your-idp.example.com
-  audiences: [rig-rlm-mcp]
-  jwks:
-    remote: https://your-idp.example.com/.well-known/jwks.json
-  mode: required
-```
-
-**OTEL Tracing** can be added as a frontend policy — the rig-rlm codebase already integrates LangFuse for LLM observability; gateway-level OTEL tracing adds spans for proxy/routing latency.
 
 ## Key Features
 
@@ -410,11 +318,15 @@ mcp_authentication:
 | Multi-agent | `monad/orchestrator.rs` | Sub-agent spawning with capability scoping |
 | Evidence trail | `monad/evidence.rs` | Auto-recorded proof of work |
 | OTEL + LangFuse | `monad/otel.rs` | Distributed tracing with enrichment |
-| **λ-RLM engine** | `lambda/` | Recursive long-context Map-Reduce (arXiv:2603.20105) |
+| **λ-RLM engine** | `lambda/executor.rs` | Recursive long-context Map-Reduce ([arXiv:2603.20105](https://arxiv.org/abs/2603.20105)) |
 | **Yoneda context** | `lambda/yoneda.rs` | Lazy representable functor for massive documents |
 | **Profunctor optics** | `lambda/profunctor.rs` | Type-safe `C → D` pipeline via `dimap` |
 | **Adaptive GEPA** | `lambda/adaptive_yoneda.rs` | Self-learning morphism evolution from trajectories |
-| **Evolving rubrics** | `lambda/rubric.rs` | DR-Tulu-style LLM-as-judge with adaptive criteria discovery |
+| **Evolving rubrics** | `lambda/rubric.rs` | DR-Tulu-style LLM-as-judge with adaptive criteria ([arXiv:2511.19399](https://arxiv.org/abs/2511.19399)) |
+| **HyperAgent** | `lambda/rubric.rs`, `adaptive_yoneda.rs` | Metacognitive self-modification (HyperRubricGenerator, HyperCostModel, HyperMutator) |
+| **HEHRGNN** | `gnn/hehrgnn/` | Heterogeneous GNN platform with 4 models + GEPA auto-tune |
+| **MSA** | `gnn/hehrgnn/src/model/msa/` | Memory Sparse Attention — trainable long-range attention |
+| **Nuggets** | `nuggets/` | Holographic memory with HRR vectors + disk-backed persistence |
 
 ### λ-RLM Engine — Recursive Long-Context Processing
 
@@ -426,6 +338,7 @@ The `lambda/` module implements the λ-RLM framework from [arXiv:2603.20105](htt
 - **Category theory** — Yoneda representable functors, Profunctor optics, query morphisms with verified laws
 - **Self-learning** — GEPA co-evolves execution parameters + query morphisms from past trajectories
 - **Evolving rubrics** — DR-Tulu-inspired LLM-as-judge scoring with adaptive rubric generation and zero-std retirement
+- **HyperAgent** — Metacognitive self-modification: the rubric generator can rewrite its own prompt, mutation rates self-adapt, planner params co-evolve
 
 ```bash
 # Quick test (no LLM required)
@@ -436,9 +349,28 @@ cargo test live_yoneda_representable_functor -- --ignored --nocapture
 
 # Full DR-Tulu evolving rubric lifecycle test
 cargo test live_evolving_rubric_reward -- --ignored --nocapture
+
+# Full HyperAgent metacognitive pipeline test
+cargo test live_hyperagent -- --ignored --nocapture
 ```
 
 **Full developer guide**: [`LAMBDA_RLM.md`](LAMBDA_RLM.md)
+
+### HEHRGNN — Graph Neural Network Platform
+
+The `gnn/hehrgnn/` sub-crate provides a heterogeneous GNN platform for relational graph intelligence, with 4 GNN models (GraphSAGE, RGCN/mHC, GAT, GPS Transformer), a fiduciary engine (18 action types), probabilistic circuits for calibrated risk, and GEPA auto-tuning.
+
+New: **Memory Sparse Attention (MSA)** in `model/msa/` provides trainable long-range attention with configurable routing, RoPE embeddings, and memory banks.
+
+```bash
+# Run all GNN tests
+cargo test -p hehrgnn
+
+# Run the full ensemble pipeline
+cargo test -p hehrgnn --test ensemble_pipeline_test -- --nocapture
+```
+
+**Full developer guide**: [`src/gnn/hehrgnn/README.md`](src/gnn/hehrgnn/README.md)
 
 ## Development Environment
 
@@ -459,11 +391,14 @@ The dev shell includes sccache, wild linker, and `LD_LIBRARY_PATH` for PyO3.
 ### Commands
 
 ```bash
-# Check (zero warnings)
+# Check
 cargo check
 
-# Test
+# Test (unit — no LLM)
 cargo test --lib
+
+# Test (live — requires OPENAI_API_KEY)
+cargo test lambda_live -- --ignored --nocapture
 
 # Lint
 cargo clippy --all-targets -- -D warnings
@@ -474,6 +409,15 @@ cargo fmt --all
 # Build agentgateway (from within the nix shell)
 cd ~/dev-stuff/agentgateway && cargo build --release
 ```
+
+## Cross-References
+
+| Document | What It Covers |
+|----------|---------------|
+| [`README.md`](README.md) | This file — project overview, entry points, usage |
+| [`LAMBDA_RLM.md`](LAMBDA_RLM.md) | λ-RLM engine, Yoneda, Profunctor, GEPA, DR-Tulu rubrics, HyperAgent |
+| [`src/gnn/hehrgnn/README.md`](src/gnn/hehrgnn/README.md) | HEHRGNN platform, GNN models, MSA, fiduciary engine, tests |
+| [`AGENTICA_IDEAS.md`](AGENTICA_IDEAS.md) | Research notes and future directions |
 
 ## License
 

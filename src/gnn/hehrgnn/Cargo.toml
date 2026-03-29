@@ -13,6 +13,14 @@ name = "hehrgnn-server"
 path = "src/server_main.rs"
 
 [[bin]]
+name = "msa_eval"
+path = "src/bin/msa_eval.rs"
+
+[[bin]]
+name = "msa_trinity"
+path = "src/bin/msa_trinity.rs"
+
+[[bin]]
 name = "rl_metrics"
 path = "src/bin/rl_metrics.rs"
 

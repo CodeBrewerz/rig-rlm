@@ -9,45 +9,43 @@
 ## Architecture Overview
 
 ```
-                    ┌─────────────────────────────────────────────┐
-                    │           AdaptiveYoneda (Self-Learning)     │
-                    │  ┌────────────┐    ┌──────────────────────┐ │
-                    │  │ Trajectory │    │ MorphismPopulation   │ │
-                    │  │ Store      │◄──►│ (ε-greedy selection) │ │
-                    │  └─────┬──────┘    └──────────┬───────────┘ │
-                    │        │                      │             │
-                    │        └──────────┬───────────┘             │
-                    │                   ▼                         │
-┌──────────┐    ┌───┴───────────────────────────────────────┐     │
-│  Caller  │    │         YonedaContext — y(P)                │     │
-│          │───►│  probe(q): y(P)(q)                         │     │
-│ Typed:   │    │  fmap(f, q): y(P)(f(q))                    │     │
-│  C → D   │    │  probe_typed(q, lmap, rmap): Q → R         │     │
-│ via      │    └──────────────────┬──────────────────────┘     │
-│ Profunctor│                      │                          │
-└──────────┘                      ▼                          │
-                    ┌──────────────────────────────┐          │
-                    │   lambda_rlm() — 5 Phases    │          │
-                    │  1. Preview (peek 500 tokens) │          │
-                    │  2. Task detection (1 LLM)    │          │
-                    │  3. Planning (0 LLM, pure)    │          │
-                    │  4. Cost estimation            │          │
-                    │  5. Execute Φ(P)               │          │
-                    └───────────┬──────────────────┘          │
-                                │                             │
-                    ┌───────────▼──────────────────┐          │
-                    │   LambdaExecutor — Φ(P)      │          │
-                    │                              │          │
-                    │  if |P| ≤ τ* → leaf M(P)     │          │
-                    │  else:                       │          │
-                    │    SPLIT(P, k*)              │          │
-                    │    FILTER (optional)         │          │
-                    │    MAP(Φ) — parallel join_all │          │
-                    │    REDUCE(⊕)                 │          │
-                    └──────────────────────────────┘          │
-                    │                                         │
-                    │  GEPA co-evolves k*, τ*, morphisms ────►│
-                    └─────────────────────────────────────────┘
+┌───────────── Level 2: HyperAgent (Metacognitive) ──────────────┐
+│  HyperRubricGenerator: evolves its own rubric generation prompt │
+│  HyperCostModel:       evolves planner params (ρ, A₀, A⊕)     │
+│  HyperMutator:         adapts mutation rate via 1/5th rule      │
+├────────────────────────────────────────────────────────────────┤
+│  Level 1: Self-Improvement (GEPA + DR-Tulu)                    │
+│                                                                 │
+│  ┌────────────┐    ┌──────────────────────┐    ┌────────────┐  │
+│  │ Trajectory │    │ MorphismPopulation   │    │  Rubric    │  │
+│  │ Store      │◄──►│ (ε-greedy selection) │    │  Buffer    │  │
+│  └─────┬──────┘    └──────────┬───────────┘    │  (DR-Tulu) │  │
+│        └──────────┬───────────┘                └─────┬──────┘  │
+│                   ▼                                  │         │
+├───────────── Level 0: Task Execution ────────────────┤─────────┤
+│                                                      │         │
+│  ┌─────────────────────────────────────────────┐     │         │
+│  │         YonedaContext — y(P)                 │     │         │
+│  │  probe(q): y(P)(q)                          │     │         │
+│  │  fmap(f, q): y(P)(f(q))                     │     │         │
+│  │  probe_typed(q, lmap, rmap): Q → R          │     │         │
+│  └──────────────────┬──────────────────────┘     │         │
+│                     ▼                            │         │
+│  ┌──────────────────────────────┐                │         │
+│  │   lambda_rlm() — 5 Phases   │    ◄── scored by┘         │
+│  │  1. Preview (peek 500)      │                            │
+│  │  2. Task detection (1 LLM)  │                            │
+│  │  3. Planning (0 LLM, pure)  │                            │
+│  │  4. Cost estimation         │                            │
+│  │  5. Execute Φ(P)            │                            │
+│  └───────────┬─────────────────┘                            │
+│              ▼                                               │
+│  ┌───────────────────────────────┐                           │
+│  │   LambdaExecutor — Φ(P)      │                           │
+│  │  if |P| ≤ τ* → leaf M(P)    │                           │
+│  │  else: SPLIT → MAP → REDUCE │                           │
+│  └───────────────────────────────┘                           │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ## Quick Start
@@ -133,8 +131,23 @@ cargo test live_open_coding_with_hitl_iteration -- --ignored --nocapture
 # 8. Full loop — read → analyze → code → "make it dynamic" → iterate
 cargo test live_read_analyze_code_then_iterate -- --ignored --nocapture
 
-# 9. Evolving rubric reward — LLM-as-judge scoring with adaptive criteria
+# 9. DR-Tulu evolving rubric — LLM-as-judge with adaptive criteria lifecycle
 cargo test live_evolving_rubric_reward -- --ignored --nocapture
+
+# 10. HyperAgent metacognitive — simulated system prompt evolution
+cargo test live_hyperagent_metacognitive_pipeline -- --ignored --nocapture
+
+# 11-15. Isolated Metacognitive Modules (Testing individual Hyper* behaviors)
+cargo test live_hyper_prompt_evolver -- --ignored --nocapture
+cargo test live_hyper_llm_mutator -- --ignored --nocapture
+cargo test live_hyper_router -- --ignored --nocapture
+cargo test live_hyper_fiduciary -- --ignored --nocapture
+cargo test live_hyper_exec_policy -- --ignored --nocapture
+
+# 16. TRUE E2E Metacognitive Loop (ALL 5 modules, real Trinity signals, no hardcoding)
+# Runs the full system: real probes → real LLM → dynamic rubric generation → 
+# auto-adjusted weights → router load balancing → prompt evolution.
+cargo test live_e2e_all_hyper -- --ignored --nocapture
 ```
 
 ### GEPA Optimization Daemon
@@ -157,8 +170,8 @@ cargo run --bin optimize_rlm
 | `templates.rs` | Leaf/synthesis prompt templates per task type |
 | `yoneda.rs` | Yoneda Lemma: `YonedaContext`, `QueryMorphism`, `yoneda_equivalence()`, `check_naturality()` |
 | `profunctor.rs` | Profunctor optics: `TypedPipeline<C, D>`, `AsyncProfunctor`, `dimap_async` |
-| `adaptive_yoneda.rs` | Self-learning loop: `AdaptiveYoneda`, `TrajectoryStore`, `MorphismPopulation`, GEPA co-evolution |
-| `rubric.rs` | Evolving rubric reward: `RubricItem`, `RubricBuffer`, LLM-as-judge scoring, adaptive rubric generation (DR-Tulu inspired) |
+| `adaptive_yoneda.rs` | Self-learning: `AdaptiveYoneda`, `TrajectoryStore`, `MorphismPopulation`, GEPA co-evolution, **`HyperCostModel`**, **`HyperMutator`** |
+| `rubric.rs` | Evolving rubric reward: `RubricItem`, `RubricBuffer`, LLM-as-judge, adaptive generation (DR-Tulu), **`HyperRubricGenerator`** |
 | `gepa_rlm.rs` | GEPA evaluator: `LambdaExecutorEvaluator` — uses `planner::plan()` for dynamic depth |
 | `effects.rs` | Algebraic effects prototype for LLM interaction |
 | `live_tests.rs` | All integration tests (pure + live LLM) |
@@ -181,14 +194,92 @@ let result = y.fmap(&morphism, "summarize").await?;
 let pipeline = TypedPipeline::new(provider, config, query, lmap, rmap);
 let report: Report = pipeline.execute(&request).await?;
 
-// Self-learning adaptive probe
-let mut adaptive = AdaptiveYoneda::new(document, provider, config);
-let (result, score) = adaptive.adaptive_probe("query", scorer).await?;
-
-// Self-learning with evolving rubric scoring (DR-Tulu style)
+// Self-learning adaptive probe (Level 1)
 let mut adaptive = AdaptiveYoneda::with_rubrics(document, provider, config);
 let (result, score, per_rubric) = adaptive.adaptive_probe_with_rubrics("query").await?;
-// per_rubric: {"Factual Recall" => 0.85, "Answer Relevance" => 0.90, ...}
+
+// Full HyperAgent (Level 0 + 1 + 2)
+let mut agent = AdaptiveYoneda::hyper(document, provider, config);
+let (result, score, per_rubric) = agent.adaptive_probe_with_rubrics("query").await?;
+println!("{}", agent.hyper_summary());
+```
+
+## HyperAgent — Level 2 Metacognitive Self-Modification
+
+The HyperAgent layer transforms λ-RLM from a DGM (Dynamic Generative Model) into a **DGM-H** — a system that can **improve its own improvement process**.
+
+### The Three Hyper Components
+
+| Component | File | What It Evolves | Trigger Signal |
+|-----------|------|----------------|----------------|
+| **HyperRubricGenerator** | `rubric.rs` | The rubric generation prompt | `discriminative_ratio < 0.50` |
+| **HyperCostModel** | `adaptive_yoneda.rs` | Planner params: ρ, A₀, A⊕ | GEPA fitness scores |
+| **HyperMutator** | `adaptive_yoneda.rs` | Mutation rate (0.02–0.80) | 1/5th success rule |
+
+### HyperRubricGenerator — Self-Modifying Rubric Prompt
+
+When the rubric buffer's `discriminative_ratio` drops below 0.50, the system:
+
+1. Collects performance metrics: `avg_std`, `zero_rubrics_ratio`, `discriminative_ratio`
+2. Gathers examples of retired (non-discriminative) rubrics
+3. Calls the LLM with `HYPER_EVOLVE_PROMPT` + current prompt + metrics
+4. The LLM rewrites the generation prompt to produce more discriminative rubrics
+5. The new prompt is installed as `v{n+1}` and all future rubric generation uses it
+
+```
+v0 (hardcoded prompt, 935 chars)
+  → generates rubrics → disc_ratio=0.25 → BAD
+  → metacognitive trigger fires
+  → LLM rewrites prompt
+v1 (LLM-evolved prompt, 1234 chars)
+  → generates rubrics → disc_ratio=0.67 → GOOD
+```
+
+Verified in the live test (`live_hyperagent`):
+```
+Scores: [0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.12, 0.20, 0.10]
+                                                 ↑ v0→v1 evolution here
+```
+
+### HyperCostModel — Evolving Planner Parameters
+
+Makes the planner's cost parameters part of the GEPA candidate space:
+
+| Parameter | Range | Default | Purpose |
+|-----------|-------|---------|---------|
+| `ρ` | [0.5, 0.99] | 0.85 | Token retention per decomposition |
+| `A₀` | [0.7, 1.0] | 0.95 | Base accuracy of a single M call |
+| `A⊕` | [0.8, 1.0] | 0.98 | Accuracy of REDUCE composition |
+
+### HyperMutator — Adaptive Mutation Rate
+
+Uses the **1/5th success rule** from Evolution Strategy theory:
+
+```
+if success_rate > 0.20: rate *= 1.2   (more exploration)
+if success_rate < 0.20: rate *= 0.83  (more exploitation)
+rate ∈ [0.02, 0.80]
+```
+
+### Usage
+
+```rust
+// Create full HyperAgent (all three layers)
+let mut agent = AdaptiveYoneda::hyper(document, provider, config);
+
+// Customize thresholds
+if let Some(ref mut hyper_gen) = agent.hyper_rubric_gen {
+    hyper_gen.discriminative_threshold = 0.40;
+    hyper_gen.min_generations_before_evolve = 3;
+}
+
+// Run probes — metacognitive layers activate automatically
+for query in queries {
+    let (result, score, per_rubric) = agent.adaptive_probe_with_rubrics(query).await?;
+}
+
+// Inspect metacognitive state
+println!("{}", agent.hyper_summary());
 ```
 
 ## Category Theory Guide
@@ -204,24 +295,15 @@ Nat(Hom(A, −), F) ≅ F(A)
 - `probe(q)` = evaluate `y(P)` on a query object → `y(P)(q)`
 - `fmap(f, q)` = evaluate `y(P)` on a query morphism → `y(P)(f(q))`
 - **Full Faithfulness**: `yoneda_equivalence(P₁, P₂, queries, sim, threshold)`
-  - Two documents are semantically isomorphic iff they produce the same results for all queries
 - **Naturality**: `check_naturality(P, q, f, transform, sim)`
-  - Verifies `probe(f(q)) ≈ transform(probe(q))`
 
 ### QueryMorphism — Category of Queries
 
 ```rust
-// Identity
 let id = QueryMorphism::identity();       // id(q) = q
-
-// Named morphism
 let refine = QueryMorphism::new("focus_science",
     |q| format!("{} Focus on science.", q));
-
-// Composition (associative)
 let composed = g.compose(f);              // (g ∘ f)(q) = g(f(q))
-
-// Functorial evaluation
 let result = yoneda.fmap(&composed, base_query).await?;
 ```
 
@@ -231,16 +313,10 @@ let result = yoneda.fmap(&composed, base_query).await?;
 lmap          Φ (Hylomorphism)        rmap
 C ────────→ String ──────────→ String ────────→ D
   contra-                                covariant
-  variant                                
+  variant
 ```
 
-- `lmap: &C → String` — serialize domain input to prompt (contravariant)
-- `rmap: String → D` — parse LLM output to domain type (covariant)
-- Composition `rmap ∘ Φ ∘ lmap` is type-safe end-to-end
-
 ### Left Kan Extension — Extrapolation
-
-The `AdaptiveYoneda` implements a Left Kan Extension:
 
 ```
     Observed ──J──→ AllQueries
@@ -251,21 +327,15 @@ The `AdaptiveYoneda` implements a Left Kan Extension:
       Set             Set
 ```
 
-Where `F(q) = best_trajectory_result(q)` on observed queries, and
-`Lan_J F(q') ≈ F(nearest(q'))` for unseen queries.
-
 ### Evolving Rubric Reward — LLM-as-Judge (DR-Tulu)
 
-Inspired by DR-Tulu (arXiv:2511.19399), the rubric system replaces hardcoded
-scoring with an **evolving, LLM-judged evaluation** that discovers task-specific
-quality dimensions automatically.
+Inspired by DR-Tulu ([arXiv:2511.19399](https://arxiv.org/abs/2511.19399)), the rubric system replaces hardcoded scoring with an **evolving, LLM-judged evaluation**.
 
 ```
 ┌──────────────────── Rubric Buffer ────────────────────┐
 │                                                        │
 │  Persistent Rubrics ─── always scored ──→  Weighted    │
-│  (Factual Recall,                          Reward      │
-│   Answer Relevance,                           │        │
+│  (Factual Recall, Answer Relevance,        Reward      │
 │   Completeness)                               │        │
 │                                               │        │
 │  Active Adaptive  ──── scored + filtered ──→  ↑        │
@@ -273,15 +343,11 @@ quality dimensions automatically.
 │                     filter_and_retire()                 │
 │  Inactive Adaptive ── zero-std retired ──→  ∅          │
 │                                                        │
+│           ↓ (metrics fed to Level 2)                   │
+│  HyperRubricGenerator ── rewrites generation prompt    │
+│  when disc_ratio < 0.50                                │
 └────────────────────────────────────────────────────────┘
-         │                              │
-         ▼                              ▼
-   LLM-as-Judge                  Rubric Generator
-   score 0–2 per criterion       compare N responses
-   → normalize to [0,1]          → find discriminative criteria
 ```
-
-**3-layer lifecycle** (mirrors DR-Tulu's `rubric_buffer`):
 
 | Layer | Description | Action |
 |-------|-------------|--------|
@@ -289,82 +355,17 @@ quality dimensions automatically.
 | **Active** | LLM-discovered criteria | Scored, tracked for std |
 | **Inactive** | Non-discriminative (std ≈ 0) | Retired, no longer scored |
 
-**Usage:**
-
-```rust
-// Create with evolving rubrics (3 default persistent rubrics)
-let mut adaptive = AdaptiveYoneda::with_rubrics(document, provider, config);
-adaptive.rubric_gen_interval = 3;  // generate new rubrics every 3 probes
-
-// Probe — scores via LLM judge, returns per-rubric breakdown
-let (result, score, per_rubric) = adaptive.adaptive_probe_with_rubrics("query").await?;
-// per_rubric: {"Factual Recall" => 0.5, "Answer Relevance" => 0.75, ...}
-
-// Custom rubric buffer
-let mut buf = RubricBuffer::default();
-buf.persistent.push(RubricItem::persistent("Code Quality", "Output compiles and follows idioms"));
-buf.persistent.push(RubricItem::persistent("Correctness", "Logic is sound and handles edge cases"));
-let mut adaptive = AdaptiveYoneda::with_custom_rubrics(doc, provider, config, buf);
-```
-
 **Automatic evolution loop** (runs inside `adaptive_probe_with_rubrics`):
 
-1. **Score**: LLM judge evaluates response against ALL active rubrics → `{"score": 0-2}` per criterion
+1. **Score**: LLM judge evaluates response against ALL active rubrics → `{"score": 0-2}`
 2. **Record**: Per-rubric scores tracked for std computation
-3. **Z-Score**: Compute normalized advantage `(score - mean) / std * weight` per rubric
+3. **Z-Score**: Normalized advantage `(score - mean) / std * weight`
 4. **Metrics**: Emit `RubricMetrics` (avg_mean, avg_std, zero_ratio, discriminative_ratio)
-5. **Generate** (every `rubric_gen_interval` probes): LLM compares recent responses → generates positive/negative adaptive rubrics
-6. **Retire** (every 3 probes): Zero-std rubrics → inactive (non-discriminative = useless)
-7. **Save**: Auto-save rubric buffer to disk after retirement (if `rubric_save_path` set)
-8. **Cap**: Active adaptive rubrics capped at `max_active` (default 5)
-
-**Disk persistence** — rubric knowledge survives restarts:
-
-```rust
-// Save (atomic write: tmp file + rename)
-buffer.save("rubrics.json")?;
-
-// Load (returns None if file missing)
-let buffer = RubricBuffer::load("rubrics.json");
-
-// Load or fall back to defaults
-let buffer = RubricBuffer::load_or_default("rubrics.json");
-
-// Auto-save after each retirement cycle
-adaptive.rubric_save_path = Some("rubrics.json".into());
-```
-
-**Structured metrics** (mirrors DR-Tulu's wandb logging):
-
-```rust
-let m = buffer.metrics();
-// RubricMetrics { avg_mean=0.167, avg_std=0.226, zero_ratio=0.00,
-//                 discrim_ratio=1.00, obs=21, P/A/I=3/2/1 }
-```
-
-| Metric | Description |
-|--------|-------------|
-| `avg_mean` | Average of per-rubric mean scores |
-| `avg_std` | Average of per-rubric stds (higher = more discriminative) |
-| `zero_rubrics_ratio` | Fraction with mean=0 AND std=0 (useless) |
-| `discriminative_ratio` | Fraction with std > 0.01 (actually useful) |
-
-**Z-score normalization** (per-rubric advantage):
-
-```rust
-// Raw: high-mean rubrics dominate
-let raw_score = 0.167;
-// Z-normalized: each rubric equally influential
-let z_advantage = buffer.z_score_normalize(&per_rubric_scores);
-// z_advantage > 0 means above-average, < 0 means below-average
-```
-
-**Category theory framing:**
-
-- **Criterion Category** `Crit` — objects are rubric items
-- **Judge Functor** `J: Crit → [0,1]` — LLM scores each criterion
-- **Natural Transformation** `η_t → η_{t+1}` — each generation refines scoring criteria
-- **Quotient** `r₁ ~ r₂ iff std(J(r)) = 0` — non-discriminative rubrics identified to zero object
+5. **Generate** (every N probes): LLM compares recent responses → new rubrics
+6. **Retire** (every 3 probes): Zero-std rubrics → inactive
+7. **Meta-Evolve** (disc_ratio < 0.50): HyperRubricGenerator rewrites its own prompt
+8. **Save**: Auto-save to disk (if `rubric_save_path` set)
+9. **Cap**: Active adaptive rubrics capped at `max_active` (default 5)
 
 ## Execution Parameters
 
@@ -375,20 +376,13 @@ let z_advantage = buffer.z_score_normalize(&per_rubric_scores);
 | `context_window` | 32,000 | Model context window K (tokens) |
 | `accuracy_target` | 0.80 | Target accuracy α ∈ (0, 1] |
 | `cost_params.c_invoke` | 1.0 | Cost per leaf M invocation |
-| `cost_params.c_compose` | 0.0 | Cost per REDUCE composition (0 = symbolic, free) |
+| `cost_params.c_compose` | 0.0 | Cost per REDUCE composition |
 
 ### Analytical Planning (Theorem 4)
-
-The planner computes optimal k* analytically:
 
 ```
 k* = ⌈√(n · c_invoke / c_compose)⌉     (when c_compose > 0)
 k* = ⌈n / K⌉                            (when c_compose ≈ 0, symbolic)
-```
-
-Then validates the accuracy constraint:
-```
-A(K)^d · A_⊕^d ≥ α                      (loop increments k* until satisfied)
 ```
 
 ### Task Types
@@ -405,10 +399,6 @@ A(K)^d · A_⊕^d ≥ α                      (loop increments k* until satisfie
 
 ### Rate Limit (429)
 
-```
-Rate limit exceeded: free-models-per-day
-```
-
 **Fix**: Add $10 credits to OpenRouter, or switch to a paid model:
 ```bash
 RIG_RLM_MODEL=google/gemini-2.5-flash-8b
@@ -416,17 +406,16 @@ RIG_RLM_MODEL=google/gemini-2.5-flash-8b
 
 ### Python LD_LIBRARY_PATH
 
-```
-error while loading shared libraries: libpython3.xx.so
-```
-
-**Fix**: Set the library path:
 ```bash
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))"):$LD_LIBRARY_PATH
 ```
 
 Or use the Nix flake which sets this automatically.
 
-### Compiler Warnings
+## Cross-References
 
-The `nuggets/core.rs` module has persistent `unsafe` warnings from AVX2 intrinsics. These are harmless (the unsafe blocks exist at the function level) and will be resolved when the crate migrates to Rust 2024 edition's stricter unsafe scoping.
+| Document | What It Covers |
+|----------|---------------|
+| [`README.md`](README.md) | Project overview, entry points, usage, deployment |
+| [`LAMBDA_RLM.md`](LAMBDA_RLM.md) | This file — λ-RLM engine, Yoneda, HyperAgent |
+| [`src/gnn/hehrgnn/README.md`](src/gnn/hehrgnn/README.md) | HEHRGNN platform, GNN models, MSA, fiduciary engine |
