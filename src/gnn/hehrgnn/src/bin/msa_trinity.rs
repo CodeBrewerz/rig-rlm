@@ -100,9 +100,12 @@ async fn ask_trinity(client: &Client, api_key: &str, context: &str, question: &s
 
 use burn::tensor::ElementConversion;
 
-fn newton_schulz<B: Backend>(mut x: Tensor<B, 2>) -> Tensor<B, 2> {
+/// Standard Newton-Schulz polar decomposition (degree-3, 5 iterations).
+/// Kept as baseline for comparison. Uses `p(x) = 1.5x - 0.5x³`.
+#[allow(dead_code)]
+fn newton_schulz_standard<B: Backend>(mut x: Tensor<B, 2>) -> Tensor<B, 2> {
     let [m, n] = x.dims();
-    let norm = (x.clone().powf_scalar(2.0).sum().into_scalar().elem::<f32>() / (std::cmp::max(m, n) as f32)).sqrt() + 1e-8;
+    let norm = (x.clone().powf_scalar(2.0).sum().into_scalar().elem::<f32>()).sqrt() + 1e-8;
     x = x.mul_scalar(1.0 / norm);
     for _ in 0..5 {
         if m > n {
@@ -116,6 +119,86 @@ fn newton_schulz<B: Backend>(mut x: Tensor<B, 2>) -> Tensor<B, 2> {
         }
     }
     x
+}
+
+/// **Stabilized Gram Newton-Schulz** polar decomposition (degree-3, 5 iterations).
+///
+/// From: Dao AI Lab, "Gram Newton-Schulz: A Fast, Hardware-Aware Newton-Schulz Algorithm"
+///       <https://dao-lab.ai/blog/2026/gram-newton-schulz/>
+///
+/// Instead of iterating on the full n×m rectangular matrix X,
+/// iterates on the small n×n symmetric Gram matrix R = XX^T.
+///
+/// For TEON's 2048×1024 stacked momentum tensors:
+///   Standard: 10 rectangular GEMMs (2048×1024 × 1024×2048 each iteration)
+///   Gram:     2 rectangular (pre + post) + cheap 2048×2048 symmetric ops
+///             + 2 extra rectangular at restart = 4 total rectangular GEMMs
+///
+/// Uses a "restart" at iteration 3 to prevent numerical instability from
+/// spurious negative eigenvalues accumulating in the Gram matrix.
+fn gram_newton_schulz<B: Backend>(mut x: Tensor<B, 2>) -> Tensor<B, 2> {
+    let [m, n] = x.dims();
+    let transposed = n < m;
+
+    if transposed {
+        x = x.transpose();
+    }
+    let [rows, _cols] = x.dims();
+
+    // 1. Normalize: X ← X / (‖X‖_F + ε)
+    let norm = (x.clone().powf_scalar(2.0).sum().into_scalar().elem::<f32>()).sqrt() + 1e-8;
+    x = x.mul_scalar(1.0 / norm);
+
+    // 2. Form Gram matrix: R₀ = X·X^T  (n×n, symmetric — 1 rectangular GEMM)
+    let mut r = x.clone().matmul(x.clone().transpose());
+
+    // 3. Q₀ = I
+    let device = r.device();
+    let mut q = Tensor::<B, 2>::eye(rows, &device);
+
+    // Degree-3 coefficients: p(x) = 1.5x - 0.5x³ → a=1.5, b=-0.5, c=0
+    let a: f32 = 1.5;
+    let b: f32 = -0.5;
+    // c = 0, so we skip the R² term entirely
+
+    // 4. Iterate (5 steps with restart at step 3)
+    for t in 1..=5 {
+        // RESTART at iteration 3 for numerical stability
+        if t == 3 {
+            // X ← Q · X  (1 rectangular GEMM)
+            x = q.matmul(x);
+            // R ← X · X^T  (1 rectangular GEMM — recompute Gram)
+            r = x.clone().matmul(x.clone().transpose());
+            // Q ← I (reset accumulator)
+            q = Tensor::<B, 2>::eye(rows, &device);
+        }
+
+        // Z = b·R + c·R²  (c=0 for degree-3, so Z = b·R)
+        let z = r.clone().mul_scalar(b);
+
+        // Q ← Q·Z + a·Q
+        let qz = q.clone().matmul(z.clone());
+        q = q.mul_scalar(a).add(qz);
+
+        // RZ = R·Z + a·R
+        let rz = r.clone().matmul(z.clone()).add(r.clone().mul_scalar(a));
+
+        // R = Z·RZ + a·RZ
+        r = z.matmul(rz.clone()).add(rz.mul_scalar(a));
+    }
+
+    // 5. Final: X ← Q · X  (1 rectangular GEMM)
+    x = q.matmul(x);
+
+    if transposed {
+        x = x.transpose();
+    }
+    x
+}
+
+/// The default Newton-Schulz used by TEON — now Gram NS for speed.
+fn newton_schulz<B: Backend>(x: Tensor<B, 2>) -> Tensor<B, 2> {
+    gram_newton_schulz(x)
 }
 
 struct TeonMapper<B: AutodiffBackend> {
