@@ -30,6 +30,7 @@ pub mod gepa_rlm;
 pub mod profunctor;
 pub mod adaptive_yoneda;
 pub mod rubric;
+pub mod harness;
 
 #[cfg(test)]
 
@@ -45,6 +46,7 @@ pub use yoneda::{YonedaContext, QueryMorphism, YonedaEquivalence, yoneda_equival
 pub use profunctor::{TypedPipeline, AsyncProfunctor, Profunctor};
 pub use adaptive_yoneda::{AdaptiveYoneda, TrajectoryStore, MorphismPopulation, EvolutionResult, HyperCostModel, HyperMutator};
 pub use rubric::{RubricItem, RubricType, RubricBuffer, RubricMetrics, RetirementReport, HyperRubricGenerator};
+pub use harness::{EnvironmentSnapshot, MarkerGenerator, MarkedCommand, CompletionGate, StructuredStep, HarnessConfig, HarnessGenes, HarnessEvolver};
 
 // ─── Configuration ──────────────────────────────────────────────────
 

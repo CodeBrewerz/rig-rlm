@@ -287,15 +287,23 @@ impl LlmProvider {
     /// Used by `llm_query()` in the sandbox: generated code calls
     /// `llm_query("summarize this")` → routes here → returns LLM text.
     pub async fn complete(&self, prompt: &str) -> Result<String> {
+        self.complete_with_usage(prompt)
+            .await
+            .map(|(text, _usage)| text)
+    }
+
+    /// Single-prompt completion that also returns token usage.
+    ///
+    /// Used by `AdaptiveYoneda` to track per-probe token costs for
+    /// GEPA fitness evaluation (`score / cost` instead of just `score`).
+    pub async fn complete_with_usage(&self, prompt: &str) -> Result<(String, super::otel::TokenUsage)> {
         let mut history = ConversationHistory::new();
         history.push(super::history::HistoryMessage {
             role: super::action::Role::User,
             content: std::borrow::Cow::Owned(prompt.to_string()),
             attachments: vec![],
         });
-        self.chat(&history, &super::otel::TraceContext::new())
-            .await
-            .map(|(text, _usage)| text)
+        self.chat(&history, &super::otel::TraceContext::new()).await
     }
 
     /// Get the model name.

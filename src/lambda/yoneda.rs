@@ -160,17 +160,43 @@ impl YonedaContext {
     /// The Yoneda Lemma guarantees that the collection of all such evaluations
     /// determines `P` up to isomorphism.
     pub async fn probe(&self, query: &str) -> Result<String> {
+        self.probe_with_usage(query).await.map(|(text, _)| text)
+    }
+
+    /// Probe with token usage tracking.
+    ///
+    /// Returns `(result_text, TokenUsage)` so callers can record per-probe
+    /// token costs for GEPA fitness evaluation (Meta-Harness per-step tracking).
+    pub async fn probe_with_usage(&self, query: &str) -> Result<(String, crate::monad::otel::TokenUsage)> {
         eprintln!(
             "🧿 [Yoneda] y(P)(q): probing representable functor ({} chars) with query: {:?}",
             self.document.len(),
             query
         );
         let timer = std::time::Instant::now();
-        
-        let result = lambda_rlm(
-            &self.document, 
-            query, 
-            Arc::clone(&self.provider), 
+
+        // For short documents (fits in context window), use complete_with_usage directly
+        let n = super::combinators::token_count(&self.document);
+        if n <= self.config.context_window {
+            let prompt = format!("{}\n\n{}", self.document, query);
+            let result = self.provider.complete_with_usage(&prompt).await;
+            match &result {
+                Ok((text, usage)) => eprintln!(
+                    "🧿 [Yoneda] Evaluation complete in {:.2}s ({}in/{}out tokens)",
+                    timer.elapsed().as_secs_f64(),
+                    usage.input_tokens.unwrap_or(0),
+                    usage.output_tokens.unwrap_or(0),
+                ),
+                Err(e) => eprintln!("🧿 [Yoneda] Evaluation failed: {}", e),
+            }
+            return result;
+        }
+
+        // For long documents, use lambda_rlm (multi-step — token usage is aggregate)
+        let result = super::lambda_rlm(
+            &self.document,
+            query,
+            Arc::clone(&self.provider),
             self.config.clone()
         ).await;
 
@@ -179,7 +205,8 @@ impl YonedaContext {
             Err(e) => eprintln!("🧿 [Yoneda] Evaluation failed: {}", e),
         }
 
-        result
+        // For multi-step λ-RLM, we don't have aggregate usage yet — return zeros
+        result.map(|text| (text, crate::monad::otel::TokenUsage::default()))
     }
 
     // ─── Functor: Morphisms (y(P) on query morphisms) ──────────────────
