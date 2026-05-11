@@ -7,8 +7,55 @@ name = "rig-rlm"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# 2026-05-11 — Finverse sandbox-worker split (see FINVERSE-HERMES.md).
+# Default build = slim sandbox worker. No GNN, no Burn, no lambda/λ-RLM,
+# no nuggets, no DSPy. Validate with:
+#   cargo check -p rig-rlm --no-default-features --features sandbox-worker
+#   cargo tree -p rig-rlm --no-default-features --features sandbox-worker | rg "hehrgnn|burn"
+default = ["sandbox-worker"]
+
+# Slim sandbox worker for embedding into the Finverse Hermes bridge.
+# Monad core + CodeExecutor trait + MicrosandboxExecutor + safety/exec_policy
+# + apply_patch (developer/worktree only) + session + persistence.
+#
+# v1 note: `channels` and `dev-pyo3` are currently pulled in by
+# `sandbox-worker` because `monad/context.rs`, `monad/action.rs`, and
+# `monad/monad.rs` reference `crate::channels::*` types directly, and the
+# default `AgentContext` uses `Pyo3CodeExecutor::new()`. Properly making
+# them opt-in is a `[GAP]` tracked in
+# `lancedb-integration/.../buildout-ledger-2026-05-11.md`.
+# Production policy still excludes PyO3 and arbitrary channel adapters
+# at runtime (see FINVERSE-HERMES.md §4 production profile).
+sandbox-worker = ["dep:microsandbox", "channels", "dev-pyo3"]
+
+# A2A HTTP server (axum/tower-http). Required for the post-demo
+# `code-executor-agent` A2A peer agent.
+a2a-worker = ["sandbox-worker", "dep:axum", "dep:tower-http", "dep:tokio-stream", "dep:async-stream", "dep:futures-util"]
+
+# Standalone MCP server binary. Coupled to nuggets memory; opt-in only.
+mcp-worker = ["research-rlm", "dep:rmcp"]
+
+# Restate durable workflow runtime.
+restate-worker = ["sandbox-worker", "dep:restate-sdk"]
+
+# Channels (Telegram + WebSocket). Currently entangled with monad core;
+# included by sandbox-worker (see note above). The webhook + ws spokes
+# use axum + futures-util, so pulling channels in pulls those too.
+channels = ["dep:teloxide", "dep:axum", "dep:tower-http", "dep:tokio-stream", "dep:async-stream", "dep:futures-util"]
+
+# Dev/test only PyO3 in-process Python executor. Never production.
+dev-pyo3 = ["dep:pyo3"]
+
+# Research stack: λ-RLM (lambda), nuggets HRR memory, DSPy optimization,
+# ARC-AGI bench, agent_metric/module/signature, pipeline.
+research-rlm = ["dep:dspy-rs"]
+
+# HEHRGNN GNN platform (pulls Burn). Off by default.
+gnn = ["dep:hehrgnn"]
+
 [dependencies]
-# Core
+# Core (always on — sandbox-worker minimum)
 oneshot = { version = "0.1.13", default-features = false }
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread"] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -23,101 +70,115 @@ anyhow = "1.0.101"
 dotenvy = "0.15"
 indexmap = "2.9.0"
 
-# LLM
+# LLM (monad/provider uses rig-core)
 rig-core = "0.30.0"
 reqwest = "0.12.28"
 
-# Execution
-pyo3 = { version = "0.28.1", features = ["auto-initialize"] }
-
-# Templates
+# Templates (monad/prompts uses tera)
 tera = "1.20.1"
 
-# Logging / Observability
+# Logging / Observability (always on)
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
 
-# OpenTelemetry + LangFuse (versions aligned with opentelemetry-langfuse 0.6)
+# OpenTelemetry + LangFuse (monad/otel uses opentelemetry-langfuse)
 opentelemetry = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 opentelemetry-langfuse = "0.6"
 
-# DSRs (prompt optimization)
-dspy-rs = "0.7.3"
-
-# Persistence
+# Persistence (always on)
 turso = { version = "0.4.4", default-features = false }
 
-# Multimodal (PDF/image processing)
+# Multimodal (monad/attachment uses pdf-extract)
 pdf-extract = "0.10"
 base64 = "0.22"
 
-# Sandbox
-microsandbox = "0.1.2"
-
-# Durable Execution
-restate-sdk = "0.7"
+# Misc utilities (always on — small deps)
 rayon = "1.10"
 similar = "2.7.0"
 dirs = "6.0.0"
 tokio-util = "0.7.18"
-
-# MCP Server
-rmcp = { version = "0.16", features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
-
-# Sync deps
 regex = "1.11"
-
-# Channels
-teloxide = { version = "0.17", features = ["macros"] }
-
-# A2A Server (HTTP)
-axum = { version = "0.8", features = ["macros", "ws"] }
-tower-http = { version = "0.6", features = ["cors"] }
-tokio-stream = "0.1"
-async-stream = "0.3"
-futures-util = "0.3"
 hashbrown = "0.16.1"
 corophage = "0.3.1"
 frunk_core = "0.4.4"
 
-hehrgnn = { path = "src/gnn/hehrgnn" }
+# ── Optional, feature-gated dependencies ────────────────────────────────
+
+# Execution / sandbox backends
+pyo3 = { version = "0.28.1", features = ["auto-initialize"], optional = true }
+microsandbox = { version = "0.1.2", optional = true }
+
+# Durable execution
+restate-sdk = { version = "0.7", optional = true }
+
+# MCP Server (for the standalone mcp-server bin)
+rmcp = { version = "0.16", features = ["server", "macros", "transport-io", "transport-streamable-http-server"], optional = true }
+
+# Channels (telegram)
+teloxide = { version = "0.17", features = ["macros"], optional = true }
+
+# A2A Server (HTTP)
+axum = { version = "0.8", features = ["macros", "ws"], optional = true }
+tower-http = { version = "0.6", features = ["cors"], optional = true }
+tokio-stream = { version = "0.1", optional = true }
+async-stream = { version = "0.3", optional = true }
+futures-util = { version = "0.3", optional = true }
+
+# DSRs (prompt optimization — research-rlm)
+dspy-rs = { version = "0.7.3", optional = true }
+
+# GNN platform (gnn feature)
+hehrgnn = { path = "src/gnn/hehrgnn", optional = true }
+
+# ── Binaries ────────────────────────────────────────────────────────────
+# Each bin declares its required-features so `--no-default-features
+# --features sandbox-worker` cleanly skips heavy bins.
 
 [[bin]]
 name = "rig-rlm"
 path = "src/main.rs"
+required-features = ["research-rlm"]
 
 [[bin]]
 name = "restate-server"
 path = "src/restate_server.rs"
+required-features = ["restate-worker"]
 
 [[bin]]
 name = "optimize_rlm"
 path = "src/bin/optimize_rlm.rs"
+required-features = ["gnn", "research-rlm"]
 
 [[bin]]
 name = "mcp-server"
 path = "src/bin/mcp_server.rs"
+required-features = ["mcp-worker"]
 
 [[bin]]
 name = "a2a-server"
 path = "src/bin/a2a_server.rs"
+required-features = ["a2a-worker", "research-rlm"]
 
 [[bin]]
 name = "ws-channel-demo"
 path = "src/bin/ws_channel_demo.rs"
+required-features = ["channels"]
 
 [[bin]]
 name = "ws-agent-demo"
 path = "src/bin/ws_agent_demo.rs"
+required-features = ["channels"]
 
 [[bin]]
 name = "ws-hub-demo"
 path = "src/bin/ws_hub_demo.rs"
+required-features = ["channels"]
 
 [[bin]]
 name = "cross-channel-demo"
 path = "src/bin/cross_channel_demo.rs"
+required-features = ["channels"]
 
 [dev-dependencies]
 tempfile = "3"

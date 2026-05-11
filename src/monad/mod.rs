@@ -33,7 +33,9 @@ pub mod project_doc;
 pub mod prompts;
 pub mod provider;
 pub mod recipe;
+#[cfg(feature = "restate-worker")]
 pub mod restate;
+#[cfg(feature = "restate-worker")]
 pub mod restate_helpers;
 pub mod truncation;
 

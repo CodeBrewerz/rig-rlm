@@ -26,8 +26,11 @@ pub mod planner;
 pub mod templates;
 pub mod yoneda;
 pub mod effects;
+// gepa_rlm + adaptive_yoneda depend on hehrgnn::optimizer::gepa; gate behind `gnn`.
+#[cfg(feature = "gnn")]
 pub mod gepa_rlm;
 pub mod profunctor;
+#[cfg(feature = "gnn")]
 pub mod adaptive_yoneda;
 pub mod rubric;
 pub mod harness;
@@ -44,6 +47,7 @@ pub use executor::{ExecutionMetrics, LambdaExecutor};
 pub use planner::{CostParams, ExecutionPlan, TaskType};
 pub use yoneda::{YonedaContext, QueryMorphism, YonedaEquivalence, yoneda_equivalence, check_naturality};
 pub use profunctor::{TypedPipeline, AsyncProfunctor, Profunctor};
+#[cfg(feature = "gnn")]
 pub use adaptive_yoneda::{AdaptiveYoneda, TrajectoryStore, MorphismPopulation, EvolutionResult, HyperCostModel, HyperMutator};
 pub use rubric::{RubricItem, RubricType, RubricBuffer, RubricMetrics, RetirementReport, HyperRubricGenerator};
 pub use harness::{EnvironmentSnapshot, MarkerGenerator, MarkedCommand, CompletionGate, StructuredStep, HarnessConfig, HarnessGenes, HarnessEvolver};

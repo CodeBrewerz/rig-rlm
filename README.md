@@ -2,6 +2,14 @@
 
 Monadic AI agent with durable execution, MCP server, A2A protocol support, sandboxed Python, DSPy-rs prompt optimization, and self-learning via Category Theory + HyperAgents.
 
+> **Finverse/Hermes integration note:** For the Finverse buildout, this repo is
+> adopted narrowly as a code-sandbox worker behind the Hermes Substrate Bridge.
+> See [`FINVERSE-HERMES.md`](FINVERSE-HERMES.md). That path uses
+> `CodeExecutor`, `MicrosandboxExecutor`, safety/policy preflights, HITL
+> suspend/resume, evidence/OTEL, and later A2A/Restate peer-agent mode. It
+> explicitly skips GNN, lambda self-learning, nuggets, DSPy optimization, and
+> replacing Hermes' user-channel loop.
+
 **Stack:** [Rig](https://rig.rs) (LLM) · [Restate](https://restate.dev) (durable execution) · [rmcp](https://crates.io/crates/rmcp) (MCP server) · [A2A](https://a2aproject.github.io/A2A/) (agent-to-agent) · [agentgateway](https://github.com/agentgateway/agentgateway) (proxy) · [PyO3](https://pyo3.rs) (Python sandbox) · [DSPy-rs](https://crates.io/crates/dspy) (optimization) · [Turso](https://turso.tech) (persistence) · [Burn](https://burn.dev) (GNN)
 
 ## Architecture
