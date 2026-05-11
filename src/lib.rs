@@ -26,6 +26,12 @@ pub mod session;
 // Pyo3CodeExecutor gated by dev-pyo3 inside the module).
 pub mod sandbox;
 
+// Finverse sandbox worker contract — typed task profiles + forced
+// production policy. See FINVERSE-HERMES.md §§4–7 and
+// `…/agent-gateway+kgent/rig-rlm-integration-2026-05-11.md` §3.
+#[cfg(feature = "sandbox-worker")]
+pub mod sandbox_worker;
+
 // Legacy pyo3+lambda+llm execution environment (research path only).
 #[cfg(feature = "research-rlm")]
 pub mod exec;

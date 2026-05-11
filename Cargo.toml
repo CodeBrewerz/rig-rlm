@@ -102,6 +102,7 @@ regex = "1.11"
 hashbrown = "0.16.1"
 corophage = "0.3.1"
 frunk_core = "0.4.4"
+sha2 = "0.10"
 
 # ── Optional, feature-gated dependencies ────────────────────────────────
 
