@@ -97,6 +97,28 @@ pub struct BridgeContext {
     pub capability_envelope_ref: Option<String>,
 }
 
+/// Model/agent-supplied input shape for `execute_code`.
+///
+/// This is what the LLM may emit through Hermes; the bridge accepts
+/// only this shape on the wire. Mission/agent/subject/origin IDs are
+/// **never** carried here — they're stamped by the bridge from
+/// authenticated session state and combined into a full
+/// [`SandboxTaskRequest`] internally.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxTaskInput {
+    pub task_kind: TaskKind,
+    pub sandbox_profile: SandboxProfile,
+    #[serde(default)]
+    pub input_artifact_refs: Vec<String>,
+    pub expected_output_schema: Option<String>,
+    pub purpose: String,
+    pub max_runtime_seconds: Option<u32>,
+}
+
+/// Full bridge-internal request shape: model input + bridge-stamped
+/// [`BridgeContext`]. Constructed by the bridge via
+/// [`SandboxTaskInput::with_context`]; never reach this from a wire
+/// deserialise of a model payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxTaskRequest {
     pub task_kind: TaskKind,
@@ -110,6 +132,24 @@ pub struct SandboxTaskRequest {
     pub context: BridgeContext,
 }
 
+impl SandboxTaskInput {
+    /// Bridge-only constructor: combine model-supplied input with the
+    /// authenticated [`BridgeContext`] the bridge derived from the
+    /// session. Calling this is the boundary at which model-supplied
+    /// fields meet bridge-supplied fields.
+    pub fn with_context(self, context: BridgeContext) -> SandboxTaskRequest {
+        SandboxTaskRequest {
+            task_kind: self.task_kind,
+            sandbox_profile: self.sandbox_profile,
+            input_artifact_refs: self.input_artifact_refs,
+            expected_output_schema: self.expected_output_schema,
+            purpose: self.purpose,
+            max_runtime_seconds: self.max_runtime_seconds,
+            context,
+        }
+    }
+}
+
 // ─── Response shape (worker → bridge) ───────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,13 +159,31 @@ pub struct ArtifactRef {
     pub source_artifact_ref: Option<String>,
 }
 
+/// Honest provenance of a candidate artifact.
+///
+/// `executor_state` distinguishes a real Microsandbox run from a v1
+/// stub. The bridge MUST reject any downstream `attach_artifact` for
+/// candidates whose `executor_state = Stub`; the UI/agent SHOULD label
+/// stub candidates as such. This protects against "the demo's
+/// hardcoded receipt JSON" being misread as extracted facts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provenance {
     pub runtime: String,
     pub executor: String,
+    pub executor_state: ExecutorState,
     pub policy_profile: String,
     pub image_digest: Option<String>,
     pub network_profile_hash: Option<String>,
+}
+
+/// Whether the candidate artifact came from a real sandbox execution
+/// (`Live`) or from the v1 contract scaffold (`Stub`). Wire format:
+/// kebab-case (`live`, `stub`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExecutorState {
+    Live,
+    Stub,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -338,6 +396,11 @@ impl SandboxWorker {
         let provenance = Provenance {
             runtime: "RigRlmRuntime".to_string(),
             executor: "MicrosandboxExecutor".to_string(),
+            // v1: the per-task Python templates aren't wired yet — the
+            // response below is a contract scaffold, not real Microsandbox
+            // output. Honest provenance so downstream attach_artifact can
+            // refuse it; flips to Live once Chunk 6 lands real templates.
+            executor_state: ExecutorState::Stub,
             policy_profile: self.policy.policy_profile_name.to_string(),
             image_digest: None, // pinned image plumbing is a follow-up
             network_profile_hash: Some(network_profile_hash(self.policy.network_profile)),
@@ -523,8 +586,18 @@ mod tests {
         assert!(a.artifact_digest.starts_with("sha256:"));
         assert_eq!(resp.provenance.runtime, "RigRlmRuntime");
         assert_eq!(resp.provenance.executor, "MicrosandboxExecutor");
+        // v1 stub: provenance must be honest about it.
+        assert_eq!(resp.provenance.executor_state, ExecutorState::Stub);
         assert_eq!(resp.provenance.policy_profile, "strict-code-exec");
         assert!(resp.patch_ref.is_none());
+    }
+
+    #[test]
+    fn executor_state_wire_shape_is_kebab_case() {
+        let live = serde_json::to_value(ExecutorState::Live).unwrap();
+        assert_eq!(live.as_str(), Some("live"));
+        let stub = serde_json::to_value(ExecutorState::Stub).unwrap();
+        assert_eq!(stub.as_str(), Some("stub"));
     }
 
     #[test]

@@ -391,6 +391,20 @@ print("Sentinel written")
 }
 
 // ─── PyO3 Persistent REPL Executor ──────────────────────────
+//
+// 2026-05-11: the entire PyO3 section is gated behind `dev-pyo3` so the
+// default `sandbox-worker` build doesn't link libpython. The module is
+// re-exported when the feature is enabled.
+
+#[cfg(feature = "dev-pyo3")]
+mod pyo3_executor {
+
+use crate::monad::ExecutionResult;
+use crate::monad::provider::{LlmProvider, ProviderConfig};
+use crate::session::{SessionConfig, extract_submit_result};
+use crate::safety::ExecutionLimits;
+use async_trait::async_trait;
+use super::{CodeExecutor, HELPER_TOOLKIT_CODE};
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -910,15 +924,55 @@ impl CodeExecutor for Pyo3CodeExecutor {
     }
 }
 
+} // mod pyo3_executor
+
+#[cfg(feature = "dev-pyo3")]
+pub use pyo3_executor::{
+    Pyo3CodeExecutor, RestateLlmBridge, init_context_memory_store, reset_context_memory_store,
+    set_restate_llm_bridge,
+};
+
+// ─── No-op fallback executor ─────────────────────────────────
+//
+// When neither PyO3 nor Microsandbox is wired (e.g. early
+// `AgentContext::new()` before `new_async`), agents still need *some*
+// `CodeExecutor` impl. This one refuses every call with a clear error
+// so it can never be mistaken for a working sandbox. Use only as the
+// default placeholder; replace via `set_executor` before any real run.
+
+/// A no-op `CodeExecutor` that returns an error on every call.
+///
+/// Used as the default in `AgentContext::new()` when `dev-pyo3` is not
+/// compiled in. Production code should always overwrite this with a
+/// `MicrosandboxExecutor` (via `create_executor` or
+/// `AgentContext::new_async`).
+#[derive(Debug, Default)]
+pub struct NoOpCodeExecutor;
+
+#[async_trait::async_trait]
+impl CodeExecutor for NoOpCodeExecutor {
+    async fn execute(&mut self, _code: &str) -> anyhow::Result<ExecutionResult> {
+        anyhow::bail!(
+            "NoOpCodeExecutor: no sandbox configured. Wire MicrosandboxExecutor \
+             via `AgentContext::new_async` or `create_executor`, or enable the \
+             `dev-pyo3` cargo feature for the in-process Python fallback."
+        )
+    }
+}
+
 // ─── Executor Factory ────────────────────────────────────────
 
 /// Which execution backend to use.
+///
+/// The `Pyo3` variant is only available when the `dev-pyo3` feature is
+/// enabled; default sandbox-worker builds expose Microsandbox only.
 #[derive(Debug, Clone, Default)]
 pub enum ExecutorKind {
     /// Microsandbox (hardware-isolated microVM) — primary.
+    #[default]
     Microsandbox,
     /// PyO3 (in-process, persistent REPL) — dev/test fallback.
-    #[default]
+    #[cfg(feature = "dev-pyo3")]
     Pyo3,
 }
 
@@ -930,6 +984,7 @@ pub async fn create_executor(kind: &ExecutorKind) -> anyhow::Result<Box<dyn Code
             let executor = MicrosandboxExecutor::new(&config).await?;
             Ok(Box::new(executor))
         }
+        #[cfg(feature = "dev-pyo3")]
         ExecutorKind::Pyo3 => Ok(Box::new(Pyo3CodeExecutor::new())),
     }
 }
@@ -1287,7 +1342,7 @@ def assert_status(resp, expected=200, msg=None):
 print("__TOOLKIT_READY__")
 "#;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "dev-pyo3"))]
 mod tests {
     use super::*;
 

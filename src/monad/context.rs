@@ -26,7 +26,9 @@ use super::monad::AgentMonad;
 use super::provider::{LlmProvider, ProviderConfig};
 use crate::channels;
 use crate::safety::{ExecutionLimits, sanitize_output, validate_code};
-use crate::sandbox::{CodeExecutor, ExecutorKind, Pyo3CodeExecutor, create_executor};
+use crate::sandbox::{CodeExecutor, ExecutorKind, NoOpCodeExecutor, create_executor};
+#[cfg(feature = "dev-pyo3")]
+use crate::sandbox::Pyo3CodeExecutor;
 use crate::session::SessionConfig;
 
 /// Configuration for the agent context.
@@ -58,7 +60,9 @@ impl Default for AgentConfig {
         Self {
             max_turns: 25,
             provider: ProviderConfig::local("qwen/qwen3-8b"),
-            executor_kind: ExecutorKind::Pyo3,
+            // 2026-05-11: default to Microsandbox (production path). The
+            // PyO3 fallback is only available when `dev-pyo3` is on.
+            executor_kind: ExecutorKind::default(),
             session: SessionConfig::default(),
             capabilities: Capabilities::root(),
             safety: ExecutionLimits::permissive(),
@@ -75,7 +79,7 @@ impl AgentConfig {
         Self {
             max_turns: 25,
             provider: ProviderConfig::openai(model, api_key),
-            executor_kind: ExecutorKind::Pyo3,
+            executor_kind: ExecutorKind::default(),
             session: SessionConfig::default(),
             capabilities: Capabilities::root(),
             safety: ExecutionLimits::permissive(),
@@ -95,7 +99,7 @@ impl AgentConfig {
         Self {
             max_turns: 25,
             provider: ProviderConfig::openai_compatible(name, model, base_url, api_key),
-            executor_kind: ExecutorKind::Pyo3,
+            executor_kind: ExecutorKind::default(),
             session: SessionConfig::default(),
             capabilities: Capabilities::root(),
             safety: ExecutionLimits::permissive(),
@@ -295,11 +299,21 @@ impl AgentContext {
     /// use `AgentContext::new_async()` which awaits sandbox creation.
     pub fn new(config: AgentConfig) -> Self {
         let provider = LlmProvider::new(config.provider.clone());
+        // 2026-05-11: synchronous constructor cannot build a Microsandbox
+        // (it needs an async server handshake). When `dev-pyo3` is on we
+        // keep the legacy in-process Python fallback; otherwise we install
+        // a NoOpCodeExecutor that errors on use. Callers that want real
+        // execution must use `new_async` (Microsandbox) or call
+        // `set_executor` before any `ExecuteCode` action.
+        #[cfg(feature = "dev-pyo3")]
+        let executor: Box<dyn CodeExecutor> = Box::new(Pyo3CodeExecutor::new());
+        #[cfg(not(feature = "dev-pyo3"))]
+        let executor: Box<dyn CodeExecutor> = Box::new(NoOpCodeExecutor);
         Self {
             history: ConversationHistory::new(),
             variables: HashMap::new(),
             provider,
-            executor: Box::new(Pyo3CodeExecutor::new()),
+            executor,
             config,
             turn: 0,
             session_ready: false,

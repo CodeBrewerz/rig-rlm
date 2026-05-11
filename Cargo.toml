@@ -19,15 +19,19 @@ default = ["sandbox-worker"]
 # Monad core + CodeExecutor trait + MicrosandboxExecutor + safety/exec_policy
 # + apply_patch (developer/worktree only) + session + persistence.
 #
-# v1 note: `channels` and `dev-pyo3` are currently pulled in by
-# `sandbox-worker` because `monad/context.rs`, `monad/action.rs`, and
-# `monad/monad.rs` reference `crate::channels::*` types directly, and the
-# default `AgentContext` uses `Pyo3CodeExecutor::new()`. Properly making
-# them opt-in is a `[GAP]` tracked in
-# `lancedb-integration/.../buildout-ledger-2026-05-11.md`.
-# Production policy still excludes PyO3 and arbitrary channel adapters
-# at runtime (see FINVERSE-HERMES.md §4 production profile).
-sandbox-worker = ["dep:microsandbox", "channels", "dev-pyo3"]
+# v1 note: `channels` is currently pulled in by `sandbox-worker` because
+# `monad/context.rs`, `monad/action.rs`, and `monad/monad.rs` reference
+# `crate::channels::*` types directly. Removing it is a structural
+# refactor (logged as [GAP] in
+# `lancedb-integration/.../buildout-ledger-2026-05-11.md`).
+#
+# 2026-05-11 audit fix: `dev-pyo3` is NO LONGER part of `sandbox-worker`.
+# The default `AgentContext::new()` falls back to a `NoOpCodeExecutor`
+# when pyo3 is not enabled; the bridge calls `SandboxWorker::run` which
+# routes through `MicrosandboxExecutor` regardless. Production policy
+# already forbids PyO3 at runtime (FINVERSE-HERMES.md §4); compile-time
+# gating now matches.
+sandbox-worker = ["dep:microsandbox", "channels"]
 
 # A2A HTTP server (axum/tower-http). Required for the post-demo
 # `code-executor-agent` A2A peer agent.
@@ -48,8 +52,9 @@ channels = ["dep:teloxide", "dep:axum", "dep:tower-http", "dep:tokio-stream", "d
 dev-pyo3 = ["dep:pyo3"]
 
 # Research stack: λ-RLM (lambda), nuggets HRR memory, DSPy optimization,
-# ARC-AGI bench, agent_metric/module/signature, pipeline.
-research-rlm = ["dep:dspy-rs"]
+# ARC-AGI bench, agent_metric/module/signature, pipeline. Pulls dev-pyo3
+# because exec.rs / Pyo3Executor / arc bench all link to libpython.
+research-rlm = ["dep:dspy-rs", "dev-pyo3"]
 
 # HEHRGNN GNN platform (pulls Burn). Off by default.
 gnn = ["dep:hehrgnn"]

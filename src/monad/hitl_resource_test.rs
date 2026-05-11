@@ -4,7 +4,7 @@
 //! the blocking ELICIT Python function, and state preservation.
 //! Uses Pyo3 executor directly (no microsandbox server needed).
 
-#[cfg(test)]
+#[cfg(all(test, feature = "dev-pyo3"))]
 mod hitl_resource_tests {
     use crate::sandbox::{CodeExecutor, Pyo3CodeExecutor};
     use crate::session::SessionConfig;
