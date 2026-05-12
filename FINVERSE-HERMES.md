@@ -66,9 +66,10 @@ Target feature shape:
 default = ["sandbox-worker"]
 sandbox-worker = ["microsandbox", "rmcp"]
 a2a-worker = ["sandbox-worker"]
-restate-worker = ["restate-sdk"]
+persistence = ["turso"]
+restate-worker = ["sandbox-worker", "persistence", "restate-sdk"]
 dev-pyo3 = ["pyo3"]
-research-rlm = ["dspy-rs"]
+research-rlm = ["dspy-rs", "dev-pyo3", "persistence"]
 gnn = ["hehrgnn"]
 ```
 
@@ -79,7 +80,9 @@ cargo tree -p rig-rlm --no-default-features --features sandbox-worker
 ```
 
 The output must not include `hehrgnn`, `burn`, `burn-wgpu`, or the GNN test
-stack.
+stack. It also must not include `turso`; Finverse bridge crates link their own
+substrate Turso stack, so Turso-backed `rig-rlm` memory stays behind the
+explicit `persistence` feature rather than the default sandbox-worker surface.
 
 ## 4. Production profile
 
@@ -206,4 +209,3 @@ endpoint is not the product path.
 8. Verify microsandbox server lifecycle locally and in target k8s profile.
 9. Add tests proving no default build pulls `hehrgnn` and no production profile
    uses PyO3.
-

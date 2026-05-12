@@ -18,6 +18,7 @@ pub mod monad;
 pub mod apply_patch;
 pub mod cancellation;
 pub mod exec_policy;
+#[cfg(feature = "persistence")]
 pub mod persistence;
 pub mod safety;
 pub mod session;

@@ -429,6 +429,7 @@ impl AgentContext {
     /// Called at session end. Uses a quick LLM call to identify preferences,
     /// decisions, facts, and learnings worth remembering. Each extracted memory
     /// is embedded and stored in the `memories` table for future recall.
+    #[cfg(feature = "persistence")]
     pub async fn extract_and_store_memories(&self, session_id: &str) -> anyhow::Result<usize> {
         use crate::persistence::{AgentStore, Memory};
 
@@ -527,6 +528,7 @@ impl AgentContext {
     ///
     /// Embeds the task description, queries the vector index for top-K matches,
     /// and returns a formatted string suitable for injection into the system prompt.
+    #[cfg(feature = "persistence")]
     pub async fn recall_relevant_memories(&self, task: &str, top_k: usize) -> Option<String> {
         use crate::persistence::AgentStore;
 

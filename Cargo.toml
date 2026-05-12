@@ -33,6 +33,11 @@ default = ["sandbox-worker"]
 # gating now matches.
 sandbox-worker = ["dep:microsandbox", "channels"]
 
+# Turso-backed agent/session memory. Keep this out of `sandbox-worker` so
+# bridge crates can embed the worker contract without linking a second Turso
+# core next to the substrate's current Turso stack.
+persistence = ["dep:turso"]
+
 # A2A HTTP server (axum/tower-http). Required for the post-demo
 # `code-executor-agent` A2A peer agent.
 a2a-worker = ["sandbox-worker", "dep:axum", "dep:tower-http", "dep:tokio-stream", "dep:async-stream", "dep:futures-util"]
@@ -41,7 +46,7 @@ a2a-worker = ["sandbox-worker", "dep:axum", "dep:tower-http", "dep:tokio-stream"
 mcp-worker = ["research-rlm", "dep:rmcp"]
 
 # Restate durable workflow runtime.
-restate-worker = ["sandbox-worker", "dep:restate-sdk"]
+restate-worker = ["sandbox-worker", "persistence", "dep:restate-sdk"]
 
 # Channels (Telegram + WebSocket). Currently entangled with monad core;
 # included by sandbox-worker (see note above). The webhook + ws spokes
@@ -54,7 +59,7 @@ dev-pyo3 = ["dep:pyo3"]
 # Research stack: λ-RLM (lambda), nuggets HRR memory, DSPy optimization,
 # ARC-AGI bench, agent_metric/module/signature, pipeline. Pulls dev-pyo3
 # because exec.rs / Pyo3Executor / arc bench all link to libpython.
-research-rlm = ["dep:dspy-rs", "dev-pyo3"]
+research-rlm = ["dep:dspy-rs", "dev-pyo3", "persistence"]
 
 # HEHRGNN GNN platform (pulls Burn). Off by default.
 gnn = ["dep:hehrgnn"]
@@ -91,8 +96,8 @@ opentelemetry = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 opentelemetry-langfuse = "0.6"
 
-# Persistence (always on)
-turso = { version = "0.4.4", default-features = false }
+# Persistence (agent/session memory; opt-in)
+turso = { version = "0.4.4", default-features = false, optional = true }
 
 # Multimodal (monad/attachment uses pdf-extract)
 pdf-extract = "0.10"
@@ -184,7 +189,7 @@ required-features = ["channels"]
 [[bin]]
 name = "cross-channel-demo"
 path = "src/bin/cross_channel_demo.rs"
-required-features = ["channels"]
+required-features = ["channels", "dev-pyo3"]
 
 [dev-dependencies]
 tempfile = "3"
