@@ -276,6 +276,10 @@ pub enum SandboxWorkerError {
     ExecutionFailed(String),
     /// Real digesting / network sandboxing / image pinning still pending.
     NotYetImplemented(&'static str),
+    /// A caller-supplied input artifact (e.g. a code blob / fixture) was malformed,
+    /// unreadable, or failed schema validation before execution. A caller-input fault,
+    /// distinct from a policy violation or a runtime failure.
+    InvalidInputArtifact(String),
 }
 
 impl std::fmt::Display for SandboxWorkerError {
@@ -295,6 +299,7 @@ impl std::fmt::Display for SandboxWorkerError {
             ),
             Self::ExecutionFailed(s) => write!(f, "execution failed: {s}"),
             Self::NotYetImplemented(s) => write!(f, "not yet implemented: {s}"),
+            Self::InvalidInputArtifact(s) => write!(f, "invalid input artifact: {s}"),
         }
     }
 }
@@ -333,10 +338,7 @@ impl SandboxWorker {
 
     /// Validate a request against the production policy, without executing.
     /// Used for unit tests and as the bridge-side dry-run check.
-    pub fn validate(
-        &self,
-        request: &SandboxTaskRequest,
-    ) -> Result<(), SandboxWorkerError> {
+    pub fn validate(&self, request: &SandboxTaskRequest) -> Result<(), SandboxWorkerError> {
         // Profile / task-kind compatibility.
         match request.sandbox_profile {
             SandboxProfile::CodeExecEphemeral => {
@@ -359,9 +361,7 @@ impl SandboxWorker {
 
         // Patch is only meaningful under worktree profile, and even there it
         // only emits a candidate ref — never an apply.
-        if matches!(request.task_kind, TaskKind::PatchDryRun)
-            && !self.policy.apply_patch_enabled
-        {
+        if matches!(request.task_kind, TaskKind::PatchDryRun) && !self.policy.apply_patch_enabled {
             return Err(SandboxWorkerError::PolicyViolation(
                 "patch_dry_run requires strict_worktree policy",
             ));
@@ -521,32 +521,35 @@ mod tests {
     #[test]
     fn receipt_extract_ok_in_ephemeral() {
         let w = SandboxWorker::new_strict();
-        w.validate(&req(TaskKind::ReceiptExtract, SandboxProfile::CodeExecEphemeral))
-            .unwrap();
+        w.validate(&req(
+            TaskKind::ReceiptExtract,
+            SandboxProfile::CodeExecEphemeral,
+        ))
+        .unwrap();
     }
 
     #[test]
     fn cargo_check_rejected_in_ephemeral() {
         let w = SandboxWorker::new_strict();
         let err = w
-            .validate(&req(TaskKind::CargoCheck, SandboxProfile::CodeExecEphemeral))
+            .validate(&req(
+                TaskKind::CargoCheck,
+                SandboxProfile::CodeExecEphemeral,
+            ))
             .unwrap_err();
-        assert!(matches!(
-            err,
-            SandboxWorkerError::ProfileMismatch { .. }
-        ));
+        assert!(matches!(err, SandboxWorkerError::ProfileMismatch { .. }));
     }
 
     #[test]
     fn receipt_extract_rejected_in_worktree() {
         let w = SandboxWorker::new_strict_worktree();
         let err = w
-            .validate(&req(TaskKind::ReceiptExtract, SandboxProfile::WorktreeMedium))
+            .validate(&req(
+                TaskKind::ReceiptExtract,
+                SandboxProfile::WorktreeMedium,
+            ))
             .unwrap_err();
-        assert!(matches!(
-            err,
-            SandboxWorkerError::ProfileMismatch { .. }
-        ));
+        assert!(matches!(err, SandboxWorkerError::ProfileMismatch { .. }));
     }
 
     #[test]
@@ -555,12 +558,12 @@ mod tests {
         // PatchDryRun is a worktree-only task; pairing with ephemeral fails
         // at profile mismatch first.
         let err = w
-            .validate(&req(TaskKind::PatchDryRun, SandboxProfile::CodeExecEphemeral))
+            .validate(&req(
+                TaskKind::PatchDryRun,
+                SandboxProfile::CodeExecEphemeral,
+            ))
             .unwrap_err();
-        assert!(matches!(
-            err,
-            SandboxWorkerError::ProfileMismatch { .. }
-        ));
+        assert!(matches!(err, SandboxWorkerError::ProfileMismatch { .. }));
     }
 
     #[test]
@@ -576,7 +579,10 @@ mod tests {
     async fn run_returns_typed_candidate_artifact_with_digest() {
         let w = SandboxWorker::new_strict();
         let resp = w
-            .run(req(TaskKind::ReceiptExtract, SandboxProfile::CodeExecEphemeral))
+            .run(req(
+                TaskKind::ReceiptExtract,
+                SandboxProfile::CodeExecEphemeral,
+            ))
             .await
             .unwrap();
         assert_eq!(resp.task_kind, TaskKind::ReceiptExtract);
@@ -602,7 +608,10 @@ mod tests {
 
     #[test]
     fn request_serializes_with_snake_case_task_kind() {
-        let r = req(TaskKind::CsvLedgerPreview, SandboxProfile::CodeExecEphemeral);
+        let r = req(
+            TaskKind::CsvLedgerPreview,
+            SandboxProfile::CodeExecEphemeral,
+        );
         let s = serde_json::to_string(&r).unwrap();
         assert!(s.contains("\"task_kind\":\"csv_ledger_preview\""));
         assert!(s.contains("\"sandbox_profile\":\"code-exec-ephemeral\""));
